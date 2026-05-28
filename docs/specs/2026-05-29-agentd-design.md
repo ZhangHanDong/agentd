@@ -21,7 +21,7 @@
 
 **Non-goals**: own memory system, own message bus, own IM protocol, own LLM SDK, multi-tenant SaaS, Windows native, distributed multi-host (v0).
 
-**MVP success**: An operator types `/run start <issue>` in a Robrix room, a 5-agent team (spec-writer / implementer / 3 adversarial reviewers — claude-sec, codex-perf, gemini-readability) walks issue → spec → plan → impl → review → PR, and `kill -9` of the daemon resumes cleanly from checkpoint. The `draft_plan` step does **not** spawn a planner agent in MVP; it shells out to `agent-spec plan` via a `tool` node. Estimated effort ≈ 1320 agent-rounds across 10 P0 phases.
+**MVP success**: An operator types `/run start <issue>` in a Robrix room, a 5-agent team (spec-writer / implementer / 3 adversarial reviewers — claude-sec, codex-perf, gemini-readability) walks issue → spec → plan → impl → review → PR, and `kill -9` of the daemon resumes cleanly from checkpoint. The `draft_plan` step does **not** spawn a planner agent in MVP; it shells out to `agent-spec plan` via a `tool` node. Estimated effort ≈ 1420 agent-rounds across 10 P0 phases.
 
 ---
 
@@ -396,6 +396,9 @@ CREATE TABLE task_runs (
 CREATE TABLE review_runs (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES runs(id),
+    node_id TEXT NOT NULL,                 -- fan_out node that parked; lets the engine
+                                           -- resolve (run_id, node_id) from a review_run_id
+                                           -- when a verdict event arrives
     task_run_id TEXT NOT NULL REFERENCES task_runs(id),
     context_sha TEXT NOT NULL, bundle_path TEXT NOT NULL,
     visibility TEXT NOT NULL, aggregator TEXT NOT NULL,
@@ -1087,7 +1090,12 @@ Excluded from P0: dashboard write-mode, multi-project parallelism, headless back
 | P0.7  | HTTP+SSE + MCP server (assign_task, submit_review, check_inbox)      | 5     | 18        | 140    | dashboard subscribes; agent submits verdict         |
 | P0.8  | Shipped workflows + `agentctl install-skills`                        | 3     | 10        | 80     | all three .dot pass `flow validate`                 |
 | P0.9  | E2E + disaster recovery drill (kill -9, mempal offline)              | 5     | 18        | 160    | nightly e2e 5/5                                     |
-| **P0**| **total**                                                            | **51**| **187**   | **≈1320** | **MVP demo-ready**                              |
+| **P0**| **total**                                                            | **51**| **187**   | **1420** | **MVP demo-ready**                              |
+
+> The rounds column sums to 1420 (60+240+140+180+110+90+220+140+80+160). Earlier
+> drafts carried a "≈1320" headline here and in §0 — that was an arithmetic slip;
+> 1420 is the correct sum. Scenario counts (187) are the design rough-cut; the
+> executable P0.0–P0.2 plans enumerate finer selectors (see roadmap, 222 total).
 
 ≈ 4–6 weeks calendar with one agent team (1 implementer + 1 reviewer) running near-full; ≈ 6–8 weeks if a single agent sequentially (human spec review is the bottleneck).
 
