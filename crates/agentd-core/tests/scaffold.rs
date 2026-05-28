@@ -65,10 +65,13 @@ fn scaffold_workspace_deps_pinned() {
 
 #[test]
 fn scaffold_local_check_script_runs() {
-    // GATED: skipped unless AGENTD_RUN_SCRIPT_SMOKE=1, because scripts/check.sh
-    // itself runs `cargo nextest run --workspace`, which would re-invoke this
-    // test -> infinite recursion. CI sets the env var in a dedicated job that
-    // does not call check.sh recursively.
+    // GATED: this is an opt-in local smoke test, run only when
+    // AGENTD_RUN_SCRIPT_SMOKE=1. It is NOT run in CI (no job sets the var) and
+    // is skipped by default. scripts/check.sh itself runs
+    // `cargo nextest run --workspace`, which re-enters this very test — so to
+    // avoid infinite recursion we `env_remove` the trigger variable when
+    // spawning check.sh. The nested test invocation then sees the var unset
+    // and early-returns, breaking the recursion at depth 1.
     if std::env::var("AGENTD_RUN_SCRIPT_SMOKE").ok().as_deref() != Some("1") {
         eprintln!("skipping: set AGENTD_RUN_SCRIPT_SMOKE=1 to enable");
         return;
@@ -78,6 +81,7 @@ fn scaffold_local_check_script_runs() {
     let status = Command::new("bash")
         .arg(&script)
         .current_dir(repo_root())
+        .env_remove("AGENTD_RUN_SCRIPT_SMOKE") // break recursion in the nested run
         .status()
         .expect("failed to run check.sh");
     assert!(status.success(), "scripts/check.sh exited non-zero");
