@@ -2,7 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+// No `Eq`: serde_json::Value contains f64. PartialEq is enough for tests/checkpoints.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RunContext(pub serde_json::Map<String, serde_json::Value>);
 
 impl RunContext {

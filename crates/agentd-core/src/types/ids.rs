@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 
 macro_rules! id_newtype {
     ($name:ident, $prefix:literal) => {
-        #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        // Ord/PartialOrd enable use as keys in ordered maps (e.g. Checkpoint's
+        // retry_counts: BTreeMap<NodeId, u32>) for deterministic JSON key order.
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
         pub struct $name(String);
 
         impl $name {
