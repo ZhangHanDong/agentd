@@ -10,8 +10,11 @@ repository.workspace = true
 [lints]
 workspace = true
 
+# `test-support` gates the in-memory `ports` fakes (src/test_support). It pulls
+# no extra deps — the fakes use only std + the crate's own types + async-trait.
+# It is NOT a default feature, so it never compiles into a release binary.
 [features]
-test-support = ["dep:tempfile", "dep:tokio-test"]
+test-support = []
 
 [dependencies]
 tokio = { workspace = true }
@@ -24,11 +27,11 @@ futures = "0.3"
 sha2 = "0.10"
 ulid = { version = "1", features = ["serde"] }
 
-# Optional, test-support feature only
-tempfile = { workspace = true, optional = true }
-tokio-test = { version = "0.4", optional = true }
-
 [dev-dependencies]
+# Self dev-dependency enabling `test-support`: makes the in-memory fakes visible
+# to this crate's own integration tests/examples without enabling the feature in
+# a release build and without special flags in scripts/check.sh.
+agentd-core = { path = ".", features = ["test-support"] }
 tempfile = { workspace = true }
 tokio-test = "0.4"
 pretty_assertions = "1"
