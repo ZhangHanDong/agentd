@@ -1,0 +1,10 @@
+msrv = "1.85"
+
+# clippy::large_enum_variant threshold for enum sizes we tolerate.
+enum-variant-size-threshold = 200
+
+# clippy::too_many_arguments threshold — engine functions are honest about wide args
+too-many-arguments-threshold = 8
+
+# clippy::cognitive_complexity threshold — bumped for state-machine code in core
+cognitive-complexity-threshold = 30
