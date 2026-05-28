@@ -42,8 +42,8 @@ Phases P0.3 / P0.4 / P0.5 / P0.6 / P0.7 are **siblings** once P0.2 is done — t
 
 | Phase | Title | Specs | Scenarios | Rounds | Plan doc | Status |
 |-------|-------|-------|-----------|--------|----------|--------|
-| P0.0  | Workspace + CI + agent-spec lifecycle + hello-world      | 3 | 8   | 60   | [`p0.0-workspace-and-ci.md`](./2026-05-29-agentd-p0.0-workspace-and-ci.md)   | planned |
-| P0.1  | Core domain + Workflow Engine + InMemoryStore (no I/O)   | 8 | 35  | 240  | [`p0.1-core-and-engine.md`](./2026-05-29-agentd-p0.1-core-and-engine.md)     | planned |
+| P0.0  | Workspace + CI + agent-spec lifecycle + hello-world      | 3 | 9   | 60   | [`p0.0-workspace-and-ci.md`](./2026-05-29-agentd-p0.0-workspace-and-ci.md)   | planned |
+| P0.1  | Core domain + Workflow Engine + InMemoryStore (no I/O)   | 8 | 54  | 240  | [`p0.1-core-and-engine.md`](./2026-05-29-agentd-p0.1-core-and-engine.md)     | planned |
 | P0.2  | Storage layer (sqlx + 14 tables + migrations + 5 repos)  | 5 | 18  | 140  | [`p0.2-storage.md`](./2026-05-29-agentd-p0.2-storage.md)                     | planned |
 | P0.3  | TmuxBackend v0 (FakeRunner-tested)                       | 7 | 24  | 180  | _generate via writing-plans at phase start_                                  | deferred |
 | P0.4  | mempal MCP client + outbox drainer + consistency check   | 4 | 16  | 110  | _generate via writing-plans_                                                 | deferred |
@@ -52,7 +52,12 @@ Phases P0.3 / P0.4 / P0.5 / P0.6 / P0.7 are **siblings** once P0.2 is done — t
 | P0.7  | HTTP+SSE + MCP server (5 tools per §4.12.1)              | 5 | 18  | 140  | _generate via writing-plans_                                                 | deferred |
 | P0.8  | Shipped DOT workflows + `agentctl install-skills`        | 3 | 10  | 80   | _generate via writing-plans_                                                 | deferred |
 | P0.9  | E2E + disaster recovery drills                           | 5 | 18  | 160  | _generate via writing-plans_                                                 | deferred |
-| **Σ** |                                                          | **51** | **187** | **≈1320** | | |
+| **Σ** |                                                          | **51** | **209** | **≈1320** | | |
+
+> Scenario counts are derived from each phase's plan-detail file when one exists,
+> otherwise from the phase-outline below. The total drifted upward from the
+> design doc's §7.2 estimate (187) because P0.0 and P0.1 plans enumerate finer
+> test selectors than the design estimate did. The round budget (1320) is unchanged.
 
 ---
 

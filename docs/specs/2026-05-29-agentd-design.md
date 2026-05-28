@@ -125,9 +125,11 @@ If `.agentflow/` is missing in a project, daemon falls back to its built-in copy
 | `goal_gate`     | bool                                | terminal nodes can't exit until all `goal_gate=true` nodes have SUCCESS                                |
 | `retry_policy`  | `max=N,backoff=...,jitter=...`      | per-node retry                                                                                         |
 | `timeout_secs`  | int                                 | per-execution cap                                                                                      |
-| `aggregator`    | `any_fail` / `majority_pass` / ...  | fan_in only                                                                                            |
-| `visibility`    | `blind` / `after_submit` / `chain`  | fan_out only — reviewer cross-visibility                                                               |
+| `aggregator`    | `any_fail` / `majority_pass` / `unanimous_pass` / `first_blocker` / `converge_or_<fallback>` | fan_in only. The `converge_or_<X>` family iterates Delphi rounds and falls back to `<X>` if `max_rounds` exhausts (see §5.7.1) |
+| `visibility`    | `blind` / `after_submit` / `chain` / `delphi` | fan_out only — reviewer cross-visibility. `delphi` (P1+) runs N rounds: round 1 blind, rounds 2..N each reviewer sees peers' anonymized findings and may revise (see §5.7.1) |
 | `bundle`        | `frozen` / `live`                   | fan_out only — context freezing policy                                                                 |
+| `max_rounds`    | int (default 1)                     | fan_out + fan_in pair only. `1` = one-shot (current MVP). `≥ 2` requires `visibility=delphi` and a `converge_or_*` aggregator |
+| `convergence`   | `verdict_stable` / `findings_diff<0.1`  | fan_out only when `visibility=delphi`. Decides when a Delphi round counts as converged (see §5.7.1)    |
 | `condition`     | bool expr                           | edge attribute (attractor-style)                                                                       |
 
 ### 2.3 Outcome Model
@@ -166,6 +168,19 @@ When a `parallel.fan_out handler` runs:
 5. fan_in node runs `aggregator`, emits Outcome.
 
 Bundle is **frozen** (same `context_sha` for all reviewers); stance packs are **per-reviewer deliberately diverse** (this preserves adversarial multi-perspective without redundancy).
+
+### 2.5.1 Delphi mode (deferred to P1+)
+
+For hard review questions where a single blind pass leaves reviewers uninformed about each other's reasoning, the fan_out node may set `visibility=delphi` with `max_rounds ≥ 2`. Semantics:
+
+- **Round 1**: identical to `blind` mode — each reviewer submits independently.
+- **Rounds 2..max_rounds**: each reviewer receives an anonymized digest of all peer findings from the previous round and may revise their verdict and findings. The Bundle does not change (`context_sha` stays frozen); only the per-reviewer stance packs grow.
+- **Convergence**: declared when all reviewers' verdicts are unchanged from the previous round (`convergence=verdict_stable`) OR the structural diff between consecutive findings drops below a threshold (`convergence=findings_diff<0.1`).
+- **Fallback**: if `max_rounds` exhausts before convergence, the paired `parallel.fan_in` node with `aggregator=converge_or_<fallback>` applies `<fallback>` (`majority_pass` etc.) to the final round.
+
+**Trade-offs**: Delphi multiplies token cost by `max_rounds`; surfaces the cost estimate in `runs.cost_estimate` (a P1 field). Designers should default to one-shot `blind` and only escalate to `delphi` for review nodes that historically produce N reviewers split 1-1-1.
+
+**MVP status**: schema reserved; `visibility=delphi` rejected by `flow validate` until P1.4 implements the round loop. The reservation lets DOT authors begin discussing the option without P0 implementation cost. Borrowed from the convergence loop pattern in Anthropic's "dynamic workflows in Claude Code" announcement, but with explicit per-round protocol rather than opaque LLM-driven iteration.
 
 ### 2.6 Spec Generation Sub-graph (human-in-loop)
 
@@ -1087,7 +1102,7 @@ P0.6 may be split into 6a (120r: slash + wait.human delivery) and 6b (100r: full
 | P1.1 | Dashboard (axum + htmx) with write mode; run timeline / wait.human cards            | 200    |
 | P1.2 | wait.human multi-channel (DM / dashboard / CLI) with tiered timeout reminders        | 80     |
 | P1.3 | Worktree pool: explicit lock, concurrent task_run isolation, cleanup policy          | 120    |
-| P1.4 | Per-reviewer stance pack: distinct mempal_search queries; prompt profile system      | 100    |
+| P1.4 | Per-reviewer stance pack: distinct mempal_search queries; prompt profile system; **Delphi-mode review loop** (visibility=delphi + converge_or_* aggregator, §2.5.1) | 140    |
 | P1.5 | Integrate `agent-spec discover --from-codebase` (Phase 9) as bootstrap workflow      | 60     |
 | P1.6 | Webhook hardening: signature verify, replay protection, idempotency                  | 80     |
 | P1.7 | More built-in workflows: bugfix-rapid, docs-only, refactor-only, spike               | 120    |
@@ -1159,6 +1174,7 @@ Each sunset requires a `sunset-<feature>.spec.md` defining trigger, migration pa
 | claude/codex CLI major upgrade breaks banner probe                                | high | med    | patterns in config (§4.7)                             |
 | `wait.human` over-used → human review fatigue                                     | med  | high   | shipped DOT templates wait only at spec + final review |
 | Adversarial review cost explosion at N=3                                          | med  | med    | per-reviewer stance pack diversifies angles, not redundancy |
+| Delphi mode tokens explode at N×max_rounds (P1+)                                  | low  | med    | hard cap `max_rounds ≤ 5`; surface `cost_estimate` before run; default visibility stays `blind` |
 | Matrix room spam                                                                  | low  | low    | trust=audit + later rate-limit                        |
 | GitHub webhook delivery delay/loss                                                | med  | med    | webhook + 10-min polling double safety                |
 | Daemon crash loses checkpoint                                                     | low  | high   | fsync checkpoint + WAL fsync; e2e includes kill-9    |
