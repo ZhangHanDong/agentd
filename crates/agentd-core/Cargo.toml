@@ -12,3 +12,6 @@ workspace = true
 
 [dependencies]
 # crate-specific deps come in later phases
+
+[dev-dependencies]
+tempfile = { workspace = true }

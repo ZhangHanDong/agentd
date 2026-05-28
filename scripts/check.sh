@@ -26,9 +26,20 @@ fi
 have_specs() { [ -d specs ] && find specs -name '*.spec' -o -name '*.spec.md' 2>/dev/null | grep -q .; }
 
 echo "==> [4/7] agent-spec lifecycle"
+# `agent-spec lifecycle` takes ONE spec file (not a glob) and --format is
+# text|json|md (NOT prompt-summary). Loop over every spec; run once per file
+# and fail loudly (printing full output) on the first non-zero exit.
 if command -v agent-spec >/dev/null 2>&1; then
     if have_specs; then
-        agent-spec lifecycle 'specs/**/*.spec*' --code . --min-score 0.7 --format prompt-summary
+        while IFS= read -r spec; do
+            if out=$(agent-spec lifecycle "$spec" --code . --min-score 0.7 --format text 2>&1); then
+                echo "    -- $spec: $(echo "$out" | grep -Eo 'Pass rate: [0-9.]+%' | tail -1)"
+            else
+                echo "    -- $spec: FAILED"
+                echo "$out"
+                exit 1
+            fi
+        done < <(find specs -name '*.spec' -o -name '*.spec.md' | sort)
     else
         echo "    no specs/ yet; skipping (specs land in P0.0 Task 7+)"
     fi
