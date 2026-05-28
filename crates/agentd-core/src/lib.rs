@@ -10,9 +10,10 @@
 // Production-only lint opt-ins. Test files don't pick these up.
 #![warn(clippy::unwrap_used, clippy::panic)]
 
-// NOTE (build order): only modules that exist as of P0.1 Task 1 are declared
-// here. Later tasks add their own `pub mod` line when they create the module:
-// Task 2 → dot, Task 3 → graph, Task 6.5 → ports + test_support, Task 7 → handler.
+// NOTE (build order): only modules that exist as of the current P0.1 task are
+// declared here. Later tasks add their own `pub mod` line when they create the
+// module: Task 3 → graph, Task 6.5 → ports + test_support, Task 7 → handler.
+pub mod dot;
 pub mod engine;
 pub mod error;
 pub mod types;
