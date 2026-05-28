@@ -5,6 +5,8 @@
 - **Audience**: Implementers (Rust), Reviewers, integrators of mempal / agent-spec / Robrix
 - **Scope**: A Rust replacement for agent-chat that fuses (a) octos-tui's clean trait-first architecture, (b) attractor's DOT-based workflow engine, (c) mempal's memory + cowork-bus, and (d) agent-spec's task contracts — all addressable through a Matrix-native chat surface (Robrix) plus an ops dashboard.
 
+> **⚠️ ROLE BOUNDARY (authoritative): [`2026-05-29-agentd-specify-boundary.md`](2026-05-29-agentd-specify-boundary.md).** This design doc predates the Robrix/Specify/agentd three-system split and reads in places as if agentd owns issues, spec review, freeze, the canonical lifecycle state machine, and the Matrix Application Service. **It does not.** agentd is the **local execution runtime**; those concerns belong to the separate **Specify** web project. Where this doc and the boundary doc conflict, **the boundary doc wins**. Per-section deltas: §2 workflow (single `issue-to-pr.dot` → `draft.dot` + `execute.dot`, review+freeze in Specify — Δ1); §2.6 spec sub-graph (`wait.human`/freeze move to Specify, agentd only drafts + pushes — Δ2/Δ4); §3.3 `issues` table (cache pulled from Specify, not a GitHub mirror — Δ3, already patched); §5 Matrix (agentd is a dispatch listener/notifier, NOT the MAS — Δ5). A full §-by-§ reframe is the deferred Δ9 doc pass; this banner is the interim guard.
+
 ---
 
 ## 0. Executive Summary
@@ -320,18 +322,21 @@ CREATE TABLE project_agents (
     PRIMARY KEY (project_id, agent_id)
 );
 
--- issues (mirror of GitHub admitted to a workflow)
+-- issues — per-run CACHE of issue context PULLED FROM SPECIFY (boundary Δ3).
+-- NOT a GitHub mirror, NOT a source of truth: Specify owns issues. `id` is
+-- Specify's issue id; github_number is optional metadata. (Standalone mode may
+-- populate from a local file / GitHub for dev convenience.)
 CREATE TABLE issues (
-    id TEXT PRIMARY KEY,                  -- "<project>:<gh#>"
+    id TEXT PRIMARY KEY,                  -- Specify issue id (e.g. "ACME-742")
     project_id TEXT NOT NULL REFERENCES projects(id),
-    github_number INTEGER NOT NULL,
+    github_number INTEGER,                -- nullable: only if Specify reports a GitHub backing
     title TEXT NOT NULL, body TEXT NOT NULL,
     labels TEXT NOT NULL,                 -- JSON
     state TEXT NOT NULL,
     workflow_dot TEXT,
-    fetched_at INTEGER NOT NULL,
-    UNIQUE (project_id, github_number)
+    fetched_at INTEGER NOT NULL
 );
+CREATE UNIQUE INDEX idx_issues_github ON issues(project_id, github_number) WHERE github_number IS NOT NULL;
 
 -- workflow runs
 CREATE TABLE runs (

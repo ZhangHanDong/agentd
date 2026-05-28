@@ -136,6 +136,12 @@ For each deferred phase, this section captures the **deliverable inventory** so 
 - the test selectors expected
 - exit criteria
 
+> **Boundary deltas to fold in when planning these phases** (see [`docs/specs/2026-05-29-agentd-specify-boundary.md`](../specs/2026-05-29-agentd-specify-boundary.md) §6). The outlines below predate Path B; when you `writing-plans` a phase, apply its delta:
+> - **P0.5 GitHub** — Δ6: GitHub is owned by **Specify**, not agentd. P0.5 shrinks to "execution-time PR open via a Specify-provisioned token" (no issue webhook, no issue mirroring, no status-check ownership). Most of the original P0.5 surface moves to Specify; consider folding the remnant into P0.8 or a thin `agentd-github` PR-only helper.
+> - **P0.6 Matrix** — Δ5: agentd is a **dispatch listener + execution notifier**, NOT the Matrix Application Service. The slash-command authority (`/start`, `/execute`, `/spec-approve`) and the canonical state machine live in **Specify**. P0.6 narrows to: connect to the Matrix server via bridge, receive work-token/DAG dispatch, post execution notifications, relay `agent.blocked` decisions. Drop the spec-approval slash router.
+> - **P0.8 Shipped DOT** — Δ1: ship **`draft.dot`** (fetch issue from Specify → propose_spec → lint → push draft to Specify) and **`execute.dot`** (pull frozen spec from Specify → plan → impl → verify → adversarial review → PR → report) instead of one `issue-to-pr.dot`. Human review + freeze happen in Specify *between* the two.
+> - **New P1 phase — `agentd-specify` client** — Δ7: thin outbound client (pull issue / push draft / pull frozen spec / report semantic events). Not in P0; agentd runs standalone in P0 (boundary §7).
+
 ### P0.3 — TmuxBackend v0
 
 - **Crate**: `crates/agentd-tmux/`
