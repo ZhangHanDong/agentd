@@ -1,0 +1,10 @@
+[build]
+# Speed up CI by sharing the target dir across crates (default behavior, but explicit)
+
+[term]
+verbose = false
+
+[net]
+git-fetch-with-cli = true
+
+# Per-platform link tweaks omitted; add when actually needed.

@@ -1,0 +1,72 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/agentd-core",
+    "crates/agentd-tmux",
+    "crates/agentd-store",
+    "crates/agentd-mempal",
+    "crates/agentd-github",
+    "crates/agentd-matrix",
+    "crates/agentd-surface",
+    "crates/agentd-bin",
+    "crates/agentctl",
+]
+
+[workspace.package]
+# Edition 2024 stabilized in Rust 1.85; resolver = 3 stabilized in 1.84.
+# Keep MSRV at 1.85 so both are guaranteed. Bump cautiously in future.
+edition = "2024"
+rust-version = "1.85"
+authors = ["AlexZ <blackanger.z@gmail.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ZhangHanDong/agentd"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# DO NOT put `unwrap_used` / `expect_used` / `panic` here at the workspace level.
+# Workspace lints propagate to ALL targets including `tests/`, where panicking
+# on assertion failure is correct behavior. Instead, each production crate's
+# `lib.rs` / `main.rs` opts in via `#![warn(clippy::unwrap_used, clippy::panic)]`.
+# Test files inherit nothing and stay clean.
+# Allow some pedantic noise that's not worth the friction:
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+# Allow `.expect("why")` everywhere — it IS explicit error handling per CLAUDE.md.
+
+[workspace.dependencies]
+tokio = { version = "1.49", features = ["full"] }
+thiserror = "2"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+clap = { version = "4", features = ["derive"] }
+
+# Pin major external deps used across crates so versions don't drift
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "macros", "migrate"] }
+axum = "0.7"
+matrix-sdk = { version = "0.9", default-features = false, features = ["e2e-encryption", "sqlite"] }
+octocrab = "0.42"
+rmcp = "0.1"
+
+# Dev-only
+tempfile = "3"
+mockall = "0.13"
+wiremock = "0.6"
+
+[profile.dev]
+opt-level = 0
+debug = "full"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
