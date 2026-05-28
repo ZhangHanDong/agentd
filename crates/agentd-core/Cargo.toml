@@ -10,8 +10,25 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+test-support = ["dep:tempfile", "dep:tokio-test"]
+
 [dependencies]
-# crate-specific deps come in later phases
+tokio = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+async-trait = "0.1"
+futures = "0.3"
+sha2 = "0.10"
+ulid = { version = "1", features = ["serde"] }
+
+# Optional, test-support feature only
+tempfile = { workspace = true, optional = true }
+tokio-test = { version = "0.4", optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio-test = "0.4"
+pretty_assertions = "1"
