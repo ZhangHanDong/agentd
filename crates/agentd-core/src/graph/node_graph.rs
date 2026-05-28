@@ -104,7 +104,26 @@ impl NodeGraph {
     /// invalid per design §2.7.
     pub fn from_ast(ast: &DotGraph) -> Result<Self, CoreError> {
         let mut violations: Vec<String> = Vec::new();
+        let graph = Self::build(ast, &mut violations);
+        validate::run(&graph, &mut violations);
+        if violations.is_empty() {
+            Ok(graph)
+        } else {
+            Err(CoreError::GraphValidate(violations.join("; ")))
+        }
+    }
 
+    /// Build a `NodeGraph` from a parsed DOT graph WITHOUT the §2.7 validation
+    /// pass. Intended for tests and tooling that operate on graph fragments;
+    /// unknown handlers become `None` rather than violations. Production callers
+    /// should use [`Self::from_ast`].
+    #[must_use]
+    pub fn from_ast_unvalidated(ast: &DotGraph) -> Self {
+        let mut sink: Vec<String> = Vec::new();
+        Self::build(ast, &mut sink)
+    }
+
+    fn build(ast: &DotGraph, violations: &mut Vec<String>) -> Self {
         let nodes: Vec<NodeDef> = ast
             .nodes
             .iter()
@@ -138,18 +157,10 @@ impl NodeGraph {
             })
             .collect();
 
-        let graph = Self {
+        Self {
             name: ast.name.clone(),
             nodes,
             edges,
-        };
-
-        validate::run(&graph, &mut violations);
-
-        if violations.is_empty() {
-            Ok(graph)
-        } else {
-            Err(CoreError::GraphValidate(violations.join("; ")))
         }
     }
 

@@ -1,3 +1,4 @@
+pub mod edge_select;
 pub mod node_graph;
 pub mod validate;
 
