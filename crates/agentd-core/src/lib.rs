@@ -12,10 +12,11 @@
 
 // NOTE (build order): only modules that exist as of the current P0.1 task are
 // declared here. Later tasks add their own `pub mod` line when they create the
-// module: Task 3 → graph, Task 6.5 → ports + test_support, Task 7 → handler.
+// module: Task 6.5 → ports + test_support, Task 7 → handler.
 pub mod dot;
 pub mod engine;
 pub mod error;
+pub mod graph;
 pub mod types;
 
 pub use engine::{EngineEvent, HandlerStep, ParkReason, RunProgress};
