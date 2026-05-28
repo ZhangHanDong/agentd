@@ -125,11 +125,11 @@ If `.agentflow/` is missing in a project, daemon falls back to its built-in copy
 | `goal_gate`     | bool                                | terminal nodes can't exit until all `goal_gate=true` nodes have SUCCESS                                |
 | `retry_policy`  | `max=N,backoff=...,jitter=...`      | per-node retry                                                                                         |
 | `timeout_secs`  | int                                 | per-execution cap                                                                                      |
-| `aggregator`    | `any_fail` / `majority_pass` / `unanimous_pass` / `first_blocker` / `converge_or_<fallback>` | fan_in only. The `converge_or_<X>` family iterates Delphi rounds and falls back to `<X>` if `max_rounds` exhausts (see §5.7.1) |
-| `visibility`    | `blind` / `after_submit` / `chain` / `delphi` | fan_out only — reviewer cross-visibility. `delphi` (P1+) runs N rounds: round 1 blind, rounds 2..N each reviewer sees peers' anonymized findings and may revise (see §5.7.1) |
+| `aggregator`    | `any_fail` / `majority_pass` / `unanimous_pass` / `first_blocker` / `converge_or_<fallback>` | fan_in only. The `converge_or_<X>` family iterates Delphi rounds and falls back to `<X>` if `max_rounds` exhausts (see §2.5.1) |
+| `visibility`    | `blind` / `after_submit` / `chain` / `delphi` | fan_out only — reviewer cross-visibility. `delphi` (P1+) runs N rounds: round 1 blind, rounds 2..N each reviewer sees peers' anonymized findings and may revise (see §2.5.1) |
 | `bundle`        | `frozen` / `live`                   | fan_out only — context freezing policy                                                                 |
 | `max_rounds`    | int (default 1)                     | fan_out + fan_in pair only. `1` = one-shot (current MVP). `≥ 2` requires `visibility=delphi` and a `converge_or_*` aggregator |
-| `convergence`   | `verdict_stable` / `findings_diff<0.1`  | fan_out only when `visibility=delphi`. Decides when a Delphi round counts as converged (see §5.7.1)    |
+| `convergence`   | `verdict_stable` / `findings_diff<0.1`  | fan_out only when `visibility=delphi`. Decides when a Delphi round counts as converged (see §2.5.1)    |
 | `condition`     | bool expr                           | edge attribute (attractor-style)                                                                       |
 
 ### 2.3 Outcome Model
@@ -1095,7 +1095,7 @@ P0.6 may be split into 6a (120r: slash + wait.human delivery) and 6b (100r: full
 
 ### 7.3 P1 / P2 / P3 / P4 (recommended order, not yet committed)
 
-**P1 — make v1 actually nice to use** (~760 rounds, 4-6 weeks after P0):
+**P1 — make v1 actually nice to use** (~800 rounds, 4-6 weeks after P0):
 
 | Pack | Scope                                                                                | rounds |
 | ---- | ------------------------------------------------------------------------------------ | ------ |
