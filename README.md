@@ -2,7 +2,7 @@
 
 A Rust daemon that orchestrates multi-agent software workflows. Drop-in successor to [agent-chat](../../consult/agent-chat) with a typed workflow engine, formal review semantics, and clean integration with [mempal](../mempal), [agent-spec](../../FW/rust-agents/agent-spec), and Robrix.
 
-**Status**: Design phase. See [`docs/specs/2026-05-29-agentd-design.md`](docs/specs/2026-05-29-agentd-design.md).
+**Status**: P0.0 complete (workspace + CI + scaffold). Design: [`docs/specs/2026-05-29-agentd-design.md`](docs/specs/2026-05-29-agentd-design.md). **Role boundary** (authoritative where it conflicts with the design doc): [`docs/specs/2026-05-29-agentd-specify-boundary.md`](docs/specs/2026-05-29-agentd-specify-boundary.md) — agentd is the **local execution runtime**; the web project-context / spec-collaboration layer (**Specify**) is a separate project on top. The "What it does" sketch below predates that boundary and is reframed in a later doc pass.
 
 ## What it does
 
@@ -37,6 +37,40 @@ crates/agentctl/        # CLI client
 workflows/              # shipped .dot templates
 specs/                  # agent-spec contracts for agentd itself
 docs/specs/             # design + spec docs
+```
+
+## Building
+
+Requires Rust stable (MSRV 1.85), tmux 3.3+, and the `agent-spec` CLI:
+
+```bash
+cargo build --workspace
+```
+
+Optional but recommended local tooling:
+
+```bash
+cargo install --locked cargo-nextest cargo-deny agent-spec
+```
+
+## Testing
+
+Run the full local quality gate (mirrors CI):
+
+```bash
+./scripts/check.sh
+```
+
+Just the Rust tests:
+
+```bash
+cargo nextest run --workspace
+```
+
+Specific crate:
+
+```bash
+cargo nextest run -p agentd-core
 ```
 
 ## License
