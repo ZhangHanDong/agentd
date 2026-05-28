@@ -13,7 +13,7 @@
 
 **Solution**: A single Rust daemon (`agentd`) that:
 
-1. Runs `.agentflow/*.dot` workflows (attractor-shaped: Parse→Transform→Validate→Initialize→Execute→Finalize) with built-in handlers `codergen` / `wait.human` / `conditional` / `parallel.fan_out` / `parallel.fan_in` / `tool` / `stack.manager_loop`.
+1. Runs `.agentflow/*.dot` workflows (attractor-shaped: Parse→Transform→Validate→Initialize→Execute→Finalize) with six built-in handlers in P0: `codergen` / `wait.human` / `conditional` / `parallel.fan_out` / `parallel.fan_in` / `tool`. The seventh attractor handler, `stack.manager_loop`, is deferred to P1+.
 2. Spawns and drives agent processes through an `AgentBackend` trait; v0 ships `TmuxBackend` only, using octos-tui's safe buffer-path prompt injection.
 3. Persists operational state in its own SQLite (`~/.agentd/agentd.db`); never writes to mempal's `palace.db`. Talks to mempal exclusively through its MCP server.
 4. Bridges a Matrix room per project (Robrix is the primary client) into the workflow engine via typed slash commands; routes inter-agent messages through mempal cowork-bus, not its own bus.
@@ -21,7 +21,7 @@
 
 **Non-goals**: own memory system, own message bus, own IM protocol, own LLM SDK, multi-tenant SaaS, Windows native, distributed multi-host (v0).
 
-**MVP success**: An operator types `/run start <issue>` in a Robrix room, a 4-agent team (spec-writer / planner / implementer / 2 adversarial reviewers) walks issue → spec → plan → impl → review → PR, and `kill -9` of the daemon resumes cleanly from checkpoint. Estimated effort ≈ 1320 agent-rounds across 10 P0 phases.
+**MVP success**: An operator types `/run start <issue>` in a Robrix room, a 5-agent team (spec-writer / implementer / 3 adversarial reviewers — claude-sec, codex-perf, gemini-readability) walks issue → spec → plan → impl → review → PR, and `kill -9` of the daemon resumes cleanly from checkpoint. The `draft_plan` step does **not** spawn a planner agent in MVP; it shells out to `agent-spec plan` via a `tool` node. Estimated effort ≈ 1320 agent-rounds across 10 P0 phases.
 
 ---
 
@@ -35,9 +35,9 @@
 │                                                                │
 │  Workflow Engine (attractor-shaped, DOT files)                 │
 │      Parse→Transform→Validate→Initialize→Execute→Finalize     │
-│      handlers: codergen/wait.human/conditional/                │
-│                parallel.fan_out/parallel.fan_in/tool/          │
-│                stack.manager_loop                              │
+│      handlers (P0): codergen/wait.human/conditional/           │
+│                     parallel.fan_out/parallel.fan_in/tool      │
+│      handlers (deferred to P1+): stack.manager_loop            │
 │      goal_gate · retry · per-node checkpoint                   │
 │                                                                │
 │  AgentBackend trait → TmuxBackend(v0)  [spawn/drive only]      │
@@ -283,7 +283,14 @@ CREATE TABLE projects (
 CREATE TABLE agents (
     id TEXT PRIMARY KEY,                  -- e.g. "claude-impl-a"
     mxid TEXT NOT NULL UNIQUE,
-    role TEXT NOT NULL,                   -- spec-writer|planner|implementer|reviewer
+    role TEXT NOT NULL,                   -- spec-writer | implementer | reviewer
+                                          -- NOTE: 'planner' role is reserved but
+                                          -- unused in MVP. The canonical workflow
+                                          -- runs draft_plan as a `tool` node
+                                          -- (`agent-spec plan ...`) rather than
+                                          -- spawning a planner agent. Re-add the
+                                          -- role only if a future workflow needs
+                                          -- a dialogue-driven planner.
     backend TEXT NOT NULL,                -- "tmux" (v0)
     backend_target TEXT,
     prompt_profile TEXT,
@@ -318,6 +325,14 @@ CREATE TABLE runs (
     issue_id TEXT REFERENCES issues(id),
     workflow_path TEXT NOT NULL,
     workflow_sha TEXT NOT NULL,           -- sha of .dot file at start
+                                          -- Resume policy: on `agentctl resume`,
+                                          -- daemon recomputes sha of workflow_path.
+                                          -- If unchanged → resume normally.
+                                          -- If changed → refuse resume; require
+                                          -- `--accept-workflow-change` flag, which
+                                          -- restarts from the current node using
+                                          -- the new graph (with a logged warning).
+                                          -- No silent re-validation against new graph.
     status TEXT NOT NULL,                 -- pending|running|blocked|succeeded|failed|abandoned
     started_at INTEGER NOT NULL,
     finished_at INTEGER,
@@ -450,7 +465,7 @@ On drift between git and mempal, git wins; mempal re-ingest.
 
 ### 3.6 Migrations and Retention
 
-- Schema migration: `sqlx migrate run` on start. Each migration file recorded in `schema_meta`. No automatic down-migration; rollback requires explicit `agentctl db rollback` + reverse SQL file.
+- Schema migration: `sqlx migrate run` on start. Each migration file recorded in `schema_meta`. **No down-migrations in v0.** If a schema change must be rolled back, the operator restores `agentd.db` from a known-good backup; we do not maintain reverse-SQL files. A future `agentctl db rollback` is plausible but not in MVP.
 - Run retention: 14 days active → 14–90 days archived as `runs/.archive/<id>.tar.zst` → deleted at 90 days. Configurable.
 - ReviewBundle: permanent (small, audit value).
 - Events: 30-day rolling. Older → archive NDJSON.zst.
@@ -634,6 +649,65 @@ Seven core test cases, all using `FakeRunner` (no real tmux):
 
 Run: `cargo test -p agentd-tmux --no-fail-fast`.
 
+### 4.12 MCP Tool Registries (input/output shapes)
+
+Two registries are referenced throughout the doc. Pinning their shapes here prevents drift between workflow validation (§2.7), the rmcp server (§7.2 P0.7), and DOT authors.
+
+#### 4.12.1 agentd-exposed MCP server tools
+
+The daemon runs an rmcp server (stdio transport) per agent process. Agents (claude-code / codex running inside a tmux pane) call these to interact with the workflow engine.
+
+| Tool             | Inputs                                                                                                       | Outputs                                                                                          | Failure modes                                                       |
+| ---------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------- |
+| `assign_task`    | `{ run_id: str, node_id: str, agent_id: str }`                                                               | `{ task_run_id: str, worktree: str, spec_path: str?, plan_path: str?, context_pack: str? }`     | `not_assigned` if engine has no pending task for this agent         |
+| `submit_review`  | `{ review_run_id: str, reviewer_id: str, verdict: "pass"\|"concern"\|"blocker", findings: Finding[] }`       | `{ accepted: bool, fan_in_pending: int }` (fan_in_pending = how many more reviewers we're waiting on) | `already_submitted` (idempotent: same payload returns accepted=true; different payload errors) |
+| `check_inbox`    | `{ agent_id: str, drain: bool = false }`                                                                     | `{ messages: InboxMessage[] }` — pulled from mempal cowork-bus on behalf of the agent           | none (empty list on no messages)                                    |
+| `submit_outcome` | `{ run_id, node_id, attempt, status, context_updates: JSON, artifacts: ArtifactRef[], preferred_label?, suggested_next?[] }` | `{ recorded: bool, next_node: str? }`                                                            | `stale_attempt` if checkpoint already moved past                    |
+| `query_run`     | `{ run_id: str }`                                                                                            | `{ status, current_node, completed_nodes: str[], context: JSON }`                                | `not_found`                                                          |
+
+```rust
+pub struct Finding {
+    pub severity: "critical" | "high" | "medium" | "low" | "info",
+    pub location: { file: str, line?: u32, span?: (u32, u32) },
+    pub claim: str,
+    pub evidence: str,  // quote from diff or referenced file
+}
+
+pub struct ArtifactRef {
+    pub kind: "spec" | "plan" | "diff" | "transcript" | "verdict" | "context-pack",
+    pub path: str,       // absolute path under ~/.agentd
+    pub sha256: str,     // daemon verifies on receipt
+    pub bytes: u64,
+}
+
+pub struct InboxMessage {
+    pub from: str,       // agent_id (mempal cowork-bus)
+    pub at: i64,         // unix secs
+    pub body: str,
+    pub thread_hint: str?,
+}
+```
+
+The MCP server publishes these via rmcp's `tools/list` so claude-code / codex auto-discover them. Each tool implements idempotency for safe retries except `submit_outcome` (which is strictly append-once per `(run_id, node_id, attempt)`).
+
+#### 4.12.2 mempal MCP tools referenced by DOT `pre_tools` / `post_action`
+
+These are mempal's existing MCP surface (we are a client). The closed set legal in `pre_tools` / `post_action` comma-lists:
+
+| Tool                       | Usage in DOT                                              | Shape (mempal-defined; abbreviated)                              |
+| -------------------------- | --------------------------------------------------------- | ---------------------------------------------------------------- |
+| `mempal_search`            | `pre_tools="mempal_search(wing=$project, kind='spec')"`   | input: `{ query, wing?, room?, limit? }` → `{ hits: Drawer[] }` |
+| `mempal_ingest`            | `post_action="mempal_ingest(importance=5, kind='spec')"`  | input: `{ wing, kind, body, importance, source_file? }` → `{ drawer_id }` |
+| `mempal_kg add`            | `post_action="mempal_kg add ${s} ${p} ${o}"`              | input: `{ subject, predicate, object, source_drawer? }` → `{ triple_id }` |
+| `mempal_kg query`          | `pre_tools="mempal_kg query(predicate='derived_from')"`   | input: `{ subject?, predicate?, object? }` → `{ triples: Triple[] }` |
+| `mempal_fact_check`        | `pre_tools="mempal_fact_check"`                           | input: `{ text, wing?, room?, now? }` → `{ issues: FactIssue[] }` |
+| `mempal_peek_partner`      | `pre_tools="mempal_peek_partner"`                         | input: `{ target: "claude"\|"codex" }` → `{ session_excerpt }`  |
+| `mempal_cowork_push`       | adapter-internal (not in DOT)                             | input: `{ to: agent_id, from: agent_id, body }` → `{ delivered_transport }` |
+
+The validation pass at §2.7 enforces that every `pre_tools` / `post_action` token resolves to one of the agentd-side tools (4.12.1) or one of these mempal tools (4.12.2). Anything else → `flow validate` error.
+
+`matrix.post` and `github.status_push` are short-hands inside `post_action` only; they are routed by the agentd `WorkflowExecutor` directly (not MCP calls) since the daemon already holds Matrix and GitHub adapter handles.
+
 ---
 
 ## 5. Matrix Adapter + Robrix Integration
@@ -803,6 +877,8 @@ Inherited from agent-chat:
 
 Default `audit`. **Agent MXIDs are never operators** (prevents agent self-approval of its own spec).
 
+**Operator identification (v0)**: operator MXIDs come from `[matrix] operator_mxids = [...]` in `config.toml` (already shown in §5.2). The list is hot-reloadable via SIGHUP — `ArcSwap<HashSet<UserId>>` in `MatrixAdapter` (§5.11). Matrix room power-levels are **ignored** in v0 to keep the trust source single. v2 may add a DB-backed `operators` table for runtime mutation through `/agentd-op add/remove`; for MVP, edit config and SIGHUP.
+
 ### 5.10 Robrix Conventions (no code changes required)
 
 - bot MXID published in README; user invites `@agentd:<server>` then runs `/agentd-bind`
@@ -894,7 +970,7 @@ jobs:
   spec-guard:        agent-spec guard (dangling selectors, orphan specs)
   dot-validate:      agentctl flow validate workflows/*.dot
   docs:              cargo doc --no-deps + mdbook test
-  cross-deps-sanity: rg 'palace.db' crates/ must fail (no boundary violations)
+  cross-deps-sanity: rg 'palace.db' crates/ MUST return no matches (rg exits non-zero) — fails CI otherwise
   e2e-nightly:       schedule-only; real tmux + synapse-in-docker + real mempal
 ```
 
@@ -1091,13 +1167,15 @@ Each sunset requires a `sunset-<feature>.spec.md` defining trigger, migration pa
 
 ### 7.8 MVP Demo Acceptance (8 steps)
 
+Team composition (MVP, matches Appendix C): **5 agents** in the room — 1 spec-writer + 1 implementer + 3 reviewers (`claude-sec` / `codex-perf` / `gemini-readability`). No spawned planner agent (`draft_plan` is a `tool` node).
+
 1. `/create-issue "Refactor PaneRouter to remove the static singleton"` in Robrix → bot replies with GitHub issue #42 + workflow start
 2. spec-writer renders draft spec in room → bot card 🟡 Spec review needed
 3. operator `/spec-changes r_xxx "narrow boundaries to lib/pane/"` → spec-writer re-emits v2 → lint → new card
 4. operator `/spec-approve r_xxx` → ✍️ finalized + git commit
 5. implementer runs in tmux, progress visible in room
-6. agent-spec lifecycle passes → review fan_out → 3 reviewers post verdicts in thread
-7. aggregator majority_pass → ✅ → bot opens PR + posts to room
+6. `agent-spec lifecycle` passes → review fan_out → 3 reviewers post verdicts in their respective threads
+7. aggregator `majority_pass` → ✅ → bot opens PR + posts to room
 8. `kill -9` of daemon → `systemctl restart agentd` → progress resumes from checkpoint
 
 All 8 steps green = MVP success.
