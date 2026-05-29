@@ -96,14 +96,17 @@ impl InMemoryStore {
 #[async_trait::async_trait]
 impl Store for InMemoryStore {
     async fn insert_run(&self, run_id: &RunId, workflow_sha: &str) -> Result<(), CoreError> {
-        self.lock().runs.insert(
-            run_id.as_str().to_string(),
-            RunRow {
+        // Idempotent first-wins (parity with SqliteStore's ON CONFLICT DO NOTHING):
+        // a re-insert preserves the existing row rather than demoting it to Running
+        // with a cleared cursor.
+        self.lock()
+            .runs
+            .entry(run_id.as_str().to_string())
+            .or_insert_with(|| RunRow {
                 workflow_sha: workflow_sha.to_string(),
                 status: RunStatus::Running,
                 current_node: None,
-            },
-        );
+            });
         Ok(())
     }
 

@@ -26,6 +26,9 @@ pub enum RunStatus {
 #[async_trait::async_trait]
 pub trait Store: Send + Sync {
     // ---- runs -------------------------------------------------------------
+    /// Create the run row. **Idempotent first-wins**: a re-insert of an existing
+    /// `run_id` preserves the existing row (it does NOT reset status/cursor), so
+    /// a daemon-pre-created rich run row survives the engine's `insert_run`.
     async fn insert_run(&self, run_id: &RunId, workflow_sha: &str) -> Result<(), CoreError>;
     async fn update_run_status(&self, run_id: &RunId, status: RunStatus) -> Result<(), CoreError>;
     async fn set_current_node(&self, run_id: &RunId, node_id: &NodeId) -> Result<(), CoreError>;

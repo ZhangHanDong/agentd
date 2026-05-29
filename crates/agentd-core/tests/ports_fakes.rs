@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use agentd_core::CoreError;
 use agentd_core::ports::{
-    AgentBackend, Clock, CommandOutput, CommandRunner, MempalClient, RunOpts, Store,
+    AgentBackend, Clock, CommandOutput, CommandRunner, MempalClient, RunOpts, RunStatus, Store,
 };
 use agentd_core::test_support::{
     FakeBackend, FixedClock, InMemoryStore, MempalStub, RecordingCommandRunner,
@@ -192,5 +192,28 @@ async fn in_memory_store_completed_task_run_no_longer_parks() {
             .expect("lookup after complete"),
         None,
         "completed task run no longer parks (replayed event is a no-op)"
+    );
+}
+
+#[tokio::test]
+async fn in_memory_store_insert_run_is_idempotent_first_wins() {
+    // Parity with SqliteStore's ON CONFLICT DO NOTHING: a re-insert of an
+    // existing run must NOT reset it (the prior bug demoted a Finished run to
+    // Running and cleared the cursor).
+    let store = InMemoryStore::new();
+    let run = RunId::from_string("r");
+    store.insert_run(&run, "sha1").await.expect("first insert");
+    store
+        .update_run_status(&run, RunStatus::Finished)
+        .await
+        .expect("finish");
+    store
+        .insert_run(&run, "sha2")
+        .await
+        .expect("re-insert is a no-op");
+    assert_eq!(
+        store.run_status(&run),
+        Some(RunStatus::Finished),
+        "first-wins: a re-insert must not reset status to Running"
     );
 }

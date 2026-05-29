@@ -89,3 +89,9 @@ Scenario: A completed task run no longer parks
   Given an open task run that resolves via lookup_park_by_task_run
   When complete_task_run is called
   Then lookup_park_by_task_run returns None (a replayed event is a no-op)
+
+Scenario: insert_run is idempotent first-wins
+  Test: in_memory_store_insert_run_is_idempotent_first_wins
+  Given a run that has been inserted and marked Finished
+  When insert_run is called again for the same id
+  Then the run stays Finished (a re-insert does not reset it; parity with SqliteStore)
