@@ -23,7 +23,11 @@ confidence-threshold = 0.93
 
 [bans]
 multiple-versions = "warn"
+# Registry deps must be version-pinned (no `*`), but workspace-internal path
+# deps (agentctl -> agentd-core, and agentd-core's self test-support dev-dep)
+# are intentionally version-less path references, not real wildcards.
 wildcards = "deny"
+allow-wildcard-paths = true
 highlight = "all"
 
 [sources]

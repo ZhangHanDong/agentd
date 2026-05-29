@@ -6,6 +6,10 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+# Application CLI, not a crates.io library: keeps its version-less path dep on
+# agentd-core out of cargo-deny's wildcard ban (allow-wildcard-paths applies to
+# private crates only).
+publish = false
 
 [lints]
 workspace = true
