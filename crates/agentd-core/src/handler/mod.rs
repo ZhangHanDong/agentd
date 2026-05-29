@@ -3,13 +3,21 @@
 //! `Park` (external work: `wait.human`/`fan_out`/`fan_in`/`codergen`, Task 8).
 //! The engine (Task 9) drives them via the [`HandlerRegistry`].
 
+pub mod codergen;
 pub mod conditional;
+pub mod fan_in;
+pub mod fan_out;
 pub mod registry;
 pub mod tool;
+pub mod wait_human;
 
+pub use codergen::CodergenHandler;
 pub use conditional::ConditionalHandler;
+pub use fan_in::FanInHandler;
+pub use fan_out::FanOutHandler;
 pub use registry::HandlerRegistry;
 pub use tool::ToolHandler;
+pub use wait_human::WaitHumanHandler;
 
 use crate::CoreError;
 use crate::engine::{EngineEvent, HandlerStep};
@@ -127,6 +135,25 @@ pub(crate) fn sha256_hex(data: &[u8]) -> String {
         let _ = write!(out, "{b:02x}");
     }
     out
+}
+
+/// Build a `SpawnRequest` for `role` with sensible P0.1 defaults (claude-code
+/// CLI, direct launch, cwd worktree). Shared by `codergen` and `fan_out`.
+#[must_use]
+pub(crate) fn spawn_request(
+    role: &str,
+    initial_prompt: Option<String>,
+) -> crate::types::SpawnRequest {
+    use crate::types::{AgentId, CliKind, LaunchStrategy, SpawnRequest};
+    SpawnRequest {
+        agent_id: AgentId::parsed(role),
+        mxid: None,
+        cli: CliKind::ClaudeCode,
+        worktree: std::path::PathBuf::from("."),
+        initial_prompt,
+        env_overrides: std::collections::HashMap::new(),
+        launch_strategy: LaunchStrategy::Direct,
+    }
 }
 
 /// What runs at a node. Object-safe via `#[async_trait]` so the registry can

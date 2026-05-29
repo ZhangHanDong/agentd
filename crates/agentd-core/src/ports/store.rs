@@ -9,7 +9,7 @@
 
 use crate::CoreError;
 use crate::engine::Checkpoint;
-use crate::types::{AgentId, NodeId, Outcome, ReviewRunId, RunId, TaskRunId};
+use crate::types::{NodeId, Outcome, ReviewRunId, ReviewVerdict, RunId, TaskRunId};
 
 /// Lifecycle state of a run row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,21 +18,6 @@ pub enum RunStatus {
     Parked,
     Finished,
     Failed,
-}
-
-/// A reviewer's vote in a fan-out review. `fan_in` aggregates these.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VerdictValue {
-    Pass,
-    Fail,
-    Block,
-}
-
-/// One recorded review verdict.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReviewVerdict {
-    pub reviewer_id: AgentId,
-    pub value: VerdictValue,
 }
 
 /// Durable run/outcome/park state the engine depends on. All methods are

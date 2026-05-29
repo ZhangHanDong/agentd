@@ -4,7 +4,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::graph::HandlerKind;
-use crate::handler::{ConditionalHandler, Handler, ToolHandler};
+use crate::handler::{
+    CodergenHandler, ConditionalHandler, FanInHandler, FanOutHandler, Handler, ToolHandler,
+    WaitHumanHandler,
+};
 
 /// Maps each node kind to its handler implementation.
 #[derive(Clone, Default)]
@@ -26,13 +29,18 @@ impl HandlerRegistry {
         Self::default()
     }
 
-    /// Registry with the synchronous P0.1 handlers registered. Task 8 adds the
-    /// park-style handlers (`wait.human`/`fan_out`/`fan_in`/`codergen`).
+    /// Registry with all six P0.1 handlers registered: the synchronous
+    /// `conditional`/`tool` and the park-style `wait.human`/`fan_out`/`fan_in`/
+    /// `codergen`.
     #[must_use]
     pub fn with_builtins() -> Self {
         let mut reg = Self::new();
         reg.register(HandlerKind::Conditional, Arc::new(ConditionalHandler));
         reg.register(HandlerKind::Tool, Arc::new(ToolHandler));
+        reg.register(HandlerKind::WaitHuman, Arc::new(WaitHumanHandler));
+        reg.register(HandlerKind::ParallelFanOut, Arc::new(FanOutHandler));
+        reg.register(HandlerKind::ParallelFanIn, Arc::new(FanInHandler));
+        reg.register(HandlerKind::Codergen, Arc::new(CodergenHandler));
         reg
     }
 

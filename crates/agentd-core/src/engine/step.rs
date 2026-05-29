@@ -3,6 +3,7 @@
 
 use crate::types::ids::{AgentId, NodeId, ReviewRunId, RunId, TaskRunId};
 use crate::types::outcome::Outcome;
+use crate::types::verdict::VerdictValue;
 
 /// What a handler hands back to the engine after `run()` / `resume()`.
 #[derive(Debug, Clone)]
@@ -43,6 +44,7 @@ pub enum EngineEvent {
     ReviewVerdictSubmitted {
         review_run_id: ReviewRunId,
         reviewer_id: AgentId,
+        verdict: VerdictValue,
     },
     AgentOutcomeSubmitted {
         task_run_id: TaskRunId,
