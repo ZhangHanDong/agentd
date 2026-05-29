@@ -50,11 +50,23 @@ Scenario: a graceful exit reports the Graceful method
   When shutdown runs
   Then the report method is Graceful and no kill-session or C-c call was recorded
 
+Scenario: an interrupt brings the agent down and reports Interrupt
+  Test: shutdown_interrupt_reports_interrupt
+  Given a backend whose session survives the graceful exit but is gone after the two interrupts
+  When shutdown runs
+  Then the report method is Interrupt and no kill-session call was recorded
+
 Scenario: shutdown on a missing session is recoverable
   Test: shutdown_missing_session_is_recoverable
   Given a backend whose first has-session probe shows the session already gone
   When shutdown runs
   Then it returns Err(BackendError::Recoverable) and no capture-pane or kill call was recorded
+
+Scenario: shutdown aborts before any kill when the archive write fails
+  Test: shutdown_archive_write_failure_aborts_before_kill
+  Given a backend whose archive_to path cannot be written
+  When shutdown runs
+  Then it returns Err(BackendError) and no kill-session or interrupt call was recorded
 
 Scenario: rebind reconstructs a handle for a live session
   Test: rebind_reconstructs_live_session

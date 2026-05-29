@@ -67,6 +67,12 @@ Scenario: status is Starting for a booting shell with no output
   When status runs
   Then it returns AgentStatus::Starting
 
+Scenario: status is Gone for a shell showing prior output
+  Test: status_gone_for_shell_with_output
+  Given a backend whose runner scripts pane_current_command "bash" then a non-empty capture
+  When status runs
+  Then it returns AgentStatus::Gone
+
 Scenario: status is Idle when two captures are identical
   Test: status_idle_when_output_unchanged
   Given a backend whose runner scripts a CLI command then two identical captures

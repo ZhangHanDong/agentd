@@ -64,6 +64,12 @@ Scenario: wait_for_ready returns Ok when the main prompt is visible
   When wait_for_ready runs for the ClaudeCode CLI
   Then it returns Ok after one capture
 
+Scenario: wait_for_ready re-polls until the prompt appears
+  Test: wait_for_ready_loops_until_visible
+  Given a backend whose runner scripts a capture without the ready pattern then one with it
+  When wait_for_ready runs
+  Then it returns Ok after the second capture
+
 Scenario: wait_for_ready times out when the prompt never appears
   Test: wait_for_ready_times_out
   Given a backend whose ready_deadline is zero

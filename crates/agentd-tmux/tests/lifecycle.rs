@@ -179,7 +179,84 @@ async fn status_busy_when_output_changes() {
     assert!(matches!(status, AgentStatus::Busy { .. }), "got {status:?}");
 }
 
+#[tokio::test]
+async fn status_gone_for_shell_with_output() {
+    let rec = Arc::new(RecordingCommandRunner::new());
+    rec.push_output(ok("bash\n", 0)); // a shell
+    rec.push_output(ok("user@host $ exited\n", 0)); // showing prior output → CLI gone
+    let status = backend(&rec, zero_gap_cfg())
+        .status(&handle("agentd-x:0.0"))
+        .await
+        .expect("status ok");
+    assert_eq!(status, AgentStatus::Gone);
+}
+
 // ---- shutdown (§4.9) ------------------------------------------------------
+
+#[tokio::test]
+async fn shutdown_interrupt_reports_interrupt() {
+    let rec = Arc::new(RecordingCommandRunner::new());
+    rec.push_output(ok("", 0)); // has-session step 0: alive
+    rec.push_output(ok("body", 0)); // capture-pane archive
+    rec.push_output(ok("", 0)); // set-buffer
+    rec.push_output(ok("", 0)); // paste-buffer
+    rec.push_output(ok("", 0)); // send-keys Enter
+    rec.push_output(ok("", 0)); // has-session after graceful: still alive
+    rec.push_output(ok("", 0)); // send-keys C-c
+    rec.push_output(ok("", 0)); // send-keys C-c
+    rec.push_output(ok("", 1)); // has-session after interrupt: gone
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let report = backend(&rec, zero_lifecycle_cfg())
+        .shutdown(
+            &handle("agentd-x:0.0"),
+            ShutdownOpts {
+                archive_to: dir.path().join("t.txt"),
+            },
+        )
+        .await
+        .expect("shutdown ok");
+
+    assert_eq!(report.method, ShutdownMethod::Interrupt);
+    assert!(
+        !rec.calls().iter().any(|c| c.args[0] == "kill-session"),
+        "an interrupt needs no kill"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_archive_write_failure_aborts_before_kill() {
+    let rec = Arc::new(RecordingCommandRunner::new());
+    rec.push_output(ok("", 0)); // has-session step 0: alive
+    rec.push_output(ok("body", 0)); // capture-pane archive
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    // archive_to is a directory → the write fails, aborting before any kill so
+    // the transcript is never lost while the pane is still alive.
+    let err = backend(&rec, zero_lifecycle_cfg())
+        .shutdown(
+            &handle("agentd-x:0.0"),
+            ShutdownOpts {
+                archive_to: dir.path().to_path_buf(),
+            },
+        )
+        .await
+        .expect_err("an unwritable archive aborts shutdown");
+    assert!(matches!(err, BackendError::Recoverable(_)));
+
+    let calls = rec.calls();
+    assert_eq!(
+        calls.len(),
+        2,
+        "has-session + capture-pane only — no escalation"
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c.args[0] == "kill-session" || c.args.iter().any(|a| a == "C-c")),
+        "no kill or interrupt after a failed archive"
+    );
+}
 
 #[tokio::test]
 async fn shutdown_archives_before_any_kill() {

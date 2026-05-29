@@ -78,6 +78,16 @@ async fn send_prompt_uses_buffer_path() {
         "paste targets the pane: {:?}",
         paste.args
     );
+    assert!(
+        paste.args.contains(&"-p".to_string()),
+        "bracketed paste (-p): {:?}",
+        paste.args
+    );
+    assert!(
+        paste.args.contains(&"-d".to_string()),
+        "delete the buffer after pasting (-d): {:?}",
+        paste.args
+    );
     let last = calls.last().expect("at least one call");
     assert_eq!(
         last.args,
@@ -150,6 +160,18 @@ async fn wait_for_ready_returns_ok_when_visible() {
     let calls = rec.calls();
     assert_eq!(calls.len(), 1, "matched on the first capture");
     assert_eq!(first_arg(&calls[0]), Some("capture-pane"));
+}
+
+#[tokio::test]
+async fn wait_for_ready_loops_until_visible() {
+    let rec = Arc::new(RecordingCommandRunner::new());
+    rec.push_output(ok("still booting\n", 0)); // capture 1: no ready pattern
+    rec.push_output(ok("ready ? for shortcuts\n", 0)); // capture 2: matches
+    backend(&rec, zero_delay_cfg())
+        .wait_for_ready(&handle("agentd-x:0.0"), CliKind::ClaudeCode)
+        .await
+        .expect("ready on the second poll");
+    assert_eq!(rec.calls().len(), 2, "re-polled until the prompt appeared");
 }
 
 #[tokio::test]
