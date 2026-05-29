@@ -7,7 +7,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use agentd_core::CoreError;
 use agentd_core::ports::{AgentBackend, CommandOutput, CommandRunner, RunOpts};
@@ -70,6 +70,102 @@ impl TmuxBackend {
                 let sub = args.first().copied().unwrap_or("tmux");
                 BackendError::Recoverable(format!("tmux {sub} failed to run: {e}"))
             })
+    }
+
+    /// Deliver `prompt` to the agent through tmux's paste buffer (design §4.6).
+    /// The payload goes into the buffer — argv for prompts up to 64 KiB, stdin
+    /// otherwise — and is pasted; it is NEVER typed as keystrokes (the final
+    /// keystroke is a bare Enter, never a literal-key send of the payload).
+    ///
+    /// # Errors
+    /// [`BackendError`] when any of the four tmux stages fails to run.
+    pub async fn send_prompt(
+        &self,
+        handle: &AgentHandle,
+        prompt: &str,
+    ) -> Result<(), BackendError> {
+        const MAX_ARGV_BYTES: usize = 64 * 1024;
+        let via_stdin = prompt.len() > MAX_ARGV_BYTES;
+
+        // Stage 1: load the paste buffer.
+        if via_stdin {
+            let opts = RunOpts {
+                stdin: Some(prompt.as_bytes().to_vec()),
+                ..RunOpts::default()
+            };
+            self.tmux(&["set-buffer", "-"], opts).await?;
+        } else {
+            self.tmux(&["set-buffer", prompt], RunOpts::default())
+                .await?;
+        }
+
+        // Stage 2: bracketed paste into the pane, deleting the buffer afterwards.
+        self.tmux(
+            &["paste-buffer", "-p", "-t", handle.address.as_str(), "-d"],
+            RunOpts::default(),
+        )
+        .await?;
+
+        // Stage 3: let the paste settle before the newline.
+        tokio::time::sleep(self.cfg.inject_delay).await;
+
+        // Stage 4: a single bare Enter — the payload is never typed as keys.
+        self.tmux(
+            &["send-keys", "-t", handle.address.as_str(), "Enter"],
+            RunOpts::default(),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Block until the CLI's main prompt is visible (design §4.7), polling the
+    /// pane with exponential backoff (`ready_probe_initial` doubling to
+    /// `ready_probe_max`) until `ready_deadline`.
+    ///
+    /// # Errors
+    /// [`BackendError::Recoverable`] if the deadline passes before the main
+    /// prompt appears.
+    pub async fn wait_for_ready(
+        &self,
+        handle: &AgentHandle,
+        cli: CliKind,
+    ) -> Result<(), BackendError> {
+        let deadline = Instant::now() + self.cfg.ready_deadline;
+        let mut probe = self.cfg.ready_probe_initial;
+        while Instant::now() < deadline {
+            let buf = self
+                .capture_pane(handle.address.as_str(), 50, false)
+                .await?;
+            if self.cfg.main_prompt_visible(&buf, cli) {
+                return Ok(());
+            }
+            tokio::time::sleep(probe).await;
+            probe = (probe * 2).min(self.cfg.ready_probe_max);
+        }
+        Err(BackendError::Recoverable(format!(
+            "agent did not reach its main prompt within {:?}",
+            self.cfg.ready_deadline
+        )))
+    }
+
+    /// Capture the pane's visible buffer plus `lines` of scrollback (design
+    /// §4.8). `ansi` includes escape sequences (`-e`). The public `capture`
+    /// surface (with `CaptureOpts`) is layered on this in Task 4.
+    async fn capture_pane(
+        &self,
+        address: &str,
+        lines: u32,
+        ansi: bool,
+    ) -> Result<String, BackendError> {
+        let start = format!("-{lines}");
+        let mut args = vec!["capture-pane", "-p", "-t", address];
+        if ansi {
+            args.push("-e");
+        }
+        args.push("-S");
+        args.push(start.as_str());
+        let out = self.tmux(&args, RunOpts::default()).await?;
+        Ok(out.stdout)
     }
 }
 
@@ -175,10 +271,7 @@ impl AgentBackend for TmuxBackend {
             .await?;
         let (pane_id, pid) = parse_pane_info(&probe.stdout)?;
 
-        // §4.5 step 5: when `initial_prompt` is set, `wait_for_ready` +
-        // `send_prompt` are wired in here in Task 3 (buffer-path injection).
-
-        Ok(AgentHandle {
+        let handle = AgentHandle {
             agent_id: req.agent_id.clone(),
             backend: BackendKind::Tmux,
             address,
@@ -186,7 +279,15 @@ impl AgentBackend for TmuxBackend {
             pid,
             session_name: session,
             spawned_at: SystemTime::now(),
-        })
+        };
+
+        // §4.5 step 5: deliver the initial prompt once the agent is ready.
+        if let Some(prompt) = &req.initial_prompt {
+            self.wait_for_ready(&handle, req.cli).await?;
+            self.send_prompt(&handle, prompt).await?;
+        }
+
+        Ok(handle)
     }
 }
 
