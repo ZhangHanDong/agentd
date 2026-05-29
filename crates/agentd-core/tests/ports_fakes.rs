@@ -13,7 +13,8 @@ use agentd_core::test_support::{
     FakeBackend, FixedClock, InMemoryStore, MempalStub, RecordingCommandRunner,
 };
 use agentd_core::types::{
-    AgentId, CliKind, LaunchStrategy, NodeId, Outcome, RunId, SpawnRequest, Status,
+    AgentId, CliKind, LaunchStrategy, NodeId, Outcome, ReviewVerdict, RunId, SpawnRequest, Status,
+    VerdictValue,
 };
 
 fn spawn_req() -> SpawnRequest {
@@ -136,4 +137,60 @@ fn fixed_clock_returns_set_time() {
     assert_eq!(clock.now_unix(), 1000);
     clock.set(2000);
     assert_eq!(clock.now_unix(), 2000);
+}
+
+#[tokio::test]
+async fn in_memory_store_review_verdict_is_idempotent_per_reviewer() {
+    let store = InMemoryStore::new();
+    let run = RunId::from_string("r");
+    let rr = store
+        .insert_review_run(&run, &NodeId::parsed("review"), 2, "sha")
+        .await
+        .expect("insert review run");
+    let vote = |who: &str| ReviewVerdict {
+        reviewer_id: AgentId::parsed(who),
+        value: VerdictValue::Pass,
+    };
+    store
+        .insert_review_verdict(&rr, vote("a"))
+        .await
+        .expect("a");
+    store
+        .insert_review_verdict(&rr, vote("a"))
+        .await
+        .expect("a duplicate is a no-op");
+    assert_eq!(
+        store.count_verdicts(&rr).await.expect("count"),
+        1,
+        "duplicate reviewer must not be double-counted"
+    );
+    store
+        .insert_review_verdict(&rr, vote("b"))
+        .await
+        .expect("b");
+    assert_eq!(store.count_verdicts(&rr).await.expect("count"), 2);
+}
+
+#[tokio::test]
+async fn in_memory_store_completed_task_run_no_longer_parks() {
+    let store = InMemoryStore::new();
+    let run = RunId::from_string("r");
+    let tr = store
+        .insert_task_run(&run, &NodeId::parsed("implement"))
+        .await
+        .expect("insert task run");
+    assert_eq!(
+        store.lookup_park_by_task_run(&tr).await.expect("lookup"),
+        Some((RunId::from_string("r"), NodeId::parsed("implement"))),
+        "open task run parks"
+    );
+    store.complete_task_run(&tr).await.expect("complete");
+    assert_eq!(
+        store
+            .lookup_park_by_task_run(&tr)
+            .await
+            .expect("lookup after complete"),
+        None,
+        "completed task run no longer parks (replayed event is a no-op)"
+    );
 }

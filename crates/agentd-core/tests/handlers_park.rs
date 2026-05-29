@@ -402,3 +402,89 @@ async fn codergen_resume_returns_agent_reported_outcome() {
     );
     assert_eq!(outcome.status, Status::Fail);
 }
+
+#[tokio::test]
+async fn fan_out_resume_ignores_duplicate_reviewer_verdict() {
+    let g = fan_out_graph(); // three reviewers
+    let node = g.node("review").expect("review node");
+    let context = RunContext::new();
+    let deps = Deps::new();
+    let mut ctx = HandlerCtx::new(&deps.run_id, &g, node, &context, deps.ports());
+    let review_run_id = match FanOutHandler.run(&mut ctx).await.expect("run") {
+        HandlerStep::Park(ParkReason::ReviewVerdicts { review_run_id, .. }) => review_run_id,
+        other => panic!("expected park, got {other:?}"),
+    };
+    let submit = |who: &str| EngineEvent::ReviewVerdictSubmitted {
+        review_run_id: review_run_id.clone(),
+        reviewer_id: AgentId::parsed(who),
+        verdict: VerdictValue::Pass,
+    };
+    // First reviewer votes, then the SAME reviewer's verdict is replayed: the
+    // duplicate must not advance toward quorum.
+    let step = FanOutHandler
+        .resume(&mut ctx, submit("claude-sec"))
+        .await
+        .expect("v1");
+    assert!(matches!(step, HandlerStep::Park(_)));
+    let step = FanOutHandler
+        .resume(&mut ctx, submit("claude-sec"))
+        .await
+        .expect("v1 replay");
+    assert!(
+        matches!(step, HandlerStep::Park(_)),
+        "a duplicate reviewer verdict must not count toward quorum"
+    );
+    // Two more DISTINCT reviewers complete the three-way review.
+    let step = FanOutHandler
+        .resume(&mut ctx, submit("codex-perf"))
+        .await
+        .expect("v2");
+    assert!(matches!(step, HandlerStep::Park(_)));
+    let step = FanOutHandler
+        .resume(&mut ctx, submit("gemini-readability"))
+        .await
+        .expect("v3");
+    assert!(
+        matches!(step, HandlerStep::Done(_)),
+        "three distinct reviewers complete the review"
+    );
+}
+
+#[tokio::test]
+async fn codergen_resume_closes_task_run_so_replay_is_noop() {
+    let g = codergen_graph();
+    let node = g.node("implement").expect("implement node");
+    let context = RunContext::new();
+    let deps = Deps::new();
+    let mut ctx = HandlerCtx::new(&deps.run_id, &g, node, &context, deps.ports());
+    let task_run_id = match CodergenHandler.run(&mut ctx).await.expect("run") {
+        HandlerStep::Park(ParkReason::AgentOutcome { task_run_id }) => task_run_id,
+        other => panic!("expected park, got {other:?}"),
+    };
+    assert!(
+        deps.store
+            .lookup_park_by_task_run(&task_run_id)
+            .await
+            .expect("lookup")
+            .is_some(),
+        "task run parks before its outcome arrives"
+    );
+    CodergenHandler
+        .resume(
+            &mut ctx,
+            EngineEvent::AgentOutcomeSubmitted {
+                task_run_id: task_run_id.clone(),
+                outcome: Outcome::success(),
+            },
+        )
+        .await
+        .expect("resume");
+    assert_eq!(
+        deps.store
+            .lookup_park_by_task_run(&task_run_id)
+            .await
+            .expect("lookup after resume"),
+        None,
+        "resume closes the task run so a replayed event is a no-op"
+    );
+}

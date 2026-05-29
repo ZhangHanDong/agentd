@@ -78,12 +78,23 @@ pub trait Store: Send + Sync {
         &self,
         review_run_id: &ReviewRunId,
     ) -> Result<Option<(RunId, NodeId)>, CoreError>;
+    /// Record a reviewer's verdict. **Idempotent per reviewer**: a second verdict
+    /// from the same `reviewer_id` on the same review run is a no-op (first wins),
+    /// mirroring the real store's `PRIMARY KEY (review_run_id, reviewer_id)`
+    /// (design §3.3). This keeps `count_verdicts` a count of *distinct* reviewers
+    /// so a replayed event cannot reach quorum with fewer than N reviewers.
     async fn insert_review_verdict(
         &self,
         review_run_id: &ReviewRunId,
         verdict: ReviewVerdict,
     ) -> Result<(), CoreError>;
+    /// Number of *distinct* reviewers who have submitted on this review run.
     async fn count_verdicts(&self, review_run_id: &ReviewRunId) -> Result<usize, CoreError>;
+    /// The reviewer count this review run is waiting for (`None` if unknown).
+    async fn review_expected(
+        &self,
+        review_run_id: &ReviewRunId,
+    ) -> Result<Option<usize>, CoreError>;
     async fn list_verdicts(
         &self,
         review_run_id: &ReviewRunId,
@@ -96,6 +107,11 @@ pub trait Store: Send + Sync {
         run_id: &RunId,
         node_id: &NodeId,
     ) -> Result<TaskRunId, CoreError>;
+    /// Mark a task run finished so a replayed `AgentOutcomeSubmitted` is a no-op
+    /// (mirrors `wait.human`'s close-on-answer; the real store sets `finished_at`).
+    async fn complete_task_run(&self, task_run_id: &TaskRunId) -> Result<(), CoreError>;
+    /// Returns the parked `(run_id, node_id)` only while the task run is still
+    /// open (not yet completed); `None` once completed or unknown (replay no-op).
     async fn lookup_park_by_task_run(
         &self,
         task_run_id: &TaskRunId,

@@ -48,6 +48,7 @@ struct ReviewRunRow {
 struct TaskRunRow {
     run_id: String,
     node_id: String,
+    finished: bool,
 }
 
 #[derive(Debug, Default)]
@@ -261,7 +262,14 @@ impl Store for InMemoryStore {
         if !inner.review_runs.contains_key(&id) {
             return Err(CoreError::Store(format!("unknown review run {id}")));
         }
-        inner.verdicts.entry(id).or_default().push(verdict);
+        let bucket = inner.verdicts.entry(id).or_default();
+        // Idempotent per reviewer (PRIMARY KEY (review_run_id, reviewer_id)):
+        // a replayed verdict from a reviewer who already voted is a no-op, so
+        // the count stays a count of DISTINCT reviewers.
+        if bucket.iter().any(|v| v.reviewer_id == verdict.reviewer_id) {
+            return Ok(());
+        }
+        bucket.push(verdict);
         Ok(())
     }
 
@@ -271,6 +279,17 @@ impl Store for InMemoryStore {
             .verdicts
             .get(review_run_id.as_str())
             .map_or(0, Vec::len))
+    }
+
+    async fn review_expected(
+        &self,
+        review_run_id: &ReviewRunId,
+    ) -> Result<Option<usize>, CoreError> {
+        Ok(self
+            .lock()
+            .review_runs
+            .get(review_run_id.as_str())
+            .map(|r| r.expected))
     }
 
     async fn list_verdicts(
@@ -297,9 +316,22 @@ impl Store for InMemoryStore {
             TaskRunRow {
                 run_id: run_id.as_str().to_string(),
                 node_id: node_id.as_str().to_string(),
+                finished: false,
             },
         );
         Ok(TaskRunId::from_string(id))
+    }
+
+    async fn complete_task_run(&self, task_run_id: &TaskRunId) -> Result<(), CoreError> {
+        let mut inner = self.lock();
+        let row = inner
+            .task_runs
+            .get_mut(task_run_id.as_str())
+            .ok_or_else(|| {
+                CoreError::Store(format!("unknown task run {}", task_run_id.as_str()))
+            })?;
+        row.finished = true;
+        Ok(())
     }
 
     async fn lookup_park_by_task_run(
@@ -307,12 +339,16 @@ impl Store for InMemoryStore {
         task_run_id: &TaskRunId,
     ) -> Result<Option<(RunId, NodeId)>, CoreError> {
         let inner = self.lock();
-        Ok(inner.task_runs.get(task_run_id.as_str()).map(|r| {
-            (
-                RunId::from_string(r.run_id.clone()),
-                NodeId::from_string(r.node_id.clone()),
-            )
-        }))
+        Ok(inner
+            .task_runs
+            .get(task_run_id.as_str())
+            .filter(|r| !r.finished)
+            .map(|r| {
+                (
+                    RunId::from_string(r.run_id.clone()),
+                    NodeId::from_string(r.node_id.clone()),
+                )
+            }))
     }
 
     async fn write_checkpoint(&self, checkpoint: &Checkpoint) -> Result<(), CoreError> {

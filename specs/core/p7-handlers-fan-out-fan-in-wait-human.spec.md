@@ -14,8 +14,8 @@ Task 7's conditional/tool this completes the six P0 handlers.
 ## Decisions
 
 - `wait.human`: `run` opens a human-wait row (`Store::open_human_wait`) and parks `HumanAnswer { wait_id }`. `resume(HumanAnswered)` closes the wait (`answer_human_wait`, so a replay is a no-op), stages `answer` (+ `human_feedback`) into the context, and returns `Done` with `preferred_label = answer`.
-- `codergen`: `run` assembles the initial prompt from the context vars named in `initial_prompt_includes` (`$var` → context key) plus best-effort `pre_tools` mempal results, spawns the agent, records a `task_runs` row, stages `task_run_id` (ctx-staged so the pre-park checkpoint captures it), and parks `AgentOutcome { task_run_id }`. `resume(AgentOutcomeSubmitted)` returns the agent-reported `Outcome` verbatim — no blocking wait.
-- `fan_out`: `run` derives N from the `reviewers` comma-list, computes `context_sha = sha256(serialize(context) ++ node_id)` in memory (D7 — no disk bundle), records a `review_runs` row, spawns N reviewer agents, stages `review_run_id` (so the paired `fan_in` can read it), and parks `ReviewVerdicts { review_run_id, expected: N }`. `resume(ReviewVerdictSubmitted)` records the verdict and re-parks until `count_verdicts == N`, then returns `Done`.
+- `codergen`: `run` assembles the initial prompt from the context vars named in `initial_prompt_includes` (`$var` → context key) plus best-effort `pre_tools` mempal results, spawns the agent, records a `task_runs` row, stages `task_run_id` (ctx-staged so the pre-park checkpoint captures it), and parks `AgentOutcome { task_run_id }`. `resume(AgentOutcomeSubmitted)` **closes the task run** (`complete_task_run`, so a replayed event is a no-op — mirrors `wait.human`) and returns the agent-reported `Outcome` verbatim — no blocking wait.
+- `fan_out`: `run` derives N from the `reviewers` comma-list, computes `context_sha = sha256(serialize(context) ++ node_id)` in memory (D7 — no disk bundle), records a `review_runs` row, spawns N reviewer agents, stages `review_run_id` (so the paired `fan_in` can read it), and parks `ReviewVerdicts { review_run_id, expected: N }`. `resume(ReviewVerdictSubmitted)` records the verdict (idempotent per reviewer, so a duplicate cannot reach quorum early) and re-parks until `count_verdicts == expected`, reading the **authoritative `expected` from the stored review run** (not re-derived from the live node, which may differ across an `--accept-workflow-change` resume), then returns `Done`.
 - `EngineEvent::ReviewVerdictSubmitted` carries the `VerdictValue` (extended in this task — the resume must record the vote, not just the reviewer). `VerdictValue`/`ReviewVerdict` moved to `types` since the Store port, the engine event, and `fan_in` all reference them.
 - `fan_in`: reads `review_run_id` from the context, lists verdicts, applies `aggregator` → `Status`: `any_fail` (any Fail/Block ⇒ Fail), `majority_pass` (strict Pass majority), `unanimous_pass` (all Pass), `first_blocker` (any Block ⇒ Fail, plain Fails advisory). Delphi/`converge_or_*` are P1+.
 
@@ -94,3 +94,15 @@ Scenario: codergen resume returns the agent-reported outcome
   Given a codergen node that has parked
   When resumed with AgentOutcomeSubmitted carrying a Fail outcome
   Then it returns Done with status Fail
+
+Scenario: fan_out ignores a duplicate reviewer verdict (replay-safe quorum)
+  Test: fan_out_resume_ignores_duplicate_reviewer_verdict
+  Given a fan_out node expecting three reviewers that has parked
+  When the first reviewer's verdict is replayed before the others vote
+  Then the duplicate does not advance quorum and only three distinct reviewers complete it
+
+Scenario: codergen resume closes the task run so a replay is a no-op
+  Test: codergen_resume_closes_task_run_so_replay_is_noop
+  Given a codergen node that has parked with a task run
+  When it is resumed with the agent outcome
+  Then lookup_park_by_task_run returns None afterward

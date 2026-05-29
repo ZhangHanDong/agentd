@@ -94,7 +94,20 @@ impl Handler for FanOutHandler {
             )
             .await?;
         let collected = ctx.ports.store.count_verdicts(&review_run_id).await?;
-        let expected = reviewer_roles(ctx).len();
+        // Authoritative `expected` is the value stored at run() time, NOT a
+        // re-derivation from the live node attr — the graph may have changed
+        // across an --accept-workflow-change resume.
+        let expected = ctx
+            .ports
+            .store
+            .review_expected(&review_run_id)
+            .await?
+            .ok_or_else(|| {
+                CoreError::Invariant(format!(
+                    "review run {} vanished before resume",
+                    review_run_id.as_str()
+                ))
+            })?;
         if collected >= expected {
             Ok(HandlerStep::Done(Outcome::success()))
         } else {

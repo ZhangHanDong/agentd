@@ -66,14 +66,21 @@ impl Handler for CodergenHandler {
 
     async fn resume(
         &self,
-        _ctx: &mut HandlerCtx<'_>,
+        ctx: &mut HandlerCtx<'_>,
         event: EngineEvent,
     ) -> Result<HandlerStep, CoreError> {
-        let EngineEvent::AgentOutcomeSubmitted { outcome, .. } = event else {
+        let EngineEvent::AgentOutcomeSubmitted {
+            task_run_id,
+            outcome,
+        } = event
+        else {
             return Err(CoreError::Invariant(
                 "codergen resumed with a non-AgentOutcomeSubmitted event".to_string(),
             ));
         };
+        // Close the task run so a replayed AgentOutcomeSubmitted resolves to None
+        // downstream (no double-advance) — mirrors wait.human's close-on-answer.
+        ctx.ports.store.complete_task_run(&task_run_id).await?;
         Ok(HandlerStep::Done(outcome))
     }
 }

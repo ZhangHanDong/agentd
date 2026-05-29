@@ -21,6 +21,7 @@ Per build-order D5/D6 the ports MUST exist before any handler compiles.
 - `Store` exposes the THREE reverse-lookup methods `deliver_event` needs: `lookup_park_by_wait_id`, `lookup_park_by_review_run`, `lookup_park_by_task_run`, each `-> Option<(RunId, NodeId)>` (fixes M4). The review-run record therefore carries `node_id`.
 - `open_human_wait` / `insert_review_run` / `insert_task_run` GENERATE and return the id (wait_id: String, ReviewRunId, TaskRunId). The fake uses a monotonic counter so ids are deterministic in tests.
 - `answer_human_wait` errors with `CoreError::Store` if the wait was already answered (idempotency guard).
+- All three park child-rows are *replay-safe* at the lookup layer: `insert_review_verdict` is idempotent per `reviewer_id` (so `count_verdicts` counts distinct reviewers, mirroring the real store's `PRIMARY KEY (review_run_id, reviewer_id)`); `complete_task_run` closes a task run so `lookup_park_by_task_run` returns `None` afterward (mirroring `wait.human`'s close-on-answer and the real store's `task_runs.finished_at`).
 - `test_support` is compiled only under `#[cfg(any(feature = "test-support", test))]`; it never ships in a release binary.
 - agentd-core touches NO external store. The `MempalClient` port is an abstraction; the stub is purely in-memory and references no mempal `palace.db`.
 
@@ -76,3 +77,15 @@ Scenario: FixedClock returns the time it was set to
   Given a FixedClock set to a known unix time
   When now_unix is queried
   Then it returns that time, and reflects a subsequent set
+
+Scenario: A review verdict is idempotent per reviewer
+  Test: in_memory_store_review_verdict_is_idempotent_per_reviewer
+  Given a review run expecting two reviewers
+  When the same reviewer submits a verdict twice, then a second reviewer submits
+  Then count_verdicts is 1 after the duplicate and 2 after the distinct reviewer
+
+Scenario: A completed task run no longer parks
+  Test: in_memory_store_completed_task_run_no_longer_parks
+  Given an open task run that resolves via lookup_park_by_task_run
+  When complete_task_run is called
+  Then lookup_park_by_task_run returns None (a replayed event is a no-op)
