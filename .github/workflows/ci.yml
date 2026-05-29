@@ -97,6 +97,21 @@ jobs:
             exit 1
           fi
 
-  # dot-validate added in P0.1 when agentctl gains the `flow` subcommand.
+  dot-validate:
+    name: workflow DOT validation
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p agentctl --release
+      - name: Validate shipped DOT files
+        run: |
+          for f in workflows/*.dot; do
+            echo "==> $f"
+            ./target/release/agentctl flow validate "$f"
+          done
+
   # docs job (cargo doc + mdbook) added when docs/book exists.
   # e2e job added in P0.9.

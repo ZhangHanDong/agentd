@@ -1,0 +1,13 @@
+// Sample agentd workflow. Smaller than the canonical Appendix C flow: a single
+// adversarial-review round (fan_out -> fan_in) gated to the terminal. Validated
+// in CI by `agentctl flow validate workflows/*.dot`.
+digraph sample {
+  "start"     [shape=Mdiamond];
+  "review"    [handler="parallel.fan_out", reviewers="claude-sec,codex-perf", bundle="frozen", visibility="blind"];
+  "aggregate" [handler="parallel.fan_in", aggregator="majority_pass", goal_gate=true];
+  "done"      [shape=Msquare];
+
+  "start"     -> "review";
+  "review"    -> "aggregate";
+  "aggregate" -> "done";
+}

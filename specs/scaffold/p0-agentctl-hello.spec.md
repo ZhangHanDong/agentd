@@ -13,7 +13,7 @@ proof that the workspace scaffold produces a runnable artifact.
 
 - agentctl uses clap derive macros for argument parsing
 - agentctl --version reads the version from the package metadata (0.0.0 in P0.0)
-- P0.0 ships no real subcommands; the subcommand enum holds one placeholder named noop
+- P0.0 shipped no real subcommands; P0.1 Task 10 replaces the placeholder with the real `flow validate` subcommand (the `--version` contract is unchanged)
 
 ## Boundaries
 
@@ -35,10 +35,9 @@ Scenario: The version flag prints the package version
   Then standard output equals the string agentctl 0.0.0
   And the exit code is zero
 
-Scenario: The help output lists only the placeholder subcommand
-  Test: agentctl_help_lists_only_placeholder
+Scenario: The help output lists the flow subcommand
+  Test: agentctl_help_lists_flow_subcommand
   Given the built agentctl binary
   When it is invoked with the help flag
-  Then standard output mentions the placeholder noop subcommand
-  And standard output does not mention a flow subcommand
-  And standard output does not mention a run subcommand
+  Then standard output mentions the flow subcommand
+  And the exit code is zero

@@ -33,6 +33,8 @@ fan-in) and reports ALL violations at once rather than failing on the first.
 - crates/agentd-core/src/graph/**
 - crates/agentd-core/src/lib.rs
 - crates/agentd-core/tests/node_graph.rs
+- crates/agentctl/** (Task 10: the `flow validate` CLI surface over `from_ast`)
+- workflows/*.dot (Task 10: shipped sample workflow)
 
 ### Forbidden
 
@@ -107,3 +109,21 @@ Scenario: All violations are reported, not just the first
   Given a parsed graph that simultaneously lacks a terminal and uses an unknown handler
   When NodeGraph::from_ast runs
   Then the error message mentions both the missing terminal and the unknown handler
+
+Scenario: agentctl flow validate succeeds on a valid .dot
+  Test: agentctl_flow_validate_succeeds_on_valid_dot
+  Given the built agentctl binary and a valid workflow .dot file
+  When it is invoked with flow validate on that file
+  Then the exit code is zero
+
+Scenario: agentctl flow validate fails on an invalid .dot with exit code 2
+  Test: agentctl_flow_validate_fails_on_invalid_dot_with_exit_2
+  Given the built agentctl binary and a .dot file that fails validation
+  When it is invoked with flow validate on that file
+  Then the exit code is 2
+
+Scenario: agentctl flow validate lists all violations on stderr
+  Test: agentctl_flow_validate_lists_all_violations_in_stderr
+  Given a .dot file with multiple validation violations
+  When agentctl flow validate runs on it
+  Then standard error mentions each violation

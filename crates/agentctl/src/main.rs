@@ -1,25 +1,18 @@
-//! `agentctl` — CLI client for the agentd daemon.
-//! P0.0: only `--version` works. Subcommands come in later phases.
+//! `agentctl` — CLI client for the agentd daemon. P0.1 ships `flow validate`;
+//! `run`/`status`/etc. come in later phases.
 
 #![warn(clippy::unwrap_used, clippy::panic)]
 
+mod cli;
+mod flow;
+
+use std::process::ExitCode;
+
 use clap::Parser;
 
-/// agentd control CLI.
-#[derive(Debug, Parser)]
-#[command(name = "agentctl", version)]
-struct Cli {
-    /// Reserved for future subcommands.
-    #[command(subcommand)]
-    cmd: Option<Cmd>,
-}
-
-#[derive(Debug, clap::Subcommand)]
-enum Cmd {
-    /// Placeholder; replaced in P0.1.
-    Noop,
-}
-
-fn main() {
-    let _cli = Cli::parse();
+fn main() -> ExitCode {
+    let cli = cli::Cli::parse();
+    match cli.cmd {
+        cli::Cmd::Flow(flow_cmd) => flow::run(&flow_cmd),
+    }
 }

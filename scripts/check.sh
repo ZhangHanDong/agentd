@@ -54,8 +54,17 @@ else
     echo "    skipped (no agent-spec or no specs yet)"
 fi
 
-echo "==> [6/7] dot-validate (skipped until agentctl flow exists)"
-# Will be wired up in P0.1 when agentctl gains the `flow` subcommand.
+echo "==> [6/7] dot-validate"
+# Validate every shipped workflow with the real `agentctl flow validate`.
+if ls workflows/*.dot >/dev/null 2>&1; then
+    cargo build -q -p agentctl
+    for f in workflows/*.dot; do
+        echo "    -- $f"
+        ./target/debug/agentctl flow validate "$f"
+    done
+else
+    echo "    (no workflows/*.dot to validate)"
+fi
 
 echo "==> [7/7] cross-deps-sanity"
 # Forbidden references that would indicate boundary violations.
