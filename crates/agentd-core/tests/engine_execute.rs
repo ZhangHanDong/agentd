@@ -5,7 +5,7 @@ use agentd_core::dot::parser;
 use agentd_core::engine::{Engine, EngineEvent, ParkReason, RunProgress};
 use agentd_core::graph::NodeGraph;
 use agentd_core::handler::{HandlerRegistry, Ports};
-use agentd_core::ports::{CommandOutput, Store};
+use agentd_core::ports::{CommandOutput, RunStatus, Store};
 use agentd_core::test_support::{
     FakeBackend, FixedClock, InMemoryStore, MempalStub, RecordingCommandRunner,
 };
@@ -280,4 +280,61 @@ async fn engine_full_canonical_dot_runs_to_completion_with_fakes() {
         );
     }
     assert_eq!(last.expect("a final progress"), finished(&h.run_id));
+}
+
+// ─── STEP_CEILING backstop (regression for the engine review) ────────
+//
+// gate runs ONCE upstream (one queued failing output), records Fail, and routes
+// to the queue-free `spin` conditional. At spin, the lexical unconditional pick
+// is spin->end (terminal); the unmet goal_gate synthesizes Fail+label and the
+// non-attempt-gated `preferred_label` tier re-picks spin->spin, looping to the
+// 10,000-node ceiling — the spec-sanctioned backstop for a pathological graph.
+// The fix: the ceiling exit marks the run Failed (not orphaned Running).
+const CEILING_LOOP_GRAPH: &str = r#"digraph m {
+    "start" [shape=Mdiamond];
+    "gate" [handler=tool, cmd="check", goal_gate=true];
+    "spin" [handler=conditional];
+    "end" [shape=Msquare];
+    "start" -> "gate";
+    "gate" -> "spin";
+    "spin" -> "end";
+    "spin" -> "spin" [label="goal_gate_unmet"];
+}"#;
+
+#[tokio::test]
+async fn ceiling_loop_graph_passes_validation() {
+    // The scenario requires a *validated* graph (single start): confirm from_ast accepts it.
+    let ast = parser::parse(CEILING_LOOP_GRAPH).expect("parse");
+    let result = NodeGraph::from_ast(&ast);
+    assert!(
+        result.is_ok(),
+        "ceiling-loop graph should pass from_ast validation, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn step_ceiling_exhaustion_marks_run_failed() {
+    let h = Harness::new();
+    let g = graph(CEILING_LOOP_GRAPH);
+    // Exactly one failing output: the gate runs once (records Fail -> goal_gate
+    // permanently unmet). The loop thereafter spins in the queue-free conditional.
+    h.runner.push_output(Ok(CommandOutput {
+        stdout: String::new(),
+        stderr: "nope".to_string(),
+        status: 1,
+    }));
+    let result = h.engine(&g).execute(&h.run_id).await;
+    // The run terminates via the STEP_CEILING invariant Err (not a Stuck Fail).
+    let err = result.expect_err("run must hit the step ceiling");
+    assert!(
+        format!("{err:?}").contains("step ceiling"),
+        "expected step-ceiling invariant error, got {err:?}"
+    );
+    // The fix: the store row is marked Failed (never left orphaned as Running),
+    // consistent with every other run-ending path.
+    assert_eq!(
+        h.store.run_status(&h.run_id),
+        Some(RunStatus::Failed),
+        "ceiling exit must mark the run Failed, not leave it Running"
+    );
 }

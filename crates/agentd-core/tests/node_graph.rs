@@ -178,3 +178,23 @@ fn node_graph_reports_all_violations_not_just_first() {
         "missing unknown-handler violation: {msg}"
     );
 }
+
+#[test]
+fn node_graph_rejects_multiple_starts() {
+    // The engine drives a run from a single entry point, so more than one
+    // Mdiamond start would silently execute only the first-declared component.
+    let src = r#"digraph m {
+        "s1" [shape=Mdiamond];
+        "s2" [shape=Mdiamond];
+        "work" [handler=tool];
+        "end" [shape=Msquare];
+        "s1" -> "work";
+        "s2" -> "work";
+        "work" -> "end";
+    }"#;
+    let msg = err_msg(src);
+    assert!(
+        msg.contains("start nodes"),
+        "expected a multiple-start violation, got: {msg}"
+    );
+}

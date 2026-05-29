@@ -18,7 +18,7 @@ after every node, goal_gate gating at terminal transitions (D8a), retry bound
 - Loop per node: Start advances with a synthetic Success; Terminal finishes; a Regular node runs its registry handler. `HandlerStep::Done` → merge context, persist outcome, checkpoint, (maybe retry-rerun), select edge + goal_gate, advance. `HandlerStep::Park` → checkpoint + `set_current_node`, return `Parked` carrying the `ParkReason` (so the caller has the wait/review/task id).
 - **Context-update reconciliation (the HandlerCtx invariant):** ctx-staged updates merge on EVERY step (run and resume, Done and Park — so a pre-park checkpoint captures them); `Outcome.context_updates` merge only on Done.
 - **goal_gate (D8a):** when the selected edge targets a terminal, evaluate goal_gate over the gate nodes' latest outcomes **read from the store** (gate nodes may have completed in an earlier deliver_event segment — an in-memory map would miss them). If unmet, discard the terminal transition, synthesize a `goal_gate_unmet` Fail, and re-select once; a non-terminal recovery edge advances, otherwise the run fails.
-- **Retry (D8c):** a single counter (`state.attempts`, persisted as the checkpoint's `retry_counts`, also the `attempts` map `select_next_edge` consults). A `Status::Retry` re-runs the same node while `attempts < retry_policy.max` (default 1 ⇒ a policy-less Retry routes as Fail). A global step ceiling backstops pathological graphs.
+- **Retry (D8c):** a single counter (`state.attempts`, persisted as the checkpoint's `retry_counts`, also the `attempts` map `select_next_edge` consults). A `Status::Retry` re-runs the same node while `attempts < retry_policy.max` (default 1 ⇒ a policy-less Retry routes as Fail). A global step ceiling backstops pathological graphs (e.g. a non-attempt-gated goal_gate recovery loop); on exhaustion the engine marks the run `Failed` in the store before surfacing the invariant error — every run-ending path leaves a consistent status, never an orphaned `Running`.
 - **deliver_event replay-safety:** resolve `(run_id, node_id)` via the matching `lookup_park_by_*`; a `None` (unknown/stale/replayed id) returns `RunProgress::Ignored` (no-op, not a failure). On a match, load the checkpoint, rebuild context, resume the handler, then `Park` (re-park) or `Done` (continue the loop).
 
 ## Boundaries
@@ -70,3 +70,15 @@ Scenario: The full canonical flow runs to completion against the fakes
   Given a spec(wait.human) -> impl(codergen) -> review(fan_out) -> aggregate(fan_in,goal_gate) -> terminal graph
   When execute parks at spec, then deliver_event feeds approve, the agent outcome, and three verdicts
   Then the final deliver_event returns Finished
+
+Scenario: A pathological goal_gate recovery loop is a valid graph
+  Test: ceiling_loop_graph_passes_validation
+  Given a single-start graph with a non-attempt-gated goal_gate recovery self-loop
+  When NodeGraph::from_ast runs
+  Then it passes validation (the loop is caught at run time, not validation time)
+
+Scenario: Step-ceiling exhaustion marks the run Failed, not orphaned Running
+  Test: step_ceiling_exhaustion_marks_run_failed
+  Given the pathological recovery-loop graph with its gate permanently unmet
+  When execute loops to the step ceiling and returns the invariant error
+  Then the stored run status is Failed (consistent with every other run-ending path)

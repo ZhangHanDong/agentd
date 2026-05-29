@@ -36,8 +36,17 @@ pub fn run(g: &NodeGraph, violations: &mut Vec<String>) {
 }
 
 fn check_start_terminal(g: &NodeGraph, violations: &mut Vec<String>) {
-    if g.starts().is_empty() {
+    let starts = g.starts();
+    if starts.is_empty() {
         violations.push("graph has no start node (shape=Mdiamond)".to_string());
+    } else if starts.len() > 1 {
+        // The engine drives a run from a single entry point (starts().next());
+        // more than one start would silently execute only the first component.
+        let ids: Vec<&str> = starts.iter().map(|n| n.id.as_str()).collect();
+        violations.push(format!(
+            "graph has {} start nodes (shape=Mdiamond), expected exactly one: {ids:?}",
+            starts.len()
+        ));
     }
     if g.terminals().is_empty() {
         violations.push("graph has no terminal node (shape=Msquare)".to_string());

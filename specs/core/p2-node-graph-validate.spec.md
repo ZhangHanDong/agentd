@@ -50,6 +50,12 @@ Scenario: A graph with no start node is rejected
   When NodeGraph::from_ast runs
   Then it returns an error mentioning a missing start node
 
+Scenario: A graph with more than one start node is rejected
+  Test: node_graph_rejects_multiple_starts
+  Given a parsed graph with two Mdiamond start nodes
+  When NodeGraph::from_ast runs
+  Then it returns an error mentioning multiple start nodes (the engine drives from one entry point)
+
 Scenario: A graph with no terminal node is rejected
   Test: node_graph_rejects_no_terminal
   Given a parsed graph with a start but no Msquare terminal node

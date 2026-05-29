@@ -85,6 +85,12 @@ impl InMemoryStore {
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().expect("store lock")
     }
+
+    /// Test-only read of a run's persisted status (no `Store`-trait getter exists).
+    #[must_use]
+    pub fn run_status(&self, run_id: &RunId) -> Option<RunStatus> {
+        self.lock().runs.get(run_id.as_str()).map(|r| r.status)
+    }
 }
 
 #[async_trait::async_trait]

@@ -186,7 +186,7 @@ impl<'a> Engine<'a> {
                 .await?
             {
                 Flow::Continue => self.run_loop(&run_id, state).await,
-                Flow::Fail(reason) => Ok(RunProgress::Failed { run_id, reason }),
+                Flow::Fail(reason) => self.fail(&run_id, reason).await,
             },
         }
     }
@@ -200,101 +200,115 @@ impl<'a> Engine<'a> {
         loop {
             steps += 1;
             if steps > STEP_CEILING {
+                // Mark the run Failed before surfacing the error so the store
+                // never leaves a ceiling-exhausted run orphaned as `Running`
+                // (every other run-ending path updates the status).
+                self.ports
+                    .store
+                    .update_run_status(run_id, RunStatus::Failed)
+                    .await?;
                 return Err(CoreError::Invariant(format!(
                     "run {} exceeded the {STEP_CEILING}-node step ceiling",
                     run_id.as_str()
                 )));
             }
+            if let Some(progress) = self.step_once(run_id, &mut state).await? {
+                return Ok(progress);
+            }
+        }
+    }
 
-            let node = self.graph.node(state.current.as_str()).ok_or_else(|| {
-                CoreError::Invariant(format!(
-                    "current node '{}' not in graph",
-                    state.current.as_str()
-                ))
-            })?;
-            match node.shape {
-                NodeShape::Terminal => {
-                    self.ports
-                        .store
-                        .update_run_status(run_id, RunStatus::Finished)
-                        .await?;
-                    tracing::info!(run_id = %run_id.as_str(), "run finished");
-                    return Ok(RunProgress::Finished {
-                        run_id: run_id.clone(),
-                    });
-                }
-                NodeShape::Start => {
-                    // Start does no work; advance with a synthetic success.
-                    let current = state.current.clone();
-                    match self
-                        .advance(run_id, current.as_str(), &Outcome::success(), &state)
-                        .await?
-                    {
-                        Advanced::To(next) => {
-                            state.completed.push(current);
-                            state.current = next;
-                            self.write_checkpoint(run_id, &state).await?;
-                        }
-                        Advanced::Stuck(reason) => {
-                            self.ports
-                                .store
-                                .update_run_status(run_id, RunStatus::Failed)
-                                .await?;
-                            return Ok(RunProgress::Failed {
-                                run_id: run_id.clone(),
-                                reason,
-                            });
-                        }
+    /// Run one node. Returns `Some(progress)` when the run ends (terminal, park,
+    /// or fail) or `None` to keep looping after advancing `state.current`.
+    async fn step_once(
+        &self,
+        run_id: &RunId,
+        state: &mut RunState,
+    ) -> Result<Option<RunProgress>, CoreError> {
+        let node = self.graph.node(state.current.as_str()).ok_or_else(|| {
+            CoreError::Invariant(format!(
+                "current node '{}' not in graph",
+                state.current.as_str()
+            ))
+        })?;
+        match node.shape {
+            NodeShape::Terminal => {
+                self.ports
+                    .store
+                    .update_run_status(run_id, RunStatus::Finished)
+                    .await?;
+                tracing::info!(run_id = %run_id.as_str(), "run finished");
+                Ok(Some(RunProgress::Finished {
+                    run_id: run_id.clone(),
+                }))
+            }
+            NodeShape::Start => {
+                // Start does no work; advance with a synthetic success.
+                let current = state.current.clone();
+                match self
+                    .advance(run_id, current.as_str(), &Outcome::success(), state)
+                    .await?
+                {
+                    Advanced::To(next) => {
+                        state.completed.push(current);
+                        state.current = next;
+                        self.write_checkpoint(run_id, state).await?;
+                        Ok(None)
                     }
+                    Advanced::Stuck(reason) => Ok(Some(self.fail(run_id, reason).await?)),
                 }
-                NodeShape::Regular => {
-                    let kind = node.handler.ok_or_else(|| {
-                        CoreError::Invariant(format!("node '{}' has no handler", node.id))
-                    })?;
-                    let handler = self
-                        .registry
-                        .get(kind)
-                        .ok_or_else(|| CoreError::UnknownHandler(format!("{kind:?}")))?;
-                    let (step, staged) = {
-                        let mut ctx =
-                            HandlerCtx::new(run_id, self.graph, node, &state.context, self.ports);
-                        let step = handler.run(&mut ctx).await?;
-                        let staged = ctx.staged_updates().clone();
-                        (step, staged)
-                    };
-                    state.context.merge(&staged);
-                    match step {
-                        HandlerStep::Park(reason) => {
-                            self.ports
-                                .store
-                                .set_current_node(run_id, &state.current)
-                                .await?;
-                            self.write_checkpoint(run_id, &state).await?;
-                            return Ok(RunProgress::Parked {
-                                run_id: run_id.clone(),
-                                node_id: state.current.clone(),
-                                reason,
-                            });
-                        }
-                        HandlerStep::Done(outcome) => {
-                            let current = state.current.clone();
-                            match self
-                                .process_done(run_id, &current, outcome, &mut state)
-                                .await?
-                            {
-                                Flow::Continue => {}
-                                Flow::Fail(reason) => {
-                                    return Ok(RunProgress::Failed {
-                                        run_id: run_id.clone(),
-                                        reason,
-                                    });
-                                }
-                            }
+            }
+            NodeShape::Regular => {
+                let kind = node.handler.ok_or_else(|| {
+                    CoreError::Invariant(format!("node '{}' has no handler", node.id))
+                })?;
+                let handler = self
+                    .registry
+                    .get(kind)
+                    .ok_or_else(|| CoreError::UnknownHandler(format!("{kind:?}")))?;
+                let (step, staged) = {
+                    let mut ctx =
+                        HandlerCtx::new(run_id, self.graph, node, &state.context, self.ports);
+                    let step = handler.run(&mut ctx).await?;
+                    let staged = ctx.staged_updates().clone();
+                    (step, staged)
+                };
+                state.context.merge(&staged);
+                match step {
+                    HandlerStep::Park(reason) => {
+                        self.ports
+                            .store
+                            .set_current_node(run_id, &state.current)
+                            .await?;
+                        self.write_checkpoint(run_id, state).await?;
+                        Ok(Some(RunProgress::Parked {
+                            run_id: run_id.clone(),
+                            node_id: state.current.clone(),
+                            reason,
+                        }))
+                    }
+                    HandlerStep::Done(outcome) => {
+                        let current = state.current.clone();
+                        match self.process_done(run_id, &current, outcome, state).await? {
+                            Flow::Continue => Ok(None),
+                            Flow::Fail(reason) => Ok(Some(self.fail(run_id, reason).await?)),
                         }
                     }
                 }
             }
         }
+    }
+
+    /// Mark the run Failed in the store and build the `Failed` progress.
+    async fn fail(&self, run_id: &RunId, reason: String) -> Result<RunProgress, CoreError> {
+        self.ports
+            .store
+            .update_run_status(run_id, RunStatus::Failed)
+            .await?;
+        Ok(RunProgress::Failed {
+            run_id: run_id.clone(),
+            reason,
+        })
     }
 
     /// Record a finished node's outcome, then either re-run it (Retry under
@@ -342,13 +356,9 @@ impl<'a> Engine<'a> {
                 self.write_checkpoint(run_id, state).await?;
                 Ok(Flow::Continue)
             }
-            Advanced::Stuck(reason) => {
-                self.ports
-                    .store
-                    .update_run_status(run_id, RunStatus::Failed)
-                    .await?;
-                Ok(Flow::Fail(reason))
-            }
+            // The store status is set by the caller via `fail()`; process_done
+            // stays pure so both run_loop and deliver_event reconcile it once.
+            Advanced::Stuck(reason) => Ok(Flow::Fail(reason)),
         }
     }
 
