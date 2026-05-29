@@ -43,7 +43,7 @@ Phases P0.3 / P0.4 / P0.5 / P0.6 / P0.7 are **siblings** once P0.2 is done — t
 | Phase | Title | Specs | Scenarios | Rounds | Plan doc | Status |
 |-------|-------|-------|-----------|--------|----------|--------|
 | P0.0  | Workspace + CI + agent-spec lifecycle + hello-world      | 3 | 9   | 60   | [`p0.0-workspace-and-ci.md`](./2026-05-29-agentd-p0.0-workspace-and-ci.md)   | **done** (tag v0.0.0-p0.0) |
-| P0.1  | Core domain + Workflow Engine + ports/fakes (no I/O)     | 9 | 66  | 240  | [`p0.1-core-and-engine.md`](./2026-05-29-agentd-p0.1-core-and-engine.md)     | planned |
+| P0.1  | Core domain + Workflow Engine + ports/fakes (no I/O)     | 9 | 76  | 240  | [`p0.1-core-and-engine.md`](./2026-05-29-agentd-p0.1-core-and-engine.md)     | **done** (tag v0.0.0-p0.1) |
 | P0.2  | Storage layer (sqlx + 14 tables + migrations + 5 repos)  | 5 | 21  | 140  | [`p0.2-storage.md`](./2026-05-29-agentd-p0.2-storage.md)                     | planned |
 | P0.3  | TmuxBackend v0 (FakeRunner-tested)                       | 7 | 24  | 180  | _generate via writing-plans at phase start_                                  | deferred |
 | P0.4  | mempal MCP client + outbox drainer + consistency check   | 4 | 16  | 110  | _generate via writing-plans_                                                 | deferred |
@@ -52,7 +52,7 @@ Phases P0.3 / P0.4 / P0.5 / P0.6 / P0.7 are **siblings** once P0.2 is done — t
 | P0.7  | HTTP+SSE + MCP server (5 tools per §4.12.1)              | 5 | 18  | 140  | _generate via writing-plans_                                                 | deferred |
 | P0.8  | Shipped DOT workflows + `agentctl install-skills`        | 3 | 10  | 80   | _generate via writing-plans_                                                 | deferred |
 | P0.9  | E2E + disaster recovery drills                           | 5 | 18  | 160  | _generate via writing-plans_                                                 | deferred |
-| **Σ** |                                                          | **52** | **222** | **1420** | | |
+| **Σ** |                                                          | **52** | **232** | **1420** | | |
 
 > Scenario counts are derived from each phase's plan-detail file when one exists,
 > otherwise from the phase-outline below. The total drifted upward from the
