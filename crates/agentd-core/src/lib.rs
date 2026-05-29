@@ -12,11 +12,12 @@
 
 // NOTE (build order): only modules that exist as of the current P0.1 task are
 // declared here. Later tasks add their own `pub mod` line when they create the
-// module: Task 7 → handler.
+// module: Task 9 extends `engine` with the run loop.
 pub mod dot;
 pub mod engine;
 pub mod error;
 pub mod graph;
+pub mod handler;
 pub mod ports;
 pub mod types;
 

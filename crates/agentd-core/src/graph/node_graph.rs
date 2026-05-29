@@ -24,7 +24,8 @@ impl NodeShape {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Hash so it can key a HandlerRegistry HashMap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HandlerKind {
     Codergen,
     Conditional,
