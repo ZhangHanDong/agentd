@@ -6,6 +6,9 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+# Application daemon, not a crates.io library — keeps its version-less path deps
+# out of cargo-deny's wildcard ban.
+publish = false
 
 [lints]
 workspace = true
@@ -15,6 +18,7 @@ name = "agentd"
 path = "src/main.rs"
 
 [dependencies]
+agentd-store = { path = "../agentd-store" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
