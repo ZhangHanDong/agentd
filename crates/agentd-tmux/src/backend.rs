@@ -7,14 +7,25 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use agentd_core::CoreError;
 use agentd_core::ports::{AgentBackend, CommandOutput, CommandRunner, RunOpts};
-use agentd_core::types::{AgentHandle, BackendKind, CliKind, LaunchStrategy, SpawnRequest};
+use agentd_core::types::{
+    AgentHandle, AgentStatus, BackendKind, CliKind, LaunchStrategy, SpawnRequest,
+};
 
 use crate::config::Config;
 use crate::error::BackendError;
+
+/// Options for [`TmuxBackend::capture`] (design §4.8).
+#[derive(Debug, Clone, Copy)]
+pub struct CaptureOpts {
+    /// Lines of scrollback to include; the pane is captured from `-<lines>`.
+    pub lines: u32,
+    /// Include ansi escape sequences (`-e`).
+    pub ansi: bool,
+}
 
 /// Launches and addresses agents inside tmux panes, all via the injected runner.
 pub struct TmuxBackend {
@@ -166,6 +177,73 @@ impl TmuxBackend {
         args.push(start.as_str());
         let out = self.tmux(&args, RunOpts::default()).await?;
         Ok(out.stdout)
+    }
+
+    /// Capture a pane's buffer (design §4.8). The public surface over
+    /// [`Self::capture_pane`]; gets its first trait-level caller in a later phase.
+    ///
+    /// # Errors
+    /// [`BackendError`] when the capture command fails to run.
+    pub async fn capture(
+        &self,
+        handle: &AgentHandle,
+        opts: CaptureOpts,
+    ) -> Result<String, BackendError> {
+        self.capture_pane(handle.address.as_str(), opts.lines, opts.ansi)
+            .await
+    }
+
+    /// Detect the agent's status (design §4.8): read `pane_current_command`,
+    /// and when a CLI is running, diff two captures over `status_diff_gap` to
+    /// tell Idle from Busy.
+    ///
+    /// # Errors
+    /// [`BackendError`] when a probe command fails to run.
+    pub async fn status(&self, handle: &AgentHandle) -> Result<AgentStatus, BackendError> {
+        let addr = handle.address.as_str();
+
+        // Step 1: what is the pane running? No addressable pane → Gone.
+        let probe = self
+            .tmux(
+                &[
+                    "display-message",
+                    "-p",
+                    "-t",
+                    addr,
+                    "#{pane_current_command}",
+                ],
+                RunOpts::default(),
+            )
+            .await?;
+        let cmd = probe.stdout.trim();
+        if probe.status != 0 || cmd.is_empty() {
+            return Ok(AgentStatus::Gone);
+        }
+
+        // Step 2: a shell means the CLI is still booting (Starting) or has
+        // exited back to a shell that shows prior output (Gone).
+        if matches!(cmd.trim_start_matches('-'), "bash" | "zsh" | "sh") {
+            let buf = self.capture_pane(addr, 50, false).await?;
+            return Ok(if buf.trim().is_empty() {
+                AgentStatus::Starting
+            } else {
+                AgentStatus::Gone
+            });
+        }
+
+        // Step 3: the CLI is running — diff two captures over the settle gap.
+        let first = self.capture_pane(addr, 50, false).await?;
+        tokio::time::sleep(self.cfg.status_diff_gap).await;
+        let second = self.capture_pane(addr, 50, false).await?;
+        if first == second {
+            Ok(AgentStatus::Idle {
+                last_output_age: self.cfg.status_diff_gap,
+            })
+        } else {
+            Ok(AgentStatus::Busy {
+                last_output_age: Duration::ZERO,
+            })
+        }
     }
 }
 
