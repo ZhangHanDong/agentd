@@ -10,10 +10,14 @@
 // Production-only lint opt-ins. Test files don't pick these up.
 #![warn(clippy::unwrap_used, clippy::panic)]
 
+pub mod checkpoint_repo;
 pub mod error;
+pub mod outcome_repo;
 pub mod paths;
 pub mod pool;
+pub mod run_repo;
 pub mod store;
+mod util;
 
 pub use error::StoreError;
 pub use store::SqliteStore;
