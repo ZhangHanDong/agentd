@@ -17,7 +17,7 @@ pub enum HandlerStep {
 }
 
 /// Why a node parked, and what event will unpark it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParkReason {
     HumanAnswer {
         wait_id: String,
@@ -57,8 +57,17 @@ pub enum EngineEvent {
 pub enum RunProgress {
     /// Run reached a terminal node.
     Finished { run_id: RunId },
-    /// Run parked on a node; caller should expect a future `deliver_event`.
-    Parked { run_id: RunId, node_id: NodeId },
+    /// Run parked on a node; caller should expect a future `deliver_event`. The
+    /// `reason` tells the caller what event will unpark it (and carries the
+    /// wait/review/task id needed to construct that event).
+    Parked {
+        run_id: RunId,
+        node_id: NodeId,
+        reason: ParkReason,
+    },
     /// Run failed terminally (no recovery edge, `goal_gate` unsatisfiable, etc.).
     Failed { run_id: RunId, reason: String },
+    /// A delivered event matched no open park (unknown/stale/replayed id). The
+    /// engine advanced nothing — a no-op, not a failure.
+    Ignored { reason: String },
 }
