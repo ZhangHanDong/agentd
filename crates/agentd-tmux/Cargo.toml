@@ -6,9 +6,23 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+# Real agent-spawning backend, not a crates.io library — keeps its version-less
+# path dep on agentd-core out of cargo-deny's wildcard ban.
+publish = false
 
 [lints]
 workspace = true
 
 [dependencies]
-# crate-specific deps come in later phases
+agentd-core = { path = "../agentd-core" }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = "0.1"
+
+[dev-dependencies]
+# Self path dep enabling agentd-core's test-support so tmux tests inject the
+# RecordingCommandRunner (FakeRunner) without touching a real tmux server.
+agentd-core = { path = "../agentd-core", features = ["test-support"] }
+tempfile = { workspace = true }
+tokio-test = "0.4"
