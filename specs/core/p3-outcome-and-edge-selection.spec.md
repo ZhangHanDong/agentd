@@ -84,3 +84,9 @@ Scenario: lexical tiebreak, and None when nothing matches
   When select_next_edge runs
   Then it returns the edge to "alpha"
   And a node with no outgoing edges returns None
+
+Scenario: A malformed condition never routes
+  Test: edge_select_ignores_condition_with_unbalanced_paren
+  Given an edge whose condition has an unbalanced open paren and an unconditional fallback edge
+  When select_next_edge runs
+  Then the malformed condition evaluates false and selection falls through to the fallback

@@ -114,3 +114,22 @@ fn edge_select_answer_condition_matches_context() {
     let e = select_next_edge(&g, "n", &out, &ctx, &HashMap::new()).expect("edge");
     assert_eq!(e.to, "approved");
 }
+
+#[test]
+fn edge_select_ignores_condition_with_unbalanced_paren() {
+    // A malformed condition (dropped close paren) is unparseable, so it must
+    // evaluate false and never route; selection falls through to the
+    // unconditional fallback rather than letting the broken edge win tier 1.
+    let g = graph(
+        r#"digraph m {
+        "n" -> "bad" [condition="(outcome=success"];
+        "n" -> "ok";
+    }"#,
+    );
+    let out = Outcome::success();
+    let e = select_next_edge(&g, "n", &out, &RunContext::new(), &HashMap::new()).expect("edge");
+    assert_eq!(
+        e.to, "ok",
+        "a malformed condition must not win edge selection"
+    );
+}

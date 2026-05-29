@@ -198,3 +198,37 @@ fn node_graph_rejects_multiple_starts() {
         "expected a multiple-start violation, got: {msg}"
     );
 }
+
+#[test]
+fn node_graph_rejects_undeclared_edge_endpoint() {
+    // 'ghost' is referenced by edges but never declared. The parser tolerates
+    // it, but validation must reject it — otherwise the engine steps into a
+    // node missing from the graph at run time.
+    let src = r#"digraph m {
+        "start" [shape=Mdiamond];
+        "end" [shape=Msquare];
+        "start" -> "ghost";
+        "ghost" -> "end";
+    }"#;
+    let msg = err_msg(src);
+    assert!(
+        msg.contains("edge endpoint 'ghost'"),
+        "expected an undeclared-endpoint violation, got: {msg}"
+    );
+}
+
+#[test]
+fn node_graph_rejects_duplicate_node_id() {
+    // The same id declared twice would corrupt shape/handler classification.
+    let src = r#"digraph m {
+        "a" [shape=Mdiamond];
+        "a" [handler=tool];
+        "end" [shape=Msquare];
+        "a" -> "end";
+    }"#;
+    let msg = err_msg(src);
+    assert!(
+        msg.contains("duplicate node id 'a'"),
+        "expected a duplicate-node-id violation, got: {msg}"
+    );
+}

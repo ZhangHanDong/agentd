@@ -27,12 +27,46 @@ const KNOWN_TOOLS: &[&str] = &[
 
 /// Run every validation check, accumulating violations.
 pub fn run(g: &NodeGraph, violations: &mut Vec<String>) {
+    check_node_ids(g, violations);
+    check_edge_endpoints(g, violations);
     check_start_terminal(g, violations);
     check_tools(g, violations);
     check_delphi(g, violations);
     check_reachability(g, violations);
     check_goal_gate_paths(g, violations);
     check_fan_out_pairing(g, violations);
+}
+
+/// Reject duplicate node ids: a repeated declaration would silently corrupt
+/// shape/handler classification (e.g. the same id as both start and terminal),
+/// and `node()` would resolve only the first declaration-order match.
+fn check_node_ids(g: &NodeGraph, violations: &mut Vec<String>) {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for n in &g.nodes {
+        if !seen.insert(n.id.as_str()) {
+            violations.push(format!("duplicate node id '{}'", n.id));
+        }
+    }
+}
+
+/// Reject an edge whose endpoint is not a declared node. The parser tolerates
+/// such an id (DOT permits implicit endpoints), but a workflow node needs a
+/// shape or handler, and the engine would otherwise step into a node missing
+/// from the graph (a runtime invariant error on an already-"valid" graph).
+fn check_edge_endpoints(g: &NodeGraph, violations: &mut Vec<String>) {
+    let ids: BTreeSet<&str> = g.nodes.iter().map(|n| n.id.as_str()).collect();
+    let mut missing: BTreeSet<&str> = BTreeSet::new();
+    for e in &g.edges {
+        if !ids.contains(e.from.as_str()) {
+            missing.insert(e.from.as_str());
+        }
+        if !ids.contains(e.to.as_str()) {
+            missing.insert(e.to.as_str());
+        }
+    }
+    for id in missing {
+        violations.push(format!("edge endpoint '{id}' is not a declared node"));
+    }
 }
 
 fn check_start_terminal(g: &NodeGraph, violations: &mut Vec<String>) {

@@ -111,10 +111,18 @@ pub fn eval_condition(src: &str, outcome: &Outcome, ctx: &RunContext) -> bool {
         pos: 0,
         outcome,
         ctx,
+        failed: false,
     };
     let v = p.parse_or();
-    // require full consumption; trailing junk → false
-    if p.pos == p.tokens.len() { v } else { false }
+    // Require full, well-formed consumption: trailing junk leaves leftover tokens
+    // (pos != len); a malformed sub-expression (e.g. an unbalanced open paren)
+    // sets `failed`. Either way an unparseable condition evaluates to false and
+    // never routes.
+    if p.failed || p.pos != p.tokens.len() {
+        false
+    } else {
+        v
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -200,6 +208,9 @@ struct Parser<'a> {
     pos: usize,
     outcome: &'a Outcome,
     ctx: &'a RunContext,
+    /// Set when a sub-expression is malformed (e.g. an unbalanced `(`); forces
+    /// `eval_condition` to return false so a broken condition never routes.
+    failed: bool,
 }
 
 impl Parser<'_> {
@@ -249,6 +260,10 @@ impl Parser<'_> {
             let v = self.parse_or();
             if self.peek() == Some(&CTok::RParen) {
                 self.pos += 1;
+            } else {
+                // Unbalanced open paren — the consumption guard can't catch this
+                // (no leftover token), so mark the parse failed explicitly.
+                self.failed = true;
             }
             return v;
         }

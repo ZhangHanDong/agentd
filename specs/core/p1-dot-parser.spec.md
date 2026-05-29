@@ -16,10 +16,17 @@ commas/semicolons. Anything outside this subset is a parse error.
 
 - Hand-written recursive parser, no external grammar deps
 - Identifier characters: `a-z A-Z 0-9 _ - .`
-- Attribute values are either bare identifiers, integers, booleans (true/false),
-  or double-quoted strings (with `\"` / `\n` / `\t` / `\r` / `\\` escapes)
+- Attribute values are either bare identifiers, **non-negative** integers, booleans
+  (true/false), or double-quoted strings (with `\"` / `\n` / `\t` / `\r` / `\\`
+  escapes). P0.1 LIMITATION: a leading `-` is reserved for the `->` arrow, so a
+  bare negative integer (`k=-5`) is not lexable — quote it (`k="-5"`) if needed.
+- P0.1 LEXING CONVENTION: node ids must be quoted, or unquoted but **separated
+  from `->` by whitespace** (`a -> b`, not `a->b`) — `-` is an identifier char,
+  so an unquoted id glued to the arrow mis-lexes. All shipped/sample workflows
+  quote ids. (Both this and the negative-integer gap are deferred cosmetic lexer
+  edges with no P0.1-reachable impact — a tracked relaxation, not a bug.)
 - Comments are `// ... end-of-line` only; no `/* ... */`
-- Node statements may appear standalone or implicitly through being referenced in an edge
+- Node statements may appear standalone or implicitly through being referenced in an edge (the parser tolerates an implicit endpoint; `NodeGraph` validation then requires every edge endpoint to resolve to a declared node — see p2)
 - subgraph keyword reserved but rejected in v0 (error message points to roadmap)
 - Order preservation: nodes and edges retain source order for deterministic iteration
 - The lexer offers one-token lookahead (`peek_tok`); the token consumer is `next_tok`

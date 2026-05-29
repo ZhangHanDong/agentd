@@ -24,6 +24,9 @@ fan-in) and reports ALL violations at once rather than failing on the first.
 - DEVIATION from the plan delta: unknown attributes are NOT a hard error. P0.1 validates only the attributes the checks above need and treats all other attributes as forward-compatible (ignored). Hard-rejecting unknown attributes would break the design's own Appendix C DOT (which uses many attributes outside the §2.2 table) and is not exercised by any scenario.
 - `visibility=delphi` and any `converge_or_*` aggregator are rejected (design §2.5.1 — reserved for P1+)
 - Multi-fan_out into one fan_in: a `parallel.fan_in` reachable from ≥2 `parallel.fan_out` nodes (none carrying `pair_with`) is rejected in P0.1
+- Exactly one start node: zero starts and more than one start are both rejected (the engine drives from a single entry point)
+- Every edge endpoint must resolve to a declared node: the parser tolerates an implicit edge-referenced id (DOT semantics), but validation rejects it so the engine never steps into a node missing from the graph
+- Duplicate node ids are rejected: a repeated declaration would corrupt shape/handler classification (e.g. the same id as both start and terminal)
 - Violations accumulate; `from_ast` returns `Err(CoreError::GraphValidate(joined))` listing every violation
 
 ## Boundaries
@@ -55,6 +58,18 @@ Scenario: A graph with more than one start node is rejected
   Given a parsed graph with two Mdiamond start nodes
   When NodeGraph::from_ast runs
   Then it returns an error mentioning multiple start nodes (the engine drives from one entry point)
+
+Scenario: An edge referencing an undeclared node is rejected
+  Test: node_graph_rejects_undeclared_edge_endpoint
+  Given a parsed graph whose edge names an endpoint that has no node declaration
+  When NodeGraph::from_ast runs
+  Then it returns an error naming the undeclared edge endpoint
+
+Scenario: A duplicate node id is rejected
+  Test: node_graph_rejects_duplicate_node_id
+  Given a parsed graph that declares the same node id twice
+  When NodeGraph::from_ast runs
+  Then it returns an error naming the duplicate node id
 
 Scenario: A graph with no terminal node is rejected
   Test: node_graph_rejects_no_terminal
