@@ -15,7 +15,7 @@ pub mod discovery;
 pub mod error;
 pub mod runner;
 
-pub use backend::{CaptureOpts, TmuxBackend};
+pub use backend::{CaptureOpts, ShutdownMethod, ShutdownOpts, ShutdownReport, TmuxBackend};
 pub use config::{Config, ReadyPatterns};
 pub use error::BackendError;
 pub use runner::TokioCommandRunner;

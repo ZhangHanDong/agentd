@@ -9,7 +9,7 @@ use agentd_core::ports::{CommandError, CommandOutput};
 use agentd_core::test_support::RecordingCommandRunner;
 use agentd_core::types::{AgentHandle, AgentId, AgentStatus, BackendKind};
 
-use agentd_tmux::{BackendError, CaptureOpts, Config, TmuxBackend};
+use agentd_tmux::{BackendError, CaptureOpts, Config, ShutdownMethod, ShutdownOpts, TmuxBackend};
 
 const TMUX_BIN: &str = "/opt/homebrew/bin/tmux";
 
@@ -32,6 +32,16 @@ fn err() -> Result<CommandOutput, CommandError> {
 
 fn zero_gap_cfg() -> Config {
     Config {
+        status_diff_gap: Duration::ZERO,
+        ..Config::default()
+    }
+}
+
+fn zero_lifecycle_cfg() -> Config {
+    Config {
+        inject_delay: Duration::ZERO,
+        graceful_timeout: Duration::ZERO,
+        sigint_settle: Duration::ZERO,
         status_diff_gap: Duration::ZERO,
         ..Config::default()
     }
@@ -167,4 +177,150 @@ async fn status_busy_when_output_changes() {
         .await
         .expect("status ok");
     assert!(matches!(status, AgentStatus::Busy { .. }), "got {status:?}");
+}
+
+// ---- shutdown (§4.9) ------------------------------------------------------
+
+#[tokio::test]
+async fn shutdown_archives_before_any_kill() {
+    let rec = Arc::new(RecordingCommandRunner::new());
+    rec.push_output(ok("", 0)); // has-session (step 0): alive
+    rec.push_output(ok("transcript body", 0)); // capture-pane (archive)
+    rec.push_output(ok("", 0)); // send_prompt: set-buffer
+    rec.push_output(ok("", 0)); // send_prompt: paste-buffer
+    rec.push_output(ok("", 0)); // send_prompt: send-keys Enter
+    rec.push_output(ok("", 0)); // has-session after graceful: still alive
+    rec.push_output(ok("", 0)); // send-keys C-c
+    rec.push_output(ok("", 0)); // send-keys C-c
+    rec.push_output(ok("", 0)); // has-session after interrupt: still alive
+    rec.push_output(ok("", 0)); // kill-session
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let archive = dir.path().join("transcript.txt");
+    let report = backend(&rec, zero_lifecycle_cfg())
+        .shutdown(
+            &handle("agentd-x:0.0"),
+            ShutdownOpts {
+                archive_to: archive.clone(),
+            },
+        )
+        .await
+        .expect("shutdown ok");
+
+    assert_eq!(report.method, ShutdownMethod::Kill);
+    assert!(
+        !report.final_capture_sha.is_empty(),
+        "final_capture_sha recorded"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&archive).expect("archive written"),
+        "transcript body"
+    );
+
+    let calls = rec.calls();
+    let cap = calls
+        .iter()
+        .position(|c| c.args[0] == "capture-pane")
+        .expect("capture-pane ran");
+    let kill = calls
+        .iter()
+        .position(|c| c.args[0] == "kill-session")
+        .expect("kill-session ran");
+    assert!(cap < kill, "archive must precede kill-session");
+    for (i, call) in calls.iter().enumerate() {
+        if call.args.iter().any(|a| a == "C-c") {
+            assert!(cap < i, "archive must precede any C-c interrupt (call {i})");
+        }
+    }
+}
+
+#[tokio::test]
+async fn shutdown_graceful_reports_graceful() {
+    let rec = Arc::new(RecordingCommandRunner::new());
+    rec.push_output(ok("", 0)); // has-session step 0: alive
+    rec.push_output(ok("body", 0)); // capture-pane archive
+    rec.push_output(ok("", 0)); // set-buffer
+    rec.push_output(ok("", 0)); // paste-buffer
+    rec.push_output(ok("", 0)); // send-keys Enter
+    rec.push_output(ok("", 1)); // has-session after graceful: gone
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let report = backend(&rec, zero_lifecycle_cfg())
+        .shutdown(
+            &handle("agentd-x:0.0"),
+            ShutdownOpts {
+                archive_to: dir.path().join("t.txt"),
+            },
+        )
+        .await
+        .expect("shutdown ok");
+
+    assert_eq!(report.method, ShutdownMethod::Graceful);
+    let calls = rec.calls();
+    assert!(
+        !calls.iter().any(|c| c.args[0] == "kill-session"),
+        "graceful exit needs no kill"
+    );
+    assert!(
+        !calls.iter().any(|c| c.args.iter().any(|a| a == "C-c")),
+        "graceful exit needs no interrupt"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_missing_session_is_recoverable() {
+    let rec = Arc::new(RecordingCommandRunner::new());
+    rec.push_output(ok("", 1)); // has-session step 0: already gone
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let err = backend(&rec, zero_lifecycle_cfg())
+        .shutdown(
+            &handle("agentd-x:0.0"),
+            ShutdownOpts {
+                archive_to: dir.path().join("t.txt"),
+            },
+        )
+        .await
+        .expect_err("a missing session is recoverable");
+    assert!(matches!(err, BackendError::Recoverable(_)));
+
+    let calls = rec.calls();
+    assert_eq!(calls.len(), 1, "only the liveness probe ran");
+    assert!(
+        !calls.iter().any(|c| c.args[0] == "capture-pane"),
+        "nothing was archived"
+    );
+}
+
+// ---- rebind (§4.10) -------------------------------------------------------
+
+#[tokio::test]
+async fn rebind_reconstructs_live_session() {
+    let rec = Arc::new(RecordingCommandRunner::new());
+    rec.push_output(ok("", 0)); // has-session: alive
+    rec.push_output(ok("%5 999\n", 0)); // display-message
+
+    let rebound = backend(&rec, Config::default())
+        .rebind("agentd-claude-impl-a")
+        .await
+        .expect("rebind ok")
+        .expect("a live session yields a handle");
+
+    assert_eq!(rebound.session_name, "agentd-claude-impl-a");
+    assert_eq!(rebound.address, "agentd-claude-impl-a:0.0");
+    assert_eq!(rebound.pane_id.as_deref(), Some("%5"));
+    assert_eq!(rebound.pid, Some(999));
+    assert_eq!(rebound.agent_id.as_str(), "claude-impl-a");
+}
+
+#[tokio::test]
+async fn rebind_missing_session_returns_none() {
+    let rec = Arc::new(RecordingCommandRunner::new());
+    rec.push_output(ok("", 1)); // has-session: gone
+
+    let rebound = backend(&rec, Config::default())
+        .rebind("agentd-claude-impl-a")
+        .await
+        .expect("rebind ok");
+    assert!(rebound.is_none());
 }

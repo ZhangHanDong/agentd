@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime};
 use agentd_core::CoreError;
 use agentd_core::ports::{AgentBackend, CommandOutput, CommandRunner, RunOpts};
 use agentd_core::types::{
-    AgentHandle, AgentStatus, BackendKind, CliKind, LaunchStrategy, SpawnRequest,
+    AgentHandle, AgentId, AgentStatus, BackendKind, CliKind, LaunchStrategy, SpawnRequest,
 };
 
 use crate::config::Config;
@@ -25,6 +25,33 @@ pub struct CaptureOpts {
     pub lines: u32,
     /// Include ansi escape sequences (`-e`).
     pub ansi: bool,
+}
+
+/// How a [`TmuxBackend::shutdown`] actually ended the agent (design §4.9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownMethod {
+    /// The agent left on its own after a graceful `/exit`.
+    Graceful,
+    /// Two interrupts (C-c) brought it down.
+    Interrupt,
+    /// The session was killed outright.
+    Kill,
+}
+
+/// Options for [`TmuxBackend::shutdown`].
+#[derive(Debug, Clone)]
+pub struct ShutdownOpts {
+    /// Where the pre-kill transcript archive is written.
+    pub archive_to: PathBuf,
+}
+
+/// The outcome of a [`TmuxBackend::shutdown`] (design §4.9).
+#[derive(Debug, Clone)]
+pub struct ShutdownReport {
+    /// Which escalation step ended the agent.
+    pub method: ShutdownMethod,
+    /// SHA-256 of the archived transcript, recorded before any kill.
+    pub final_capture_sha: String,
 }
 
 /// Launches and addresses agents inside tmux panes, all via the injected runner.
@@ -245,6 +272,109 @@ impl TmuxBackend {
             })
         }
     }
+
+    /// Tear an agent down (design §4.9): archive the transcript BEFORE any kill,
+    /// then escalate graceful `/exit` → interrupt (C-c x2) → `kill-session`.
+    ///
+    /// # Errors
+    /// [`BackendError::Recoverable`] when the session is already gone;
+    /// [`BackendError`] when a tmux stage or the archive write fails.
+    pub async fn shutdown(
+        &self,
+        handle: &AgentHandle,
+        opts: ShutdownOpts,
+    ) -> Result<ShutdownReport, BackendError> {
+        const ARCHIVE_LINES: u32 = 5000;
+        let session = handle.session_name.as_str();
+        let addr = handle.address.as_str();
+
+        // A missing session has nothing to tear down (case 5).
+        if !self.session_alive(session).await? {
+            return Err(BackendError::Recoverable(format!(
+                "session {session} is already gone; nothing to shut down"
+            )));
+        }
+
+        // Archive the transcript BEFORE any kill action (case 7).
+        let transcript = self.capture_pane(addr, ARCHIVE_LINES, false).await?;
+        write_file(&opts.archive_to, &transcript)?;
+        let final_capture_sha = sha256_hex(transcript.as_bytes());
+
+        // Escalation 1: graceful `/exit`, then wait and re-probe.
+        self.send_prompt(handle, "/exit").await?;
+        tokio::time::sleep(self.cfg.graceful_timeout).await;
+        if !self.session_alive(session).await? {
+            return Ok(ShutdownReport {
+                method: ShutdownMethod::Graceful,
+                final_capture_sha,
+            });
+        }
+
+        // Escalation 2: two interrupts (named C-c key, never the -l flag).
+        self.tmux(&["send-keys", "-t", addr, "C-c"], RunOpts::default())
+            .await?;
+        self.tmux(&["send-keys", "-t", addr, "C-c"], RunOpts::default())
+            .await?;
+        tokio::time::sleep(self.cfg.sigint_settle).await;
+        if !self.session_alive(session).await? {
+            return Ok(ShutdownReport {
+                method: ShutdownMethod::Interrupt,
+                final_capture_sha,
+            });
+        }
+
+        // Escalation 3: kill the session outright.
+        self.tmux(&["kill-session", "-t", session], RunOpts::default())
+            .await?;
+        Ok(ShutdownReport {
+            method: ShutdownMethod::Kill,
+            final_capture_sha,
+        })
+    }
+
+    /// Re-attach to a surviving session on daemon restart (design §4.10).
+    /// Returns `Ok(None)` when `target` no longer exists, else a rebuilt handle.
+    ///
+    /// # Errors
+    /// [`BackendError`] when the pane re-probe fails to run or parse.
+    pub async fn rebind(&self, target: &str) -> Result<Option<AgentHandle>, BackendError> {
+        if !self.session_alive(target).await? {
+            return Ok(None);
+        }
+        let address = format!("{target}:0.0");
+        let probe = self
+            .tmux(
+                &[
+                    "display-message",
+                    "-p",
+                    "-t",
+                    address.as_str(),
+                    "#{pane_id} #{pane_pid}",
+                ],
+                RunOpts::default(),
+            )
+            .await?;
+        let (pane_id, pid) = parse_pane_info(&probe.stdout)?;
+        let agent_id = target.strip_prefix("agentd-").unwrap_or(target);
+        Ok(Some(AgentHandle {
+            agent_id: AgentId::parsed(agent_id),
+            backend: BackendKind::Tmux,
+            address,
+            pane_id: Some(pane_id),
+            pid,
+            // Approximate; the DB holds the authoritative start time (§4.10).
+            session_name: target.to_string(),
+            spawned_at: SystemTime::now(),
+        }))
+    }
+
+    /// True when `tmux has-session -t <session>` exits zero.
+    async fn session_alive(&self, session: &str) -> Result<bool, BackendError> {
+        let probe = self
+            .tmux(&["has-session", "-t", session], RunOpts::default())
+            .await?;
+        Ok(probe.status == 0)
+    }
 }
 
 #[async_trait::async_trait]
@@ -255,13 +385,10 @@ impl AgentBackend for TmuxBackend {
         let session = format!("agentd-{}", req.agent_id.as_str());
         let address = format!("{session}:0.0");
 
-        // §4.5 step 1: liveness probe FIRST. A zero exit means the session is
-        // already live — the caller should rebind, not spawn a second one. We
-        // return before writing any launcher or running new-session.
-        let probe = self
-            .tmux(&["has-session", "-t", session.as_str()], RunOpts::default())
-            .await?;
-        if probe.status == 0 {
+        // §4.5 step 1: liveness probe FIRST. A live session means the caller
+        // should rebind, not spawn a second one. We return before writing any
+        // launcher or running new-session.
+        if self.session_alive(session.as_str()).await? {
             return Err(BackendError::Recoverable(format!(
                 "session {session} already exists; rebind instead of spawning"
             ))
@@ -448,6 +575,18 @@ fn parse_pane_info(stdout: &str) -> Result<(String, Option<u32>), BackendError> 
         .to_string();
     let pid = parts.next().and_then(|tok| tok.parse::<u32>().ok());
     Ok((pane_id, pid))
+}
+
+/// Lowercase hex SHA-256 of `bytes` (the shutdown transcript fingerprint).
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 
 /// Write `contents` to `path`, mapping an IO failure to a recoverable error.
