@@ -11,6 +11,7 @@
 #![warn(clippy::unwrap_used, clippy::panic)]
 
 pub mod client;
+pub mod drainer;
 pub mod error;
 pub mod transport;
 

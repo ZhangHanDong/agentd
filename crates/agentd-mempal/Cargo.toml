@@ -20,6 +20,7 @@ test-support = []
 
 [dependencies]
 agentd-core = { path = "../agentd-core" }
+agentd-store = { path = "../agentd-store" }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
@@ -30,4 +31,7 @@ async-trait = "0.1"
 # Self path dep enabling the in-crate test-support so tests inject the
 # RecordingToolCaller (the MCP transport fake) without a real rmcp/mempal server.
 agentd-mempal = { path = ".", features = ["test-support"] }
+# agentd-core test-support gives drainer tests the in-memory MempalStub.
+agentd-core = { path = "../agentd-core", features = ["test-support"] }
+tempfile = { workspace = true }
 tokio-test = "0.4"

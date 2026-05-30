@@ -7,6 +7,7 @@ use agentd_core::types::{MempalWrite, NodeId, RunId};
 use sqlx::{Row, SqliteConnection, SqlitePool};
 
 use crate::error::StoreError;
+use crate::util::now_unix;
 
 /// A pending outbox row, in the shape the drainer needs.
 #[derive(Debug, Clone)]
@@ -79,4 +80,31 @@ pub async fn claim_pending(pool: &SqlitePool, limit: i64) -> Result<Vec<OutboxRo
             attempts: row.get("attempts"),
         })
         .collect())
+}
+
+/// Mark row `id` delivered (sets `drained_at`).
+///
+/// # Errors
+/// [`StoreError::Sqlx`] on a database failure.
+pub async fn mark_drained(pool: &SqlitePool, id: i64) -> Result<(), StoreError> {
+    sqlx::query("UPDATE mempal_outbox SET drained_at = ? WHERE id = ?")
+        .bind(now_unix())
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Record a failed delivery on row `id`: bump `attempts`, store `last_error`.
+/// The row stays pending (`drained_at` unchanged) so the next pass retries it.
+///
+/// # Errors
+/// [`StoreError::Sqlx`] on a database failure.
+pub async fn mark_failed(pool: &SqlitePool, id: i64, last_error: &str) -> Result<(), StoreError> {
+    sqlx::query("UPDATE mempal_outbox SET attempts = attempts + 1, last_error = ? WHERE id = ?")
+        .bind(last_error)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }

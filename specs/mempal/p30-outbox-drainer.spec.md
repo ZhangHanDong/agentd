@@ -19,12 +19,14 @@ Task 3 (extending this spec).
 - An outcome with no `mempal_writes` enqueues nothing (the existing engine path is unchanged).
 - `outbox_repo::claim_pending(limit)` returns pending rows (`drained_at IS NULL`) FIFO by `enqueued_at`, as `OutboxRow { id, run_id, node_id, kind, payload, attempts }`.
 - The shared `run_id` foreign key on both tables means an outbox-only failure is not data-reachable; the transaction's rollback is verified by the failed-insert-leaves-nothing scenario plus review of the single `begin/commit` boundary.
+- The background drainer's `drain_once` claims pending rows FIFO and dispatches each `MempalWrite` to the `MempalClient` (Ingest→ingest, KgAdd→kg_add, FactCheck→fact_check); on success it `mark_drained`s the row, on failure it `mark_failed`s (attempts + 1, last_error) and leaves the row pending to retry. A row whose attempts exceed 5 is skipped and reported as an operator alert (it stays in the table). `spawn` runs `drain_once` on a loop, backing off exponentially when a pass is idle or erroring.
 
 ## Boundaries
 
 ### Allowed Changes
 
 - crates/agentd-store/**
+- crates/agentd-mempal/**
 - specs/mempal/**
 
 ### Forbidden
@@ -62,3 +64,21 @@ Scenario: an outcome without mempal writes enqueues nothing
   Given a store with an inserted run and a node outcome with no mempal writes
   When insert_node_outcome runs
   Then the node_outcomes row exists and claim_pending returns no rows
+
+Scenario: the drainer dispatches pending rows and marks them drained
+  Test: drainer_drains_pending_rows_and_marks_drained
+  Given a store with two enqueued writes (a kg_add and an ingest) and a recording mempal client
+  When drain_once runs
+  Then the report shows two drained, claim_pending then returns nothing, and the client recorded both writes
+
+Scenario: the drainer retries a failing row until the attempt bound then alerts
+  Test: test_drainer_retries_with_backoff_until_attempts_exceeded
+  Given a store with one enqueued write and a mempal client that always errors
+  When drain_once runs repeatedly
+  Then the row's attempts climb to 6, it stays pending (never drained), and a pass reports it as an alert
+
+Scenario: a down mempal leaves the rows pending without erroring the drainer
+  Test: drainer_tolerates_mempal_down
+  Given a store with one enqueued write and a mempal client that always errors
+  When drain_once runs once
+  Then it returns Ok, the row is still pending with attempts incremented, and no run or outcome state changed
