@@ -82,6 +82,39 @@ pub async fn claim_pending(pool: &SqlitePool, limit: i64) -> Result<Vec<OutboxRo
         .collect())
 }
 
+/// Pending rows that are still RETRYABLE (`drained_at IS NULL AND attempts <=
+/// max_attempts`), FIFO by `enqueued_at`, up to `limit`. Exhausted rows (attempts
+/// past the bound) are excluded so a permanently-stuck row never starves the
+/// claim window — it stays in the table, still visible to [`claim_pending`].
+///
+/// # Errors
+/// [`StoreError::Sqlx`] on a database failure.
+pub async fn claim_retryable(
+    pool: &SqlitePool,
+    limit: i64,
+    max_attempts: i64,
+) -> Result<Vec<OutboxRow>, StoreError> {
+    let rows = sqlx::query(
+        "SELECT id, run_id, node_id, kind, payload, attempts FROM mempal_outbox \
+         WHERE drained_at IS NULL AND attempts <= ? ORDER BY enqueued_at ASC, id ASC LIMIT ?",
+    )
+    .bind(max_attempts)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| OutboxRow {
+            id: row.get("id"),
+            run_id: row.get("run_id"),
+            node_id: row.get("node_id"),
+            kind: row.get("kind"),
+            payload: row.get("payload"),
+            attempts: row.get("attempts"),
+        })
+        .collect())
+}
+
 /// Mark row `id` delivered (sets `drained_at`).
 ///
 /// # Errors

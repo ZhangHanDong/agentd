@@ -75,15 +75,12 @@ pub async fn drain_once(
     cfg: &DrainerConfig,
 ) -> Result<DrainReport, CoreError> {
     let pool = store.pool();
-    let pending = outbox_repo::claim_pending(pool, cfg.batch_limit).await?;
+    // Claim only retryable rows: a row past the attempt bound is excluded here so
+    // it can never starve the claim window — it just stays in the table (§3.4).
+    let pending = outbox_repo::claim_retryable(pool, cfg.batch_limit, cfg.max_attempts).await?;
     let mut report = DrainReport::default();
 
     for row in pending {
-        // Past the bound: stop retrying, keep the row, alert the operator (§3.4).
-        if row.attempts > cfg.max_attempts {
-            report.alerts.push(row.id);
-            continue;
-        }
         let write: MempalWrite = match serde_json::from_str(&row.payload) {
             Ok(write) => write,
             Err(e) => {

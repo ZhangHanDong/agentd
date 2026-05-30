@@ -155,3 +155,62 @@ async fn drainer_tolerates_mempal_down() {
     assert_eq!(pending.len(), 1, "the row is still pending");
     assert_eq!(pending[0].attempts, 1, "attempts bumped, nothing drained");
 }
+
+#[tokio::test]
+async fn drainer_does_not_reclaim_exhausted_rows() {
+    let (s, _d) = store_with_writes(vec![(
+        NodeId::parsed("a"),
+        vec![MempalWrite::Ingest {
+            wing: "w".to_string(),
+            kind: "k".to_string(),
+            body: "b".to_string(),
+            importance: 1,
+        }],
+    )])
+    .await;
+
+    let client = AlwaysErrClient;
+    let cfg = DrainerConfig::default();
+    for _ in 0..7 {
+        drain_once(&s, &client, &cfg).await.expect("drain");
+    }
+
+    // Past the bound, the row is no longer retryable (so it cannot starve the
+    // window) but it stays in the table for the operator to inspect.
+    let retryable = outbox_repo::claim_retryable(s.pool(), 100, cfg.max_attempts)
+        .await
+        .expect("retryable");
+    assert!(retryable.is_empty(), "an exhausted row is not re-claimed");
+
+    let all = outbox_repo::claim_pending(s.pool(), 100)
+        .await
+        .expect("pending");
+    assert_eq!(all.len(), 1, "the stuck row stays in the table");
+    assert!(all[0].attempts > cfg.max_attempts);
+}
+
+#[tokio::test]
+async fn drainer_drains_a_fact_check_write() {
+    let (s, _d) = store_with_writes(vec![(
+        NodeId::parsed("a"),
+        vec![MempalWrite::FactCheck {
+            text: "check me".to_string(),
+        }],
+    )])
+    .await;
+
+    let stub = MempalStub::new();
+    let report = drain_once(&s, &stub, &DrainerConfig::default())
+        .await
+        .expect("drain ok");
+    assert_eq!(
+        report.drained, 1,
+        "the fact_check write dispatched and drained"
+    );
+    assert!(
+        outbox_repo::claim_pending(s.pool(), 10)
+            .await
+            .expect("claim")
+            .is_empty()
+    );
+}

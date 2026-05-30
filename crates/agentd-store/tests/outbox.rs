@@ -134,3 +134,37 @@ async fn outcome_without_writes_enqueues_nothing() {
         .expect("claim");
     assert!(pending.is_empty());
 }
+
+#[tokio::test]
+async fn enqueue_writes_one_row_per_write_in_order() {
+    let (s, _d) = store().await;
+    let run = RunId::from_string("r1");
+    run_repo::insert_run(s.pool(), &run, "sha")
+        .await
+        .expect("run");
+    let node = NodeId::parsed("draft");
+
+    let outcome = outcome_with_writes(vec![
+        MempalWrite::KgAdd {
+            subject: "s".to_string(),
+            predicate: "p".to_string(),
+            object: "o".to_string(),
+        },
+        MempalWrite::Ingest {
+            wing: "w".to_string(),
+            kind: "k".to_string(),
+            body: "b".to_string(),
+            importance: 1,
+        },
+    ]);
+    outcome_repo::insert_node_outcome(s.pool(), &run, &node, &outcome)
+        .await
+        .expect("insert");
+
+    let pending = outbox_repo::claim_pending(s.pool(), 10)
+        .await
+        .expect("claim");
+    assert_eq!(pending.len(), 2, "one outbox row per write");
+    assert_eq!(pending[0].kind, "kg_add", "FIFO: the first write first");
+    assert_eq!(pending[1].kind, "ingest");
+}

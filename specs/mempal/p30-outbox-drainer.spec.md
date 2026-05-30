@@ -19,7 +19,7 @@ Task 3 (extending this spec).
 - An outcome with no `mempal_writes` enqueues nothing (the existing engine path is unchanged).
 - `outbox_repo::claim_pending(limit)` returns pending rows (`drained_at IS NULL`) FIFO by `enqueued_at`, as `OutboxRow { id, run_id, node_id, kind, payload, attempts }`.
 - The shared `run_id` foreign key on both tables means an outbox-only failure is not data-reachable; the transaction's rollback is verified by the failed-insert-leaves-nothing scenario plus review of the single `begin/commit` boundary.
-- The background drainer's `drain_once` claims pending rows FIFO and dispatches each `MempalWrite` to the `MempalClient` (Ingest→ingest, KgAdd→kg_add, FactCheck→fact_check); on success it `mark_drained`s the row, on failure it `mark_failed`s (attempts + 1, last_error) and leaves the row pending to retry. A row whose attempts exceed 5 is skipped and reported as an operator alert (it stays in the table). `spawn` runs `drain_once` on a loop, backing off exponentially when a pass is idle or erroring.
+- The background drainer's `drain_once` claims only RETRYABLE rows via `claim_retryable(limit, max_attempts)` (`drained_at IS NULL AND attempts <= max_attempts`, FIFO) and dispatches each `MempalWrite` to the `MempalClient` (Ingest→ingest, KgAdd→kg_add, FactCheck→fact_check); on success it `mark_drained`s the row, on failure it `mark_failed`s (attempts + 1, last_error) and leaves the row pending to retry. When a failure pushes a row's attempts past `max_attempts` (5) it is reported as an operator alert; thereafter `claim_retryable` excludes it, so a permanently-stuck row never starves the claim window or re-runs — it simply stays in the table (still visible to `claim_pending`). `spawn` runs `drain_once` on a loop, backing off exponentially when a pass is idle or erroring.
 
 ## Boundaries
 
@@ -82,3 +82,21 @@ Scenario: a down mempal leaves the rows pending without erroring the drainer
   Given a store with one enqueued write and a mempal client that always errors
   When drain_once runs once
   Then it returns Ok, the row is still pending with attempts incremented, and no run or outcome state changed
+
+Scenario: an exhausted row is excluded from claim_retryable so it cannot starve newer writes
+  Test: drainer_does_not_reclaim_exhausted_rows
+  Given a store with one write driven past the attempt bound by an always-erroring client
+  When claim_retryable and claim_pending are queried
+  Then claim_retryable returns nothing while claim_pending still lists the stuck row
+
+Scenario: the drainer dispatches a fact_check write
+  Test: drainer_drains_a_fact_check_write
+  Given a store with one enqueued FactCheck write and a recording mempal client
+  When drain_once runs
+  Then the report shows one drained and claim_pending then returns nothing
+
+Scenario: an outcome with several writes enqueues one row per write in order
+  Test: enqueue_writes_one_row_per_write_in_order
+  Given a store with an inserted run and a node outcome carrying a KgAdd then an Ingest write
+  When insert_node_outcome runs
+  Then claim_pending returns two rows whose kinds are "kg_add" then "ingest" in that order
