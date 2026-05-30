@@ -6,9 +6,28 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+# mempal MCP client, not a crates.io library — keeps its version-less path dep
+# on agentd-core out of cargo-deny's wildcard ban.
+publish = false
 
 [lints]
 workspace = true
 
+# `test-support` gates the in-crate `RecordingToolCaller` fake (src/test_support),
+# mirroring agentd-core. Not a default feature, so it never ships in a release.
+[features]
+test-support = []
+
 [dependencies]
-# crate-specific deps come in later phases
+agentd-core = { path = "../agentd-core" }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde_json = { workspace = true }
+async-trait = "0.1"
+
+[dev-dependencies]
+# Self path dep enabling the in-crate test-support so tests inject the
+# RecordingToolCaller (the MCP transport fake) without a real rmcp/mempal server.
+agentd-mempal = { path = ".", features = ["test-support"] }
+tokio-test = "0.4"
