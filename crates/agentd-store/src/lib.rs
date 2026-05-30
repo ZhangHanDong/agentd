@@ -14,6 +14,7 @@ pub mod artifact_repo;
 pub mod checkpoint_repo;
 pub mod error;
 pub mod human_wait_repo;
+pub mod outbox_repo;
 pub mod outcome_repo;
 pub mod paths;
 pub mod pool;

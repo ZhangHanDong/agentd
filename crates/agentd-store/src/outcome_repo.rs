@@ -1,7 +1,8 @@
 //! `node_outcomes` operations. The PK `(run_id, node_id, attempt)` makes attempt
-//! counting (and the retry bound) a row count. `mempal_writes` are NOT persisted
-//! here — they flow to `mempal_outbox` (design §3.4) — so a reconstructed
-//! `Outcome` carries an empty `mempal_writes`, which is all the engine reads.
+//! counting (and the retry bound) a row count. `mempal_writes` are not persisted
+//! in `node_outcomes`; they are enqueued into `mempal_outbox` in the SAME
+//! transaction as the outcome row (design §3.4), so `latest_outcome`
+//! reconstructs an empty `mempal_writes` (all the engine reads).
 
 use agentd_core::types::{Artifact, NodeId, Outcome, RunId};
 use sqlx::{Row, SqlitePool};
@@ -19,12 +20,16 @@ pub async fn insert_node_outcome(
     node_id: &NodeId,
     outcome: &Outcome,
 ) -> Result<(), StoreError> {
+    // The outcome row and its outbox enqueues are one transaction (design §3.4):
+    // a failure anywhere commits neither, so a partial enqueue is impossible.
+    let mut tx = pool.begin().await?;
+
     let next_attempt: i64 = sqlx::query_scalar(
         "SELECT COALESCE(MAX(attempt), 0) + 1 FROM node_outcomes WHERE run_id = ? AND node_id = ?",
     )
     .bind(run_id.as_str())
     .bind(node_id.as_str())
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
 
     let context_delta = serde_json::to_string(&outcome.context_updates)?;
@@ -52,8 +57,12 @@ pub async fn insert_node_outcome(
     .bind(artifacts)
     .bind(now)
     .bind(now)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+
+    crate::outbox_repo::enqueue(&mut tx, run_id, node_id, &outcome.mempal_writes, now).await?;
+
+    tx.commit().await?;
     Ok(())
 }
 
