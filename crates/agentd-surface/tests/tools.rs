@@ -7,8 +7,10 @@ use agentd_core::types::{NodeId, ReviewRunId, RunId, TaskRunId};
 use agentd_core::{EngineEvent, ParkReason, RunProgress};
 
 use agentd_surface::host::{RunSnapshot, TaskAssignment};
+use agentd_surface::mcp_server::{dispatch, tool_descriptors};
 use agentd_surface::test_support::FakeRunHost;
 use agentd_surface::tools::assign_task::{AssignTaskInput, assign_task};
+use agentd_surface::tools::check_inbox::{CheckInboxInput, check_inbox};
 use agentd_surface::tools::query_run::{QueryRunInput, query_run};
 use agentd_surface::tools::submit_outcome::{SubmitOutcomeInput, submit_outcome};
 use agentd_surface::tools::submit_review::{SubmitReviewInput, submit_review};
@@ -261,4 +263,63 @@ async fn assign_task_no_task_is_not_assigned() {
     .await
     .expect_err("no task is not_assigned");
     assert_eq!(err.code(), "not_assigned");
+}
+
+// ---- check_inbox + dispatcher (p70) ---------------------------------------
+
+#[tokio::test]
+async fn check_inbox_returns_empty_v0() {
+    let host = FakeRunHost::new();
+    let out = check_inbox(
+        &host,
+        CheckInboxInput {
+            agent_id: "impl-a".to_string(),
+            drain: false,
+        },
+    )
+    .await
+    .expect("check_inbox ok");
+    assert!(out.messages.is_empty(), "v0 inbox is empty");
+}
+
+#[tokio::test]
+async fn dispatch_lists_five_tools() {
+    let names: Vec<&str> = tool_descriptors().iter().map(|d| d.name).collect();
+    assert_eq!(names.len(), 5);
+    for expected in [
+        "assign_task",
+        "submit_outcome",
+        "submit_review",
+        "check_inbox",
+        "query_run",
+    ] {
+        assert!(names.contains(&expected), "missing tool {expected}");
+    }
+}
+
+#[tokio::test]
+async fn dispatch_routes_to_handler() {
+    let host = FakeRunHost::new();
+    host.set_snapshot(
+        "r1",
+        RunSnapshot {
+            status: "parked".to_string(),
+            current_node: Some("review".to_string()),
+            completed_nodes: vec![],
+            context: json!({}),
+        },
+    );
+
+    let out = dispatch(&host, "query_run", json!({"run_id": "r1"}))
+        .await
+        .expect("dispatch ok");
+    assert_eq!(out["status"], "parked");
+    assert_eq!(out["current_node"], "review");
+}
+
+#[tokio::test]
+async fn dispatch_unknown_tool_is_error() {
+    let host = FakeRunHost::new();
+    let result = dispatch(&host, "no_such_tool", json!({})).await;
+    assert!(result.is_err(), "an unregistered tool is an error");
 }

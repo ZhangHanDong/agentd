@@ -10,6 +10,7 @@
 
 pub mod error;
 pub mod host;
+pub mod mcp_server;
 pub mod tools;
 
 // In-crate seam fake. Gated so it never ships in a release binary; the crate's
