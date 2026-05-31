@@ -6,9 +6,29 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+# The daemon's outward surface (MCP + HTTP/SSE), not a crates.io library — keeps
+# its version-less path dep on agentd-core out of cargo-deny's wildcard ban.
+publish = false
 
 [lints]
 workspace = true
 
+# `test-support` gates the in-crate `FakeRunHost` seam fake (src/test_support),
+# mirroring the other crates. Not a default feature; never ships in a release.
+[features]
+test-support = []
+
 [dependencies]
-# crate-specific deps come in later phases
+agentd-core = { path = "../agentd-core" }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = "0.1"
+
+[dev-dependencies]
+# Self path dep enabling the in-crate test-support so tool tests inject the
+# FakeRunHost without a real engine, MCP client, or socket.
+agentd-surface = { path = ".", features = ["test-support"] }
+tokio-test = "0.4"
