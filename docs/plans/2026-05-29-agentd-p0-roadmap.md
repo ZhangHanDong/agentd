@@ -64,7 +64,7 @@ Phases P0.3 / P0.4 / P0.5 / P0.6 / P0.7 are **siblings** once P0.2 is done — t
 | P0.4  | mempal MCP client + outbox drainer + consistency check   | 4 | 22  | 110  | [`p0.4-mempal-client.md`](./2026-05-29-agentd-p0.4-mempal-client.md)          | **done** (tag v0.0.0-p0.4) |
 | P0.5  | GitHub adapter (octocrab + webhook + status push)        | 3 | 12  | 90   | _generate via writing-plans_                                                 | **→ P1** (Δ6: GitHub→Specify; only `open_pr` node survives) |
 | P0.6  | Matrix adapter + slash router + wait.human + threads     | 8 | 28  | 220  | _generate via writing-plans (split into 6a + 6b)_                            | deferred — **narrowed** (Δ5: dispatch listener + notifier) |
-| P0.7  | HTTP+SSE + MCP server (5 tools per §4.12.1)              | 5 | 18  | 140  | _generate via writing-plans_                                                 | deferred |
+| P0.7  | HTTP+SSE + MCP server (5 tools per §4.12.1)              | 5 | 25  | 140  | [`p0.7-surface.md`](./2026-05-29-agentd-p0.7-surface.md)                      | **done** (tag v0.0.0-p0.7; rmcp stdio transport + production RunHost + event emit → P0.9) |
 | P0.8  | Shipped DOT workflows + `agentctl install-skills`        | 3 | 10  | 80   | _generate via writing-plans_                                                 | deferred |
 | P0.9  | E2E + disaster recovery drills                           | 5 | 18  | 160  | _generate via writing-plans_                                                 | deferred |
 | **Σ** |                                                          | **52** | **257** | **1420** | | |
@@ -242,6 +242,7 @@ For each deferred phase, this section captures the **deliverable inventory** so 
   - `test_sse_replay_resumes_from_last_seq`
 - **Depends on**: P0.0, P0.1 (engine), P0.2 (store), P0.4 (mempal — `check_inbox` consults cowork-bus)
 - **Exit**: tools defined per §4.12.1; SSE replay tested; rmcp server starts cleanly.
+- **Delivered (v0.0.0-p0.7)** — see [`p0.7-surface.md`](./2026-05-29-agentd-p0.7-surface.md). The 5 tools are pure fns over a `RunHost` seam (FakeRunHost-tested); a transport-agnostic `dispatch()` + `tool_descriptors()` stand in for the rmcp **stdio transport**, which — like the production `RunHost` (real `Engine` + store) and the event **emit** point — is deferred to **P0.9** daemon-wiring (it needs a real MCP client to exercise). `event_repo` (append + seq-cursor read) + a finite axum SSE replay land here; `check_inbox` is an empty-inbox v0 (D5). 25 scenarios across p70–p74, all lint 100%; `agentd-core` untouched (D1).
 
 ### P0.8 — Shipped DOT + Skills Install
 
