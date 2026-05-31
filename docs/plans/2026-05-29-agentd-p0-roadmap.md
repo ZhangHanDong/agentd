@@ -36,6 +36,21 @@ P0.0 Workspace + CI
 
 Phases P0.3 / P0.4 / P0.5 / P0.6 / P0.7 are **siblings** once P0.2 is done — they can be implemented in parallel by independent worktrees if you want (`/superpowers:using-git-worktrees`). Recommended serial order if single-stream: 0.3 → 0.4 → 0.5 → 0.6 → 0.7 (backend first to unblock workflow demos; mempal next because review semantics need it; GitHub before Matrix because issues drive runs; HTTP/MCP last because everything else feeds events into it).
 
+> **⚠️ Path B reconciliation (remaining phases P0.5+; supersedes the rows below where they conflict).**
+> The [specify-boundary doc](../specs/2026-05-29-agentd-specify-boundary.md) §6 is authoritative. P0.0–P0.4
+> were Path-B-neutral and shipped as-is. From P0.5 on, the order/scope change:
+> - **P0.5 (GitHub adapter) → moved to P1** (Δ6: GitHub is Specify-owned). The only piece agentd keeps is an
+>   `open_pr` (`gh pr create`, provisioned token) **node inside `execute.dot`** — built in the workflow phase,
+>   not as a crate phase. Issue-sync / webhook / status-checks → Specify.
+> - **Next P0 phase = P0.7** (HTTP+SSE + MCP server): on the standalone-MVP critical path (agents in tmux call
+>   the 5 tools), lands the real rmcp transport deferred from P0.4, and depends only on P0.0–P0.4.
+> - **Then a workflow-authoring phase** (Δ1): the two standalone DOT graphs `draft.dot` + `execute.dot`,
+>   `agentctl run start` trigger, the `open_pr` node, and local-file issue/spec/freeze stubs (§7 standalone).
+> - **P0.6 (Matrix) → narrowed + deferrable** (Δ5: dispatch listener + notifier only; slash/MAS authority →
+>   Specify). The standalone MVP triggers via CLI, so the full 8-spec P0.6 is not on the MVP path.
+> - **P0.9 (E2E + disaster recovery)** stays the capstone (real tmux agents + MCP + the two workflows + kill-9
+>   resume). Δ7 (`agentd-specify` client) and Δ8 (Specify semantic events) are **P1**.
+
 ---
 
 ## Phase Catalogue
@@ -47,8 +62,8 @@ Phases P0.3 / P0.4 / P0.5 / P0.6 / P0.7 are **siblings** once P0.2 is done — t
 | P0.2  | Storage layer (sqlx + 16 tables + migrations + repos)    | 5 | 15  | 140  | [`p0.2-storage.md`](./2026-05-29-agentd-p0.2-storage.md)                     | **done** (tag v0.0.0-p0.2) |
 | P0.3  | TmuxBackend v0 (FakeRunner-tested)                       | 5 | 43  | 180  | [`p0.3-tmux-backend.md`](./2026-05-29-agentd-p0.3-tmux-backend.md)            | **done** (tag v0.0.0-p0.3) |
 | P0.4  | mempal MCP client + outbox drainer + consistency check   | 4 | 22  | 110  | [`p0.4-mempal-client.md`](./2026-05-29-agentd-p0.4-mempal-client.md)          | **done** (tag v0.0.0-p0.4) |
-| P0.5  | GitHub adapter (octocrab + webhook + status push)        | 3 | 12  | 90   | _generate via writing-plans_                                                 | deferred |
-| P0.6  | Matrix adapter + slash router + wait.human + threads     | 8 | 28  | 220  | _generate via writing-plans (split into 6a + 6b)_                            | deferred |
+| P0.5  | GitHub adapter (octocrab + webhook + status push)        | 3 | 12  | 90   | _generate via writing-plans_                                                 | **→ P1** (Δ6: GitHub→Specify; only `open_pr` node survives) |
+| P0.6  | Matrix adapter + slash router + wait.human + threads     | 8 | 28  | 220  | _generate via writing-plans (split into 6a + 6b)_                            | deferred — **narrowed** (Δ5: dispatch listener + notifier) |
 | P0.7  | HTTP+SSE + MCP server (5 tools per §4.12.1)              | 5 | 18  | 140  | _generate via writing-plans_                                                 | deferred |
 | P0.8  | Shipped DOT workflows + `agentctl install-skills`        | 3 | 10  | 80   | _generate via writing-plans_                                                 | deferred |
 | P0.9  | E2E + disaster recovery drills                           | 5 | 18  | 160  | _generate via writing-plans_                                                 | deferred |
