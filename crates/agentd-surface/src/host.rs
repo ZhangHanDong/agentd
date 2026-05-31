@@ -30,6 +30,16 @@ pub struct TaskAssignment {
     pub context_pack: Option<String>,
 }
 
+/// One event of a run's append-only log, for SSE replay. Surface-local (mirrors
+/// `RunSnapshot`/`TaskAssignment`); the production host maps `agentd-store`'s
+/// `event_repo::EventRow` to this in P0.9 so the surface keeps no store dep.
+#[derive(Debug, Clone)]
+pub struct EventRecord {
+    pub seq: i64,
+    pub kind: String,
+    pub payload: String,
+}
+
 /// The seam: deliver engine events and read the bits the tools need.
 #[async_trait::async_trait]
 pub trait RunHost: Send + Sync {
@@ -61,4 +71,15 @@ pub trait RunHost: Send + Sync {
     /// [`CoreError`] on a store failure.
     async fn review_counts(&self, review_run_id: &ReviewRunId)
     -> Result<(usize, usize), CoreError>;
+
+    /// A run's events with `seq > after_seq`, in `seq` order — the SSE replay
+    /// cursor. The production host reads `event_repo::read_from`.
+    ///
+    /// # Errors
+    /// [`CoreError`] on a store failure.
+    async fn events_from(
+        &self,
+        run_id: &RunId,
+        after_seq: i64,
+    ) -> Result<Vec<EventRecord>, CoreError>;
 }

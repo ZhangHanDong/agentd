@@ -9,7 +9,7 @@ use agentd_core::CoreError;
 use agentd_core::types::{NodeId, ReviewRunId, RunId};
 use agentd_core::{EngineEvent, RunProgress};
 
-use crate::host::{RunHost, RunSnapshot, TaskAssignment};
+use crate::host::{EventRecord, RunHost, RunSnapshot, TaskAssignment};
 
 /// Scripted, recording [`RunHost`] for tests.
 #[derive(Debug, Default)]
@@ -19,6 +19,7 @@ pub struct FakeRunHost {
     delivered: Mutex<Vec<EngineEvent>>,
     progress: Mutex<VecDeque<RunProgress>>,
     review_counts: Mutex<HashMap<String, (usize, usize)>>,
+    events: Mutex<HashMap<String, Vec<EventRecord>>>,
 }
 
 impl FakeRunHost {
@@ -57,6 +58,14 @@ impl FakeRunHost {
             .lock()
             .expect("review_counts lock")
             .insert(review_run_id.to_string(), counts);
+    }
+
+    /// Set the event log returned by `events_from` for `run_id`.
+    pub fn set_events(&self, run_id: &str, events: Vec<EventRecord>) {
+        self.events
+            .lock()
+            .expect("events lock")
+            .insert(run_id.to_string(), events);
     }
 
     /// Every event delivered so far, in order.
@@ -113,5 +122,22 @@ impl RunHost for FakeRunHost {
             .get(review_run_id.as_str())
             .copied()
             .unwrap_or((0, 0)))
+    }
+
+    async fn events_from(
+        &self,
+        run_id: &RunId,
+        after_seq: i64,
+    ) -> Result<Vec<EventRecord>, CoreError> {
+        Ok(self
+            .events
+            .lock()
+            .expect("events lock")
+            .get(run_id.as_str())
+            .into_iter()
+            .flatten()
+            .filter(|e| e.seq > after_seq)
+            .cloned()
+            .collect())
     }
 }

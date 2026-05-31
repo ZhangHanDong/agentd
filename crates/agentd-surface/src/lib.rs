@@ -10,6 +10,7 @@
 
 pub mod error;
 pub mod host;
+pub mod http;
 pub mod mcp_server;
 pub mod tools;
 
@@ -19,4 +20,4 @@ pub mod tools;
 pub mod test_support;
 
 pub use error::SurfaceError;
-pub use host::{RunHost, RunSnapshot, TaskAssignment};
+pub use host::{EventRecord, RunHost, RunSnapshot, TaskAssignment};
