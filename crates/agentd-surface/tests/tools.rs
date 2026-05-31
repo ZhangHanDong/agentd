@@ -3,13 +3,15 @@
 //! `specs/surface/p70-mcp-tool-schemas.spec.md` and `p72-submit-outcome-idempotency.spec.md`.
 //! Everything runs against a `FakeRunHost` — no real engine, MCP client, or socket.
 
-use agentd_core::types::{NodeId, RunId, TaskRunId};
+use agentd_core::types::{NodeId, ReviewRunId, RunId, TaskRunId};
 use agentd_core::{EngineEvent, ParkReason, RunProgress};
 
 use agentd_surface::host::{RunSnapshot, TaskAssignment};
 use agentd_surface::test_support::FakeRunHost;
+use agentd_surface::tools::assign_task::{AssignTaskInput, assign_task};
 use agentd_surface::tools::query_run::{QueryRunInput, query_run};
 use agentd_surface::tools::submit_outcome::{SubmitOutcomeInput, submit_outcome};
+use agentd_surface::tools::submit_review::{SubmitReviewInput, submit_review};
 
 use serde_json::json;
 
@@ -148,4 +150,115 @@ async fn submit_outcome_finished_has_no_next() {
         .expect("submit ok");
     assert!(out.recorded);
     assert_eq!(out.next_node, None);
+}
+
+// ---- submit_review + assign_task (p74) ------------------------------------
+
+#[tokio::test]
+async fn submit_review_records_and_reports_pending() {
+    let host = FakeRunHost::new();
+    host.push_progress(RunProgress::Parked {
+        run_id: RunId::from_string("r1"),
+        node_id: NodeId::parsed("review"),
+        reason: ParkReason::ReviewVerdicts {
+            review_run_id: ReviewRunId::from_string("rv1"),
+            expected: 3,
+        },
+    });
+    host.set_review_counts("rv1", (3, 1));
+
+    let out = submit_review(
+        &host,
+        SubmitReviewInput {
+            review_run_id: "rv1".to_string(),
+            reviewer_id: "claude-sec".to_string(),
+            verdict: "pass".to_string(),
+            findings: vec![],
+        },
+    )
+    .await
+    .expect("submit_review ok");
+    assert!(out.accepted);
+    assert_eq!(out.fan_in_pending, 2, "expected 3 − got 1");
+
+    match &host.delivered()[0] {
+        EngineEvent::ReviewVerdictSubmitted { review_run_id, .. } => {
+            assert_eq!(review_run_id.as_str(), "rv1");
+        }
+        other => panic!("expected ReviewVerdictSubmitted, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn submit_review_on_closed_review_is_already_submitted() {
+    let host = FakeRunHost::new();
+    host.push_progress(RunProgress::Ignored {
+        reason: "review already aggregated".to_string(),
+    });
+
+    let err = submit_review(
+        &host,
+        SubmitReviewInput {
+            review_run_id: "rv1".to_string(),
+            reviewer_id: "claude-sec".to_string(),
+            verdict: "pass".to_string(),
+            findings: vec![],
+        },
+    )
+    .await
+    .expect_err("a closed review is already_submitted");
+    assert_eq!(err.code(), "already_submitted");
+}
+
+#[tokio::test]
+async fn assign_task_returns_open_task() {
+    let host = FakeRunHost::new();
+    host.set_task("r1", "implement", task("tr1"));
+
+    let out = assign_task(
+        &host,
+        AssignTaskInput {
+            run_id: "r1".to_string(),
+            node_id: "implement".to_string(),
+            agent_id: "impl-a".to_string(),
+        },
+    )
+    .await
+    .expect("assign ok");
+    assert_eq!(out.task_run_id, "tr1");
+    assert_eq!(out.worktree.as_deref(), Some("/wt"));
+}
+
+#[tokio::test]
+async fn assign_task_other_agent_is_not_assigned() {
+    let host = FakeRunHost::new();
+    host.set_task("r1", "implement", task("tr1")); // assigned to impl-a
+
+    let err = assign_task(
+        &host,
+        AssignTaskInput {
+            run_id: "r1".to_string(),
+            node_id: "implement".to_string(),
+            agent_id: "impl-b".to_string(),
+        },
+    )
+    .await
+    .expect_err("another agent's task is not_assigned");
+    assert_eq!(err.code(), "not_assigned");
+}
+
+#[tokio::test]
+async fn assign_task_no_task_is_not_assigned() {
+    let host = FakeRunHost::new();
+    let err = assign_task(
+        &host,
+        AssignTaskInput {
+            run_id: "r1".to_string(),
+            node_id: "implement".to_string(),
+            agent_id: "impl-a".to_string(),
+        },
+    )
+    .await
+    .expect_err("no task is not_assigned");
+    assert_eq!(err.code(), "not_assigned");
 }
