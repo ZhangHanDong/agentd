@@ -9,7 +9,14 @@
 use std::path::PathBuf;
 
 use agentd_core::dot::parser;
+use agentd_core::engine::{Engine, EngineEvent, ParkReason, RunProgress};
 use agentd_core::graph::NodeGraph;
+use agentd_core::handler::{HandlerRegistry, Ports};
+use agentd_core::ports::CommandOutput;
+use agentd_core::test_support::{
+    FakeBackend, FixedClock, InMemoryStore, MempalStub, RecordingCommandRunner,
+};
+use agentd_core::types::{Outcome, RunId, TaskRunId};
 
 /// Repo-root `workflows/` dir, resolved from the agentctl crate manifest.
 fn workflows_dir() -> PathBuf {
@@ -23,6 +30,97 @@ fn load(name: &str) -> NodeGraph {
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let ast = parser::parse(&src).unwrap_or_else(|e| panic!("parse {}: {e:?}", path.display()));
     NodeGraph::from_ast(&ast).unwrap_or_else(|e| panic!("validate {}: {e:?}", path.display()))
+}
+
+// ─── walk harness: the REAL Engine over in-memory fakes (mirrors agentd-core's
+// own tests/engine_execute.rs — NOT FakeRunHost). ───────────────────────────
+
+struct Harness {
+    run_id: RunId,
+    registry: HandlerRegistry,
+    backend: FakeBackend,
+    runner: RecordingCommandRunner,
+    store: InMemoryStore,
+    mempal: MempalStub,
+    clock: FixedClock,
+}
+
+impl Harness {
+    fn new() -> Self {
+        Self {
+            run_id: RunId::from_string("run-1"),
+            registry: HandlerRegistry::with_builtins(),
+            backend: FakeBackend::new(),
+            runner: RecordingCommandRunner::new(),
+            store: InMemoryStore::new(),
+            mempal: MempalStub::new(),
+            clock: FixedClock::new(0),
+        }
+    }
+
+    fn engine<'a>(&'a self, graph: &'a NodeGraph) -> Engine<'a> {
+        Engine::new(
+            graph,
+            &self.registry,
+            Ports {
+                backend: &self.backend,
+                runner: &self.runner,
+                store: &self.store,
+                mempal: &self.mempal,
+                clock: &self.clock,
+            },
+            "sha-test",
+        )
+    }
+
+    /// Queue `n` successful (exit-0) tool outputs for the run's `tool` nodes.
+    fn push_ok(&self, n: usize) {
+        for _ in 0..n {
+            self.runner.push_output(Ok(CommandOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                status: 0,
+            }));
+        }
+    }
+}
+
+fn park_reason(progress: &RunProgress) -> &ParkReason {
+    match progress {
+        RunProgress::Parked { reason, .. } => reason,
+        other => panic!("expected Parked, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn draft_dot_parks_at_propose_spec_then_finishes() {
+    let g = load("draft.dot");
+    let h = Harness::new();
+    let engine = h.engine(&g);
+    // Three tool nodes run across the walk: fetch_issue_context, lint_spec, push_draft.
+    h.push_ok(3);
+
+    // start -> fetch_issue_context (tool) -> propose_spec (codergen) parks for the agent.
+    let parked = engine.execute(&h.run_id).await.expect("execute");
+    let task_run_id: TaskRunId = match park_reason(&parked) {
+        ParkReason::AgentOutcome { task_run_id } => task_run_id.clone(),
+        other => panic!("expected AgentOutcome park at propose_spec, got {other:?}"),
+    };
+
+    // The spec-writer's success -> lint_spec -> push_draft -> done.
+    let progress = engine
+        .deliver_event(EngineEvent::AgentOutcomeSubmitted {
+            task_run_id,
+            outcome: Outcome::success(),
+        })
+        .await
+        .expect("deliver agent outcome");
+    assert_eq!(
+        progress,
+        RunProgress::Finished {
+            run_id: h.run_id.clone()
+        }
+    );
 }
 
 #[test]

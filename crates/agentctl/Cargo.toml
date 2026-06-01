@@ -24,3 +24,8 @@ agentd-core = { path = "../agentd-core" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { workspace = true }
+# test-support exposes the in-memory port fakes so the workflow walk-tests drive
+# the REAL Engine over fakes (NOT FakeRunHost). Dev-only — never in the bin, so
+# the production `agentctl` build keeps no test-support code.
+agentd-core = { path = "../agentd-core", features = ["test-support"] }

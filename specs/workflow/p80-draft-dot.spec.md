@@ -35,8 +35,7 @@ scenario (added with the walk-test task).
 
 ## Out of Scope
 
-- The engine walk of draft.dot (parks at propose_spec, resumes to done) — p80's walk scenario, added with the walk-test.
-- Live execution / a production RunHost / a real agent (P0.9).
+- Live execution / a production RunHost / a real agent (P0.9). The walk-test drives the real engine over in-memory fakes in-process; it does not spawn a real agent or socket.
 
 ## Completion Criteria
 
@@ -63,3 +62,9 @@ Scenario: a draft graph with no terminal is rejected
   Given a draft-shaped graph with no Msquare terminal node
   When it is built with NodeGraph::from_ast
   Then it returns Err reporting the missing terminal
+
+Scenario: draft.dot parks once at propose_spec then walks to done
+  Test: draft_dot_parks_at_propose_spec_then_finishes
+  Given the draft.dot graph on the real Engine with in-memory fake ports
+  When execute runs and the spec-writer's success outcome is delivered
+  Then the run parks at propose_spec awaiting an agent outcome and then reaches Finished
