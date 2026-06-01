@@ -5,6 +5,7 @@
 
 mod cli;
 mod flow;
+mod run;
 
 use std::process::ExitCode;
 
@@ -14,5 +15,6 @@ fn main() -> ExitCode {
     let cli = cli::Cli::parse();
     match cli.cmd {
         cli::Cmd::Flow(flow_cmd) => flow::run(&flow_cmd),
+        cli::Cmd::Run(run_cmd) => run::run(&run_cmd),
     }
 }
