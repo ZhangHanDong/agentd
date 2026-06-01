@@ -1,0 +1,40 @@
+// execute.dot — the standalone Path-B "execute" workflow (boundary Δ1): take a
+// FROZEN spec and walk it to a PR. Parks at `implement` (the implementer agent)
+// and at `review` (the 3 adversarial reviewers); the rest are `tool` shell-outs.
+// Human review + freeze happened upstream (between draft.dot and execute.dot).
+//
+// Conforms to the frozen agentd-core DOT grammar. Two goal_gate nodes guard the
+// terminal transition (design §2.7 D8a): `verify_lifecycle` (the spec-acceptance
+// gate) and `aggregate` (the adversarial-review majority). The gate is GLOBAL and
+// fires when a node routes to a terminal — so the node that routes to `done`
+// (`report_acceptance`) carries the recovery edge `[label="goal_gate_unmet"]`
+// back to a NON-terminal (`implement`) that can satisfy the gate on a re-run.
+// Without it the run would Stuck at the done transition (validate does NOT catch
+// this — see crates/agentctl/tests/workflows.rs goal_gate negative walk-test).
+//
+// cmd= strings are STATIC whitespace-split argv (no ${...}; the frozen tool
+// handler sets no cwd/env). open_pr uses the operator's ambient `gh` auth /
+// GH_TOKEN (standalone, D6); Specify-provisioned token injection is P0.9/P1.
+digraph execute {
+  "start"             [shape=Mdiamond];
+  "pull_frozen_spec"  [handler="tool", cmd="cat .agentd/run/frozen.spec.md", timeout_secs="30"];
+  "draft_plan"        [handler="tool", cmd="agent-spec plan .agentd/run/frozen.spec.md", timeout_secs="120"];
+  "implement"         [handler="codergen", role="implementer", initial_prompt_includes="spec_path,plan_path"];
+  "verify_lifecycle"  [handler="tool", cmd="agent-spec lifecycle .agentd/run/frozen.spec.md --code . --min-score 0.7 --format text", timeout_secs="300", goal_gate=true];
+  "review"            [handler="parallel.fan_out", reviewers="claude-sec,codex-perf,gemini-readability", bundle="frozen", visibility="blind"];
+  "aggregate"         [handler="parallel.fan_in", aggregator="majority_pass", goal_gate=true];
+  "open_pr"           [handler="tool", cmd="gh pr create --fill", timeout_secs="120"];
+  "report_acceptance" [handler="tool", cmd="cat .agentd/run/report.md", timeout_secs="30"];
+  "done"              [shape=Msquare];
+
+  "start"             -> "pull_frozen_spec";
+  "pull_frozen_spec"  -> "draft_plan";
+  "draft_plan"        -> "implement";
+  "implement"         -> "verify_lifecycle";
+  "verify_lifecycle"  -> "review";
+  "review"            -> "aggregate";
+  "aggregate"         -> "open_pr";
+  "open_pr"           -> "report_acceptance";
+  "report_acceptance" -> "done"      [condition="outcome=success"];
+  "report_acceptance" -> "implement" [label="goal_gate_unmet"];
+}

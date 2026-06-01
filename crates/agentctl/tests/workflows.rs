@@ -92,6 +92,65 @@ fn park_reason(progress: &RunProgress) -> &ParkReason {
     }
 }
 
+// ─── execute.dot (p81) ──────────────────────────────────────────────────────
+
+#[test]
+fn execute_dot_validates() {
+    let g = load("execute.dot");
+    assert!(!g.nodes.is_empty(), "execute.dot has nodes");
+}
+
+#[test]
+fn execute_dot_single_start_single_terminal() {
+    let g = load("execute.dot");
+    assert_eq!(g.starts().len(), 1, "exactly one start (Mdiamond)");
+    assert_eq!(g.terminals().len(), 1, "exactly one terminal (Msquare)");
+}
+
+#[test]
+fn execute_dot_has_goal_gate_unmet_recovery_edge() {
+    let g = load("execute.dot");
+    let recovery: Vec<_> = g
+        .edges
+        .iter()
+        .filter(|e| e.attr("label") == Some("goal_gate_unmet"))
+        .collect();
+    assert_eq!(
+        recovery.len(),
+        1,
+        "exactly one goal_gate_unmet recovery edge"
+    );
+    let target = recovery[0].to.as_str();
+    let terminal_ids: Vec<&str> = g.terminals().iter().map(|n| n.id.as_str()).collect();
+    assert!(
+        !terminal_ids.contains(&target),
+        "recovery edge must route to a non-terminal, got '{target}'"
+    );
+}
+
+#[test]
+fn execute_dot_rejects_unpaired_double_fan_out_variant() {
+    let src = r#"digraph execute {
+        "start" [shape=Mdiamond];
+        "fan_a" [handler="parallel.fan_out", reviewers="a"];
+        "fan_b" [handler="parallel.fan_out", reviewers="b"];
+        "agg"   [handler="parallel.fan_in", aggregator="majority_pass"];
+        "done"  [shape=Msquare];
+        "start" -> "fan_a";
+        "start" -> "fan_b";
+        "fan_a" -> "agg";
+        "fan_b" -> "agg";
+        "agg"   -> "done";
+    }"#;
+    let ast = parser::parse(src).expect("parse");
+    let err = NodeGraph::from_ast(&ast)
+        .expect_err("two unpaired fan_outs into one fan_in must be rejected");
+    assert!(
+        format!("{err:?}").contains("fan_out"),
+        "violation should report the unpaired fan_out, got {err:?}"
+    );
+}
+
 #[tokio::test]
 async fn draft_dot_parks_at_propose_spec_then_finishes() {
     let g = load("draft.dot");
