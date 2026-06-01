@@ -65,7 +65,7 @@ Phases P0.3 / P0.4 / P0.5 / P0.6 / P0.7 are **siblings** once P0.2 is done — t
 | P0.5  | GitHub adapter (octocrab + webhook + status push)        | 3 | 12  | 90   | _generate via writing-plans_                                                 | **→ P1** (Δ6: GitHub→Specify; only `open_pr` node survives) |
 | P0.6  | Matrix adapter + slash router + wait.human + threads     | 8 | 28  | 220  | _generate via writing-plans (split into 6a + 6b)_                            | deferred — **narrowed** (Δ5: dispatch listener + notifier) |
 | P0.7  | HTTP+SSE + MCP server (5 tools per §4.12.1)              | 5 | 25  | 140  | [`p0.7-surface.md`](./2026-05-29-agentd-p0.7-surface.md)                      | **done** (tag v0.0.0-p0.7; rmcp stdio transport + production RunHost + event emit → P0.9) |
-| P0.8  | Shipped DOT workflows + `agentctl install-skills`        | 3 | 10  | 80   | _generate via writing-plans_                                                 | deferred |
+| P0.8  | Workflow authoring: `draft.dot` + `execute.dot` + `run start` | 3 | 16  | 80   | [`p0.8-workflows.md`](./2026-05-29-agentd-p0.8-workflows.md)                  | **done** (tag v0.0.0-p0.8; Path-B Δ1. `install-skills` + live execution → later/P0.9) |
 | P0.9  | E2E + disaster recovery drills                           | 5 | 18  | 160  | _generate via writing-plans_                                                 | deferred |
 | **Σ** |                                                          | **52** | **257** | **1420** | | |
 
@@ -257,6 +257,7 @@ For each deferred phase, this section captures the **deliverable inventory** so 
   - `test_install_skills_is_idempotent_second_run`
 - **Depends on**: P0.0 (`agentctl flow validate`), all DOT-handler implementations from P0.1–P0.7
 - **Exit**: all three DOTs pass `flow validate`; install-skills idempotent.
+- **Delivered (v0.0.0-p0.8)** — Path-B Δ1, see [`p0.8-workflows.md`](./2026-05-29-agentd-p0.8-workflows.md). Shipped the two standalone Path-B graphs **`draft.dot`** + **`execute.dot`** (not the pre-Path-B `issue-to-pr.dot`/`spec-only.dot`/`adversarial-review.dot`) and **`agentctl run start --flow {draft|execute}`** with `--dry-run`. Both DOTs pass `flow validate` AND are proven to WALK on the real engine over fakes (happy + a goal_gate-unmet recovery negative test); `run start`'s live path is a clean "deferred to P0.9" error. `install-skills` and live execution are **deferred** (D9 / P0.9). 16 scenarios across p80–p82, all lint 100%; `agentd-core` untouched (D1).
 
 ### P0.9 — E2E + Disaster Recovery
 
