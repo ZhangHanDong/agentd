@@ -1,0 +1,25 @@
+// draft.dot — the standalone Path-B "draft" workflow (boundary Δ1): turn a local
+// issue into a spec draft. Parks once, at propose_spec (the spec-writer agent);
+// the other nodes are `tool` shell-outs. Human review + freeze happen BETWEEN
+// draft.dot and execute.dot (in Specify; standalone uses a local frozen file).
+//
+// Conforms to the frozen agentd-core DOT grammar (handlers codergen/tool, one
+// Mdiamond start, one Msquare terminal). cmd= strings are STATIC whitespace-split
+// argv — the frozen tool handler does no ${...} substitution and sets no cwd/env,
+// so standalone paths are fixed conventions (.agentd/run/*), resolved by the
+// operator's run environment. Validated by `agentctl flow validate`; walked in
+// crates/agentctl/tests/workflows.rs over the real Engine + fake ports.
+digraph draft {
+  "start"               [shape=Mdiamond];
+  "fetch_issue_context" [handler="tool", cmd="cat .agentd/run/issue.md", timeout_secs="30"];
+  "propose_spec"        [handler="codergen", role="spec-writer", initial_prompt_includes="issue_id,issue_title,issue_body"];
+  "lint_spec"           [handler="tool", cmd="agent-spec lint .agentd/run/draft.spec.md --min-score 0.7", timeout_secs="120"];
+  "push_draft"          [handler="tool", cmd="cp .agentd/run/draft.spec.md .agentd/run/draft.out.spec.md", timeout_secs="30"];
+  "done"                [shape=Msquare];
+
+  "start"               -> "fetch_issue_context";
+  "fetch_issue_context" -> "propose_spec";
+  "propose_spec"        -> "lint_spec";
+  "lint_spec"           -> "push_draft";
+  "push_draft"          -> "done";
+}
