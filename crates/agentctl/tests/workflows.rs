@@ -16,7 +16,7 @@ use agentd_core::ports::CommandOutput;
 use agentd_core::test_support::{
     FakeBackend, FixedClock, InMemoryStore, MempalStub, RecordingCommandRunner,
 };
-use agentd_core::types::{Outcome, RunId, TaskRunId};
+use agentd_core::types::{AgentId, Outcome, RunId, TaskRunId, VerdictValue};
 
 /// Repo-root `workflows/` dir, resolved from the agentctl crate manifest.
 fn workflows_dir() -> PathBuf {
@@ -148,6 +148,134 @@ fn execute_dot_rejects_unpaired_double_fan_out_variant() {
     assert!(
         format!("{err:?}").contains("fan_out"),
         "violation should report the unpaired fan_out, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn execute_dot_walks_to_done() {
+    let g = load("execute.dot");
+    let h = Harness::new();
+    let engine = h.engine(&g);
+
+    // start -> pull_frozen_spec, draft_plan (tools) -> implement (codergen) parks.
+    let parked = engine.execute(&h.run_id).await.expect("execute");
+    let task_run_id: TaskRunId = match park_reason(&parked) {
+        ParkReason::AgentOutcome { task_run_id } => task_run_id.clone(),
+        other => panic!("expected AgentOutcome park at implement, got {other:?}"),
+    };
+
+    // implement success -> verify_lifecycle (tool) -> review (fan_out) parks for 3 verdicts.
+    let parked = engine
+        .deliver_event(EngineEvent::AgentOutcomeSubmitted {
+            task_run_id,
+            outcome: Outcome::success(),
+        })
+        .await
+        .expect("deliver implement outcome");
+    let review_run_id = match park_reason(&parked) {
+        ParkReason::ReviewVerdicts {
+            review_run_id,
+            expected,
+        } => {
+            assert_eq!(*expected, 3, "three reviewers");
+            review_run_id.clone()
+        }
+        other => panic!("expected ReviewVerdicts park at review, got {other:?}"),
+    };
+
+    // Three pass verdicts -> aggregate (majority_pass) -> open_pr -> report_acceptance;
+    // both goal_gates (verify_lifecycle, aggregate) met -> done.
+    let mut last = None;
+    for reviewer in ["claude-sec", "codex-perf", "gemini-readability"] {
+        last = Some(
+            engine
+                .deliver_event(EngineEvent::ReviewVerdictSubmitted {
+                    review_run_id: review_run_id.clone(),
+                    reviewer_id: AgentId::parsed(reviewer),
+                    verdict: VerdictValue::Pass,
+                })
+                .await
+                .expect("deliver verdict"),
+        );
+    }
+    assert_eq!(
+        last.expect("a final progress"),
+        RunProgress::Finished {
+            run_id: h.run_id.clone()
+        }
+    );
+
+    // open_pr shelled `gh pr create --fill` as program + argv (D4: static, no substitution).
+    let gh = h
+        .runner
+        .calls()
+        .into_iter()
+        .find(|c| c.program == "gh")
+        .expect("open_pr recorded a `gh` call");
+    assert_eq!(gh.args, vec!["pr", "create", "--fill"]);
+}
+
+#[tokio::test]
+async fn execute_dot_goal_gate_unmet_routes_to_recovery_not_stuck() {
+    let g = load("execute.dot");
+    let h = Harness::new();
+    let engine = h.engine(&g);
+    // pull_frozen_spec(ok), draft_plan(ok), then verify_lifecycle FAILS (exit 1) — so
+    // its goal_gate is permanently unmet. open_pr/report_acceptance exhaust -> success.
+    h.push_ok(2);
+    h.runner.push_output(Ok(CommandOutput {
+        stdout: String::new(),
+        stderr: "lifecycle failed".to_string(),
+        status: 1,
+    }));
+
+    // execute -> implement parks.
+    let parked = engine.execute(&h.run_id).await.expect("execute");
+    let task_run_id: TaskRunId = match park_reason(&parked) {
+        ParkReason::AgentOutcome { task_run_id } => task_run_id.clone(),
+        other => panic!("expected AgentOutcome park at implement, got {other:?}"),
+    };
+    // implement success -> verify_lifecycle FAILS -> (unconditional) review parks.
+    let parked = engine
+        .deliver_event(EngineEvent::AgentOutcomeSubmitted {
+            task_run_id,
+            outcome: Outcome::success(),
+        })
+        .await
+        .expect("deliver implement outcome");
+    let review_run_id = match park_reason(&parked) {
+        ParkReason::ReviewVerdicts { review_run_id, .. } => review_run_id.clone(),
+        other => panic!("expected ReviewVerdicts park at review, got {other:?}"),
+    };
+
+    // 3 pass verdicts -> aggregate -> open_pr -> report_acceptance -> done transition:
+    // the GLOBAL goal_gate is unmet (verify_lifecycle Fail), so the engine discards the
+    // terminal transition, synthesizes goal_gate_unmet, and re-selects the recovery edge
+    // report_acceptance -> implement — which re-parks (codergen). NOT Stuck/Failed.
+    let mut last = None;
+    for reviewer in ["claude-sec", "codex-perf", "gemini-readability"] {
+        last = Some(
+            engine
+                .deliver_event(EngineEvent::ReviewVerdictSubmitted {
+                    review_run_id: review_run_id.clone(),
+                    reviewer_id: AgentId::parsed(reviewer),
+                    verdict: VerdictValue::Pass,
+                })
+                .await
+                .expect("deliver verdict"),
+        );
+    }
+    let final_progress = last.expect("a final progress");
+    assert!(
+        matches!(
+            &final_progress,
+            RunProgress::Parked {
+                reason: ParkReason::AgentOutcome { .. },
+                ..
+            }
+        ),
+        "an unmet goal_gate must route to the recovery edge (re-park at implement), \
+         not Stuck/Failed/Finished — got {final_progress:?}"
     );
 }
 

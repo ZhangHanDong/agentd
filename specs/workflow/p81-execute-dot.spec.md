@@ -64,3 +64,15 @@ Scenario: an execute variant with two unpaired fan_outs into one fan_in is rejec
   Given an execute-shaped graph with two parallel.fan_out nodes feeding one parallel.fan_in without pair_with
   When it is built with NodeGraph::from_ast
   Then it returns Err reporting the unpaired fan_out
+
+Scenario: execute.dot walks to done with all gates satisfied
+  Test: execute_dot_walks_to_done
+  Given the execute.dot graph on the real Engine with in-memory fake ports
+  When implement succeeds, the three reviewers pass, and the tool nodes succeed
+  Then the run reaches Finished and open_pr shelled "gh pr create" as program and argv
+
+Scenario: an unmet goal_gate routes to the recovery edge instead of going Stuck
+  Test: execute_dot_goal_gate_unmet_routes_to_recovery_not_stuck
+  Given an execute.dot walk where verify_lifecycle fails so its goal_gate is unmet
+  When the run reaches the report_acceptance-to-terminal transition
+  Then it re-selects the goal_gate_unmet recovery edge and re-parks at implement rather than going Stuck or Failed
