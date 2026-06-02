@@ -8,6 +8,7 @@ use std::sync::Mutex;
 use agentd_core::CoreError;
 use agentd_core::types::{NodeId, ReviewRunId, RunId};
 use agentd_core::{EngineEvent, RunProgress};
+use serde_json::Value;
 
 use crate::host::{EventRecord, RunHost, RunSnapshot, TaskAssignment};
 
@@ -20,6 +21,7 @@ pub struct FakeRunHost {
     progress: Mutex<VecDeque<RunProgress>>,
     review_counts: Mutex<HashMap<String, (usize, usize)>>,
     events: Mutex<HashMap<String, Vec<EventRecord>>>,
+    started: Mutex<Vec<(String, String, Value)>>,
 }
 
 impl FakeRunHost {
@@ -73,10 +75,37 @@ impl FakeRunHost {
     pub fn delivered(&self) -> Vec<EngineEvent> {
         self.delivered.lock().expect("delivered lock").clone()
     }
+
+    /// Every `(flow, run_id, context)` `start_workflow` call so far, in order.
+    #[must_use]
+    pub fn started(&self) -> Vec<(String, String, Value)> {
+        self.started.lock().expect("started lock").clone()
+    }
 }
 
 #[async_trait::async_trait]
 impl RunHost for FakeRunHost {
+    async fn start_workflow(
+        &self,
+        flow: &str,
+        run_id: &RunId,
+        context: Value,
+    ) -> Result<RunProgress, CoreError> {
+        self.started.lock().expect("started lock").push((
+            flow.to_string(),
+            run_id.as_str().to_string(),
+            context,
+        ));
+        Ok(self
+            .progress
+            .lock()
+            .expect("progress lock")
+            .pop_front()
+            .unwrap_or_else(|| RunProgress::Finished {
+                run_id: run_id.clone(),
+            }))
+    }
+
     async fn deliver(&self, event: EngineEvent) -> Result<RunProgress, CoreError> {
         self.delivered.lock().expect("delivered lock").push(event);
         Ok(self

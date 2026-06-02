@@ -47,6 +47,15 @@ impl Flow {
             Self::Execute => "execute.dot",
         }
     }
+
+    /// The flow's wire name (`"draft"`/`"execute"`) for the `POST /runs` body.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::Execute => "execute",
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -62,6 +71,9 @@ pub struct RunStartArgs {
     /// Directory holding the workflow `.dot` files.
     #[arg(long, default_value = "workflows")]
     pub workflows_dir: PathBuf,
+    /// The agentd daemon base URL for a live run (ignored by `--dry-run`).
+    #[arg(long, default_value = "http://127.0.0.1:8787")]
+    pub daemon_url: String,
     /// Validate + print the resolved plan without launching a live run.
     #[arg(long)]
     pub dry_run: bool,

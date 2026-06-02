@@ -16,8 +16,8 @@ use crate::cli::{RunCmd, RunStartArgs};
 
 /// A parse/validation/IO failure (mirrors `flow`'s convention).
 const EXIT_INVALID: u8 = 2;
-/// The live run path is not wired in P0.8 (deferred to P0.9).
-const EXIT_DEFERRED: u8 = 3;
+/// The daemon could not be reached or rejected the live run (P0.9).
+const EXIT_DAEMON: u8 = 3;
 
 #[must_use]
 pub fn run(cmd: &RunCmd) -> ExitCode {
@@ -56,15 +56,60 @@ fn start(args: &RunStartArgs) -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    // Live execution drives the run to completion; that requires the production
-    // RunHost + daemon (cross-process agent unpark from checkpoint), deferred to
-    // P0.9. Fail clearly instead of hanging.
-    eprintln!(
-        "error: live execution of run '{}' is deferred to P0.9 (no daemon / production RunHost wired). \
-         Re-run with --dry-run to validate the flow and print the plan.",
-        args.id
+    // Live run: POST to the daemon, which owns the store + production RunHost.
+    match post_run(&args.daemon_url, args.flow.name(), &args.id) {
+        Ok((code, body)) if (200..300).contains(&code) => {
+            println!("run started via {}: {body}", args.daemon_url);
+            ExitCode::SUCCESS
+        }
+        Ok((code, body)) => {
+            eprintln!("error: daemon rejected the run (HTTP {code}): {body}");
+            ExitCode::from(EXIT_DAEMON)
+        }
+        Err(err) => {
+            eprintln!("error: {err}");
+            ExitCode::from(EXIT_DAEMON)
+        }
+    }
+}
+
+/// Minimal dependency-free `POST /runs` to the daemon (a single request over a
+/// blocking socket; the agent advances the run thereafter). Returns the HTTP
+/// status code + response body, or a human-readable transport error.
+fn post_run(daemon_url: &str, flow: &str, id: &str) -> Result<(u16, String), String> {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    let addr = daemon_url
+        .strip_prefix("http://")
+        .unwrap_or(daemon_url)
+        .trim_end_matches('/');
+    let mut stream = TcpStream::connect(addr)
+        .map_err(|e| format!("cannot reach daemon at {daemon_url}: {e}"))?;
+    let body = format!(r#"{{"flow":"{flow}","run_id":"{id}","context":{{}}}}"#);
+    let request = format!(
+        "POST /runs HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
     );
-    ExitCode::from(EXIT_DEFERRED)
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| format!("writing to daemon failed: {e}"))?;
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|e| format!("reading from daemon failed: {e}"))?;
+    let code = response
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|c| c.parse::<u16>().ok())
+        .ok_or_else(|| "malformed daemon response".to_string())?;
+    let body = response
+        .split_once("\r\n\r\n")
+        .map_or("", |(_, b)| b)
+        .to_string();
+    Ok((code, body))
 }
 
 fn print_plan(args: &RunStartArgs, path: &str, graph: &NodeGraph) {

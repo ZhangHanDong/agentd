@@ -43,6 +43,20 @@ pub struct EventRecord {
 /// The seam: deliver engine events and read the bits the tools need.
 #[async_trait::async_trait]
 pub trait RunHost: Send + Sync {
+    /// Create and start a run of `flow` (`"draft"`/`"execute"`) as `run_id` with
+    /// an initial `context`, executing from the start node to the first park (or
+    /// completion). The daemon's `POST /runs` control path; the host records the
+    /// run + resolves its graph (store-side, so the surface stays store-free).
+    ///
+    /// # Errors
+    /// [`CoreError`] on an unknown flow, a store/handler/engine failure.
+    async fn start_workflow(
+        &self,
+        flow: &str,
+        run_id: &RunId,
+        context: Value,
+    ) -> Result<RunProgress, CoreError>;
+
     /// Deliver an event to the engine, advancing the run.
     ///
     /// # Errors

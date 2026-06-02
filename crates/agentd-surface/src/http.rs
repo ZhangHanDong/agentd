@@ -11,10 +11,11 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 
+use agentd_core::RunProgress;
 use agentd_core::types::RunId;
 
 use crate::error::SurfaceError;
@@ -38,9 +39,50 @@ impl std::fmt::Debug for AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/runs", post(start_run))
         .route("/runs/:id", get(get_run))
         .route("/runs/:id/events", get(run_events))
         .with_state(state)
+}
+
+#[derive(Debug, Deserialize)]
+struct StartRunReq {
+    /// `"draft"` or `"execute"`.
+    flow: String,
+    run_id: String,
+    #[serde(default)]
+    context: Value,
+}
+
+/// `POST /runs` — create + start a workflow run; returns `{run_id, status}`.
+async fn start_run(State(state): State<AppState>, Json(req): Json<StartRunReq>) -> Response {
+    let run = RunId::from_string(req.run_id.clone());
+    match state
+        .host
+        .start_workflow(&req.flow, &run, req.context)
+        .await
+    {
+        Ok(progress) => (
+            StatusCode::CREATED,
+            Json(json!({ "run_id": req.run_id, "status": progress_kind(&progress) })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// The wire status string for a `RunProgress`.
+fn progress_kind(progress: &RunProgress) -> &'static str {
+    match progress {
+        RunProgress::Parked { .. } => "parked",
+        RunProgress::Finished { .. } => "finished",
+        RunProgress::Failed { .. } => "failed",
+        RunProgress::Ignored { .. } => "ignored",
+    }
 }
 
 #[allow(clippy::unused_async)] // axum handlers are async; this one has nothing to await

@@ -157,6 +157,25 @@ impl ProductionRunHost {
 
 #[async_trait::async_trait]
 impl RunHost for ProductionRunHost {
+    async fn start_workflow(
+        &self,
+        flow: &str,
+        run_id: &RunId,
+        _context: Value,
+    ) -> Result<RunProgress, CoreError> {
+        let file = match flow {
+            "draft" => "draft.dot",
+            "execute" => "execute.dot",
+            other => return Err(CoreError::Invariant(format!("unknown flow '{other}'"))),
+        };
+        // The initial `context` is accepted but not seeded in the MVP — the
+        // shipped workflows use fixed paths, not context vars (real-env gap).
+        let src = std::fs::read_to_string(self.workflows_dir.join(file))?;
+        let sha = sha256_hex(src.as_bytes());
+        run_repo::record_run(self.store.pool(), run_id, file, &sha).await?;
+        self.start_run(run_id).await
+    }
+
     async fn deliver(&self, event: EngineEvent) -> Result<RunProgress, CoreError> {
         // Resolve the run from the event; an unmatched event is replay-safe Ignored.
         let Some(run_id) = self.run_for_event(&event).await? else {

@@ -66,21 +66,33 @@ fn run_start_dry_run_execute_validates_and_prints_plan() {
 }
 
 #[test]
-fn run_start_live_path_is_deferred_error() {
+fn run_start_live_unreachable_daemon_errors_cleanly() {
+    // Bind a free port then close it -> a connect there is guaranteed refused,
+    // so the live path fails fast and cleanly (never hangs).
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    drop(listener);
+    let url = format!("http://127.0.0.1:{port}");
+
     let out = agentctl(&[
         "run",
         "start",
         "--flow",
-        "execute",
+        "draft",
         "--workflows-dir",
         &workflows_dir(),
+        "--daemon-url",
+        &url,
         "SPEC-1",
     ]);
-    assert!(!out.status.success(), "live path must be a non-zero error");
+    assert!(
+        !out.status.success(),
+        "an unreachable daemon is a non-zero error"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("P0.9"),
-        "stderr should say live execution is deferred to P0.9: {stderr}"
+        stderr.contains("cannot reach"),
+        "stderr should report the daemon is unreachable: {stderr}"
     );
 }
 
