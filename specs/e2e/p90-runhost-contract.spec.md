@@ -50,6 +50,12 @@ Scenario: a replayed submit for a closed task is rejected with no new event
   When submit_outcome is dispatched again for the already-completed propose_spec node
   Then the dispatch returns an error and no additional event row is emitted
 
+Scenario: the production host drives execute.dot (fan-out review) to done
+  Test: production_runhost_drives_execute_dot_to_done
+  Given a production RunHost with a recorded execute.dot run
+  When start_run parks at implement, its success is submitted, and three reviewers submit pass verdicts (via submit_review, learning review_run_id from the store)
+  Then the run reaches status "finished" and the emitted events park at implement and review before run_finished
+
 Scenario: events_from for an unknown run is empty
   Test: production_runhost_events_from_unknown_run_is_empty
   Given a production RunHost over a real SqliteStore

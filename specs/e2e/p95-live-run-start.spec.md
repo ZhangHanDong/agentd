@@ -52,6 +52,12 @@ Scenario: POST /runs with an unknown flow is an error
   When POST /runs with an unknown flow is requested
   Then the response status is an error (not 2xx)
 
+Scenario: agentctl run start posts to the daemon and reports success
+  Test: run_start_live_posts_and_reports_success
+  Given a daemon that replies 201 to POST /runs
+  When `agentctl run start --flow draft --daemon-url <it> <id>` is invoked
+  Then it exits 0 and stdout reports the run started
+
 Scenario: agentctl run start without a reachable daemon fails cleanly
   Test: run_start_live_unreachable_daemon_errors_cleanly
   Given no daemon listening at the given URL

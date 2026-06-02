@@ -9,7 +9,7 @@ use agentd_bin::{ProductionRunHost, SystemClock};
 use agentd_core::engine::RunProgress;
 use agentd_core::test_support::{FakeBackend, MempalStub, RecordingCommandRunner};
 use agentd_core::types::RunId;
-use agentd_store::{SqliteStore, run_repo};
+use agentd_store::{SqliteStore, review_repo, run_repo};
 use agentd_surface::host::RunHost;
 use agentd_surface::mcp_server::dispatch;
 use serde_json::json;
@@ -123,6 +123,83 @@ async fn production_runhost_replayed_submit_is_rejected_without_new_event() {
         events.len(),
         2,
         "the rejected replay emits no additional event row"
+    );
+}
+
+/// The scriptable reviewer: submit a pass verdict through the `submit_review`
+/// tool (which also exercises the production host's `review_counts`).
+async fn agent_submit_review(
+    host: &ProductionRunHost,
+    review_run_id: &str,
+    reviewer: &str,
+) -> Result<serde_json::Value, agentd_surface::SurfaceError> {
+    dispatch(
+        host,
+        "submit_review",
+        json!({
+            "review_run_id": review_run_id, "reviewer_id": reviewer,
+            "verdict": "pass", "findings": []
+        }),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn production_runhost_drives_execute_dot_to_done() {
+    let (host, _dir) = production_host().await;
+    let run = RunId::from_string("e1");
+    run_repo::record_run(host.store().pool(), &run, "execute.dot", "sha")
+        .await
+        .expect("record");
+
+    // start -> pull_frozen_spec, draft_plan (tools) -> implement (codergen) parks.
+    let parked = host.start_run(&run).await.expect("start");
+    assert!(
+        matches!(parked, RunProgress::Parked { .. }),
+        "execute.dot parks at implement, got {parked:?}"
+    );
+
+    // implement success -> verify_lifecycle (tool) -> review (fan_out) parks.
+    agent_submit_success(&host, "e1", "implement")
+        .await
+        .expect("submit implement");
+
+    // The scriptable agent learns review_run_id from the store (the spawn-context
+    // seam; the real rmcp path is D7/deployment).
+    let review_run_id = review_repo::find_open_review_run(host.store().pool(), &run)
+        .await
+        .expect("find review run")
+        .expect("an open review run");
+    for reviewer in ["claude-sec", "codex-perf", "gemini-readability"] {
+        agent_submit_review(&host, review_run_id.as_str(), reviewer)
+            .await
+            .expect("submit_review");
+    }
+
+    // aggregate (majority_pass) -> open_pr -> report_acceptance -> done.
+    let snap = host
+        .run_snapshot(&run)
+        .await
+        .expect("snapshot")
+        .expect("run exists");
+    assert_eq!(snap.status, "finished", "execute.dot reached done");
+
+    // The multi-park emit sequence: parked at implement AND review, then finished.
+    let events = host.events_from(&run, 0).await.expect("events");
+    let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+    assert_eq!(
+        kinds.first(),
+        Some(&"run_parked"),
+        "starts parked: {kinds:?}"
+    );
+    assert_eq!(
+        kinds.last(),
+        Some(&"run_finished"),
+        "ends finished: {kinds:?}"
+    );
+    assert!(
+        kinds.iter().filter(|k| **k == "run_parked").count() >= 2,
+        "multi-park (implement + review): {kinds:?}"
     );
 }
 

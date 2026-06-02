@@ -66,6 +66,51 @@ fn run_start_dry_run_execute_validates_and_prints_plan() {
 }
 
 #[test]
+fn run_start_live_posts_and_reports_success() {
+    use std::io::{Read, Write};
+
+    // A one-shot in-process daemon: accept one connection, reply 201.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let server = std::thread::spawn(move || {
+        if let Ok((mut sock, _)) = listener.accept() {
+            let mut buf = [0_u8; 1024];
+            let _ = sock.read(&mut buf); // drain the request; the reply is canned
+            let body = r#"{"run_id":"SPEC-1","status":"parked"}"#;
+            let resp = format!(
+                "HTTP/1.1 201 Created\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(resp.as_bytes());
+        }
+    });
+
+    let url = format!("http://127.0.0.1:{port}");
+    let out = agentctl(&[
+        "run",
+        "start",
+        "--flow",
+        "draft",
+        "--workflows-dir",
+        &workflows_dir(),
+        "--daemon-url",
+        &url,
+        "SPEC-1",
+    ]);
+    let _ = server.join();
+    assert!(
+        out.status.success(),
+        "a 201 from the daemon is a success exit; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("run started"),
+        "stdout should report the run started: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
 fn run_start_live_unreachable_daemon_errors_cleanly() {
     // Bind a free port then close it -> a connect there is guaranteed refused,
     // so the live path fails fast and cleanly (never hangs).

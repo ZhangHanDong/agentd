@@ -57,6 +57,30 @@ pub async fn insert_review_run(
 ///
 /// # Errors
 /// Returns [`StoreError::Sqlx`] on a database failure.
+/// Forward read: the OPEN review run for `run_id` — the one still collecting
+/// verdicts (`count(verdicts) < expected`) — as its id, or `None`. The symmetric
+/// counterpart of `lookup_park_by_review_run`; the production `RunHost` (and the
+/// scriptable agent) resolve which review a verdict belongs to through it. If
+/// more than one is open, the most recently started is returned. No migration.
+///
+/// # Errors
+/// Returns [`StoreError::Sqlx`] on a database failure.
+pub async fn find_open_review_run(
+    pool: &SqlitePool,
+    run_id: &RunId,
+) -> Result<Option<ReviewRunId>, StoreError> {
+    let row = sqlx::query(
+        "SELECT id FROM review_runs \
+         WHERE run_id = ? \
+           AND (SELECT COUNT(*) FROM review_verdicts WHERE review_run_id = review_runs.id) < expected \
+         ORDER BY started_at DESC LIMIT 1",
+    )
+    .bind(run_id.as_str())
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| ReviewRunId::from_string(r.get::<String, _>("id"))))
+}
+
 pub async fn lookup_park_by_review_run(
     pool: &SqlitePool,
     review_run_id: &ReviewRunId,
