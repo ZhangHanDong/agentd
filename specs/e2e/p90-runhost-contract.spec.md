@@ -1,0 +1,57 @@
+spec: task
+name: "Production RunHost contract — draft.dot E2E over a real store + the emit point"
+tags: [e2e, p0, p0.9, runhost, emit]
+---
+
+## Intent
+
+Prove the production `RunHost` (P0.9 9a) drives a real workflow end-to-end over a
+real `SqliteStore`, using a scriptable in-process agent that submits outcomes
+through `mcp_server::dispatch` (the same tool layer a real agent uses, minus the
+rmcp wire). It also lands the P0.7-deferred emit point: one event row per
+state-changing `RunProgress`. This is the offline contract test; real agents /
+tmux / rmcp are the deployment checklist.
+
+## Decisions
+
+- The host's `start_run(run_id)` resolves the run's graph from `runs.workflow_path` and executes to the first park (emitting `run_parked`); `dispatch("submit_outcome", …)` resolves the open task via `find_open_task_run` and advances the run (emitting `run_finished` on completion).
+- The emit point writes ONE row per STATE-CHANGING `RunProgress`: `Parked`→`run_parked`, `Finished`→`run_finished`, `Failed`→`run_failed`; `Ignored` emits nothing. Payloads are compact JSON.
+- `draft.dot` walks: `start_run` parks at `propose_spec`; submitting its success drives `lint_spec`+`push_draft` to `done` (Finished). The store, checkpoints, and event rows all persist to a real SQLite file.
+- A replayed `submit_outcome` for an already-closed task is rejected (its open task is gone) and emits NO new event row.
+
+## Boundaries
+
+### Allowed Changes
+
+- crates/agentd-bin/**
+- specs/e2e/**
+
+### Forbidden
+
+- Do not modify any file under crates/agentd-core/** (D1).
+- Do not pull agentd-store into agentd-surface (P0.7 D2 — the production host lives in agentd-bin).
+
+## Out of Scope
+
+- Real agents / real tmux spawn / the rmcp stdio wire (deployment checklist).
+- execute.dot's review fan-out (needs the in-process RunProgress to learn review_run_id) — the kill-9 drill and 9b/9c cover the daemon paths.
+
+## Completion Criteria
+
+Scenario: the production host drives draft.dot to done over a real store
+  Test: production_runhost_drives_draft_dot_to_done
+  Given a production RunHost over a real SqliteStore with a recorded draft.dot run
+  When start_run parks at propose_spec and the scriptable agent submits its success via dispatch
+  Then the run reaches status "finished" and the emitted events are run_parked then run_finished in increasing seq
+
+Scenario: a replayed submit for a closed task is rejected with no new event
+  Test: production_runhost_replayed_submit_is_rejected_without_new_event
+  Given a draft.dot run that has been driven to done
+  When submit_outcome is dispatched again for the already-completed propose_spec node
+  Then the dispatch returns an error and no additional event row is emitted
+
+Scenario: events_from for an unknown run is empty
+  Test: production_runhost_events_from_unknown_run_is_empty
+  Given a production RunHost over a real SqliteStore
+  When events_from is called for a run that does not exist
+  Then it returns no events

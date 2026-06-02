@@ -103,6 +103,39 @@ impl ProductionRunHost {
         )
     }
 
+    /// Start a run: resolve its graph and execute from the start node to the
+    /// first park (or completion), emitting the resulting state-change event.
+    /// The daemon's run-start path (POST /runs) and the contract tests call this.
+    ///
+    /// # Errors
+    /// [`CoreError`] on a store/handler/engine failure or an unresolved graph.
+    pub async fn start_run(&self, run_id: &RunId) -> Result<RunProgress, CoreError> {
+        let (graph, sha) = self.resolve_graph(run_id).await?;
+        let progress = self.engine(&graph, &sha).execute(run_id).await?;
+        self.emit(run_id, &progress).await?;
+        Ok(progress)
+    }
+
+    /// Emit ONE event row per STATE-CHANGING `RunProgress` (P0.7-deferred emit
+    /// point, D6): `Parked`→`run_parked`, `Finished`→`run_finished`,
+    /// `Failed`→`run_failed`. `Ignored` emits nothing. The payload is COMPACT
+    /// JSON (no newlines — avoids the P0.7 D9 SSE CR/LF hazard).
+    async fn emit(&self, run_id: &RunId, progress: &RunProgress) -> Result<(), CoreError> {
+        let (kind, payload) = match progress {
+            RunProgress::Parked { node_id, .. } => (
+                "run_parked",
+                serde_json::json!({ "node": node_id.as_str() }),
+            ),
+            RunProgress::Finished { .. } => ("run_finished", serde_json::json!({})),
+            RunProgress::Failed { reason, .. } => {
+                ("run_failed", serde_json::json!({ "reason": reason }))
+            }
+            RunProgress::Ignored { .. } => return Ok(()),
+        };
+        event_repo::append(self.store.pool(), run_id, kind, &payload.to_string()).await?;
+        Ok(())
+    }
+
     /// Resolve which run an inbound event belongs to via the store's park
     /// lookups; `None` if no open park matches (a replayed / already-resolved
     /// event — the replay-safe path).
@@ -132,8 +165,9 @@ impl RunHost for ProductionRunHost {
             });
         };
         let (graph, sha) = self.resolve_graph(&run_id).await?;
-        self.engine(&graph, &sha).deliver_event(event).await
-        // The emit point wraps this in 9a-T3.
+        let progress = self.engine(&graph, &sha).deliver_event(event).await?;
+        self.emit(&run_id, &progress).await?;
+        Ok(progress)
     }
 
     async fn run_snapshot(&self, run_id: &RunId) -> Result<Option<RunSnapshot>, CoreError> {
