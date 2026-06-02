@@ -66,7 +66,7 @@ Phases P0.3 / P0.4 / P0.5 / P0.6 / P0.7 are **siblings** once P0.2 is done — t
 | P0.6  | Matrix adapter + slash router + wait.human + threads     | 8 | 28  | 220  | _generate via writing-plans (split into 6a + 6b)_                            | deferred — **narrowed** (Δ5: dispatch listener + notifier) |
 | P0.7  | HTTP+SSE + MCP server (5 tools per §4.12.1)              | 5 | 25  | 140  | [`p0.7-surface.md`](./2026-05-29-agentd-p0.7-surface.md)                      | **done** (tag v0.0.0-p0.7; rmcp stdio transport + production RunHost + event emit → P0.9) |
 | P0.8  | Workflow authoring: `draft.dot` + `execute.dot` + `run start` | 3 | 16  | 80   | [`p0.8-workflows.md`](./2026-05-29-agentd-p0.8-workflows.md)                  | **done** (tag v0.0.0-p0.8; Path-B Δ1. `install-skills` + live execution → later/P0.9) |
-| P0.9  | E2E + disaster recovery drills                           | 5 | 18  | 160  | _generate via writing-plans_                                                 | deferred |
+| P0.9  | Capstone: production RunHost + daemon + live run start + kill-9 | 6 | 15  | 160  | [`p0.9-capstone.md`](./2026-05-29-agentd-p0.9-capstone.md)                    | **done** (tag v0.0.0-p0.9; offline assembly + contract tests; real-agent/SIGKILL/demo → [deployment checklist](../p0.9-deployment-checklist.md)) |
 | **Σ** |                                                          | **52** | **257** | **1420** | | |
 
 > Scenario counts are derived from each phase's plan-detail file when one exists,
@@ -272,6 +272,7 @@ For each deferred phase, this section captures the **deliverable inventory** so 
   - `e2e_workflow_sha_change_requires_accept_flag`
 - **Depends on**: all prior phases
 - **Exit**: nightly e2e 5/5 green; the 8-step demo from §7.8 runs from a clean install in under 90 seconds.
+- **Delivered (v0.0.0-p0.9)** — see [`p0.9-capstone.md`](./2026-05-29-agentd-p0.9-capstone.md). P0.9-done was **redefined** (user-confirmed) from the nightly-real-agent-e2e + 90-second-live-demo above — un-runnable on an offline box with no real agents/docker/synapse — to **code-complete assembly, contract-tested in-process**, with the real-agent / real-tmux / rmcp-stdio / real-mempal-Matrix / actual-SIGKILL / live-demo parts as a runnable [`p0.9-deployment-checklist.md`](../p0.9-deployment-checklist.md). **D1 confirmed: zero agentd-core edits** (`deliver_event` already loads the checkpoint + resumes; `Checkpoint`/`Store` resume primitives are pub). Shipped: the **production `RunHost`** (in `agentd-bin`, so `agentd-surface` stays store-free) over a real `SqliteStore` + per-call `Engine`; the daemon bootstrap (`agentd` binary, was a P0.0 stub) hosting the HTTP/SSE router; **live `agentctl run start`** → `POST /runs`; the P0.7-deferred **event emit point**; the one new store read `find_open_task_run`; and the **kill-9 resume + idempotent-replay + sha-guard drill** (the signature, via a simulated restart over a real SQLite file). 15 scenarios across p6 + p90/p92/p95/p96, all lint 100%; `agentd-core` untouched (D1).
 
 ---
 
