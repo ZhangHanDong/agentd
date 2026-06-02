@@ -51,6 +51,37 @@ pub async fn complete_task_run(
     Ok(())
 }
 
+/// Forward read: the OPEN task run for `(run_id, node_id)` — the one with
+/// `finished_at IS NULL` — as its id plus the nullable `worktree_path`, or
+/// `None` if there is none. This is the direction `lookup_park_by_task_run` does
+/// not cover; the production `RunHost`'s `open_task` resolves an agent's
+/// `submit_outcome(run, node)` into its `task_run_id` through it. If more than
+/// one open row exists, the most recently started is returned.
+///
+/// # Errors
+/// Returns [`StoreError::Sqlx`] on a database failure.
+pub async fn find_open_task_run(
+    pool: &SqlitePool,
+    run_id: &RunId,
+    node_id: &NodeId,
+) -> Result<Option<(TaskRunId, Option<String>)>, StoreError> {
+    let row = sqlx::query(
+        "SELECT id, worktree_path FROM task_runs \
+         WHERE run_id = ? AND node_id = ? AND finished_at IS NULL \
+         ORDER BY started_at DESC LIMIT 1",
+    )
+    .bind(run_id.as_str())
+    .bind(node_id.as_str())
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| {
+        (
+            TaskRunId::from_string(r.get::<String, _>("id")),
+            r.get::<Option<String>, _>("worktree_path"),
+        )
+    }))
+}
+
 /// Resolve the parked `(run_id, node_id)` — only while not yet finished.
 ///
 /// # Errors
