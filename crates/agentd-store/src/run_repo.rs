@@ -3,7 +3,7 @@
 
 use agentd_core::ports::RunStatus;
 use agentd_core::types::{NodeId, RunId};
-use sqlx::SqlitePool;
+use sqlx::{Row, SqlitePool};
 
 use crate::error::StoreError;
 use crate::util::{now_unix, run_status_str};
@@ -58,6 +58,71 @@ pub async fn update_run_status(
         return Err(StoreError::NotFound);
     }
     Ok(())
+}
+
+/// Create a run with its workflow file path + sha (the daemon's run-creation
+/// path, P0.9). The engine-side [`insert_run`] leaves `workflow_path` NULL; this
+/// sets it so the daemon can re-resolve the run's graph on deliver/resume.
+/// Idempotent on the run id (fills `workflow_path` if a minimal row pre-exists).
+///
+/// # Errors
+/// Returns [`StoreError::Sqlx`] on a database failure.
+pub async fn record_run(
+    pool: &SqlitePool,
+    run_id: &RunId,
+    workflow_path: &str,
+    workflow_sha: &str,
+) -> Result<(), StoreError> {
+    let now = now_unix();
+    sqlx::query(
+        "INSERT INTO runs (id, workflow_path, workflow_sha, status, started_at, last_heartbeat) \
+         VALUES (?, ?, ?, 'running', ?, ?) \
+         ON CONFLICT(id) DO UPDATE SET workflow_path = excluded.workflow_path",
+    )
+    .bind(run_id.as_str())
+    .bind(workflow_path)
+    .bind(workflow_sha)
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// The run's workflow file path (`NULL` for engine-only runs), used by the
+/// daemon to re-read + re-resolve the graph on deliver/resume.
+///
+/// # Errors
+/// Returns [`StoreError::Sqlx`] on a database failure.
+pub async fn workflow_path(
+    pool: &SqlitePool,
+    run_id: &RunId,
+) -> Result<Option<String>, StoreError> {
+    let row = sqlx::query("SELECT workflow_path FROM runs WHERE id = ?")
+        .bind(run_id.as_str())
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.and_then(|r| r.get::<Option<String>, _>("workflow_path")))
+}
+
+/// The run's `(status, current_node)` for `run_snapshot`, or `None` if unknown.
+///
+/// # Errors
+/// Returns [`StoreError::Sqlx`] on a database failure.
+pub async fn read_status(
+    pool: &SqlitePool,
+    run_id: &RunId,
+) -> Result<Option<(String, Option<String>)>, StoreError> {
+    let row = sqlx::query("SELECT status, current_node FROM runs WHERE id = ?")
+        .bind(run_id.as_str())
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(|r| {
+        (
+            r.get::<String, _>("status"),
+            r.get::<Option<String>, _>("current_node"),
+        )
+    }))
 }
 
 /// Record the run's current node (the park/resume cursor). Errors if unknown.

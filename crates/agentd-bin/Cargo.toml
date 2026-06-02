@@ -13,12 +13,27 @@ publish = false
 [lints]
 workspace = true
 
+[lib]
+name = "agentd_bin"
+path = "src/lib.rs"
+
 [[bin]]
 name = "agentd"
 path = "src/main.rs"
 
 [dependencies]
+agentd-core = { path = "../agentd-core" }
 agentd-store = { path = "../agentd-store" }
+agentd-surface = { path = "../agentd-surface" }
+async-trait = "0.1"
+sha2 = "0.10"
+serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+# The in-memory port fakes (FakeBackend/MempalStub/FixedClock/RecordingCommandRunner)
+# so the production-RunHost contract tests run over a real SqliteStore + fakes.
+agentd-core = { path = "../agentd-core", features = ["test-support"] }
+tempfile = { workspace = true }
