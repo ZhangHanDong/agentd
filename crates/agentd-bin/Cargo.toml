@@ -25,9 +25,12 @@ path = "src/main.rs"
 agentd-core = { path = "../agentd-core" }
 agentd-store = { path = "../agentd-store" }
 agentd-surface = { path = "../agentd-surface" }
+agentd-tmux = { path = "../agentd-tmux" }
 async-trait = "0.1"
 sha2 = "0.10"
 serde_json = { workspace = true }
+clap = { workspace = true }
+axum = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -37,3 +40,6 @@ tracing-subscriber = { workspace = true }
 # so the production-RunHost contract tests run over a real SqliteStore + fakes.
 agentd-core = { path = "../agentd-core", features = ["test-support"] }
 tempfile = { workspace = true }
+# Drive the assembled axum router in-process (no socket) + read the response body.
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

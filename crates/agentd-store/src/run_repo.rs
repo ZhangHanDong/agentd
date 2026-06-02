@@ -125,6 +125,19 @@ pub async fn read_status(
     }))
 }
 
+/// Count runs that are neither finished nor failed — the in-flight runs the
+/// daemon re-attaches to on boot (each resumable from its checkpoint).
+///
+/// # Errors
+/// Returns [`StoreError::Sqlx`] on a database failure.
+pub async fn count_in_flight(pool: &SqlitePool) -> Result<i64, StoreError> {
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE status NOT IN ('finished', 'failed')")
+            .fetch_one(pool)
+            .await?;
+    Ok(count)
+}
+
 /// Record the run's current node (the park/resume cursor). Errors if unknown.
 ///
 /// # Errors

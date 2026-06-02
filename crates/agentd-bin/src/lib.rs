@@ -5,8 +5,13 @@
 
 #![warn(clippy::unwrap_used, clippy::panic)]
 
+pub mod cli;
 pub mod clock;
+pub mod daemon;
 pub mod host;
+pub mod mempal;
 
+pub use cli::DaemonConfig;
 pub use clock::SystemClock;
 pub use host::ProductionRunHost;
+pub use mempal::OfflineMempal;

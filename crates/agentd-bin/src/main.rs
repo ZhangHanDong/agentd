@@ -1,10 +1,24 @@
-//! `agentd` daemon entrypoint. P0.0 stub — boots the tokio runtime and exits.
-//! Real wiring (engine, adapters, surfaces) arrives starting in P0.1.
+//! `agentd` daemon entrypoint (P0.9). Thin wrapper over `agentd_bin::daemon`:
+//! parse the config, then boot + serve. The assembly lives in the lib so it is
+//! integration-testable.
 
 #![warn(clippy::unwrap_used, clippy::panic)]
 
-fn main() -> std::process::ExitCode {
+use std::process::ExitCode;
+
+use agentd_bin::DaemonConfig;
+use agentd_bin::daemon;
+use clap::Parser;
+
+#[tokio::main]
+async fn main() -> ExitCode {
     tracing_subscriber::fmt::init();
-    tracing::info!("agentd P0.0 stub: nothing to do, exiting.");
-    std::process::ExitCode::SUCCESS
+    let config = DaemonConfig::parse();
+    match daemon::serve(config).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            tracing::error!("agentd daemon error: {err}");
+            ExitCode::FAILURE
+        }
+    }
 }
