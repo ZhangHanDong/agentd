@@ -68,3 +68,15 @@ Scenario: a terminal event closes the live stream
   Given a subscription that receives a run_finished event
   When the live event stream is collected
   Then the stream yields the run_finished frame and then ends
+
+Scenario: a lagging subscriber whose terminal was evicted closes via the snapshot status
+  Test: live_stream_lag_with_terminal_snapshot_closes_via_resync
+  Given a lagging receiver whose buffer holds only non-terminal events and a run_snapshot whose status is "finished"
+  When the live event stream is collected
+  Then it emits a resync frame and ends via the snapshot's terminal status (no terminal event was present)
+
+Scenario: events for another run are filtered out
+  Test: live_stream_filters_by_run_id
+  Given a subscription for run "r1" that also receives a "r2" event before an "r1" terminal
+  When the live event stream is collected
+  Then the body excludes the r2 event and closes on the r1 terminal

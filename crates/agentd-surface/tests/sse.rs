@@ -120,3 +120,57 @@ async fn live_stream_terminal_closes() {
         "yields the terminal then ends: {body}"
     );
 }
+
+#[tokio::test]
+async fn live_stream_lag_with_terminal_snapshot_closes_via_resync() {
+    // The reliability net for the single-broadcast design: the terminal event was
+    // EVICTED by the lag (only non-terminal events remain in the channel), so the
+    // ONLY thing that can close the stream is the resync snapshot's terminal
+    // status. If that branch were wrong, a lagging dashboard would hang forever.
+    let (tx, rx) = broadcast::channel(2);
+    tx.send(live(1, "node.parked", "a")).unwrap();
+    tx.send(live(2, "node.parked", "b")).unwrap();
+    tx.send(live(3, "node.parked", "c")).unwrap(); // NB: NO terminal event in the channel
+    let host = FakeRunHost::new();
+    host.set_snapshot(
+        "r1",
+        RunSnapshot {
+            status: "finished".into(), // the authoritative state says the run ended
+            current_node: None,
+            completed_nodes: vec![],
+            context: serde_json::json!({}),
+        },
+    );
+    // Returning at all (no hang) proves the snapshot closed it.
+    let body = body_of(Vec::new(), rx, Arc::new(host)).await;
+    assert!(
+        body.contains("state_resync"),
+        "the resync frame was sent: {body}"
+    );
+    assert!(
+        !body.contains("run_finished"),
+        "no terminal event existed — it closed via the snapshot status: {body}"
+    );
+}
+
+#[tokio::test]
+async fn live_stream_filters_by_run_id() {
+    // One global broadcast filtered by run_id: another run's events must NOT leak
+    // into this run's stream.
+    let (tx, rx) = broadcast::channel(16);
+    tx.send(LiveEvent {
+        run_id: "r2".to_string(),
+        event: rec(5, "node.parked", "R2_LEAK"),
+    })
+    .unwrap();
+    tx.send(live(1, "run_finished", "{}")).unwrap(); // an r1 terminal closes the stream
+    let body = body_of(Vec::new(), rx, Arc::new(FakeRunHost::new())).await;
+    assert!(
+        !body.contains("R2_LEAK"),
+        "events for run r2 are filtered out of run r1's stream: {body}"
+    );
+    assert!(
+        body.contains("run_finished"),
+        "the r1 terminal closed it: {body}"
+    );
+}
