@@ -9,11 +9,12 @@ use agentd_core::CoreError;
 use agentd_core::types::{NodeId, ReviewRunId, RunId};
 use agentd_core::{EngineEvent, RunProgress};
 use serde_json::Value;
+use tokio::sync::broadcast;
 
-use crate::host::{EventRecord, RunHost, RunSnapshot, TaskAssignment};
+use crate::host::{EventRecord, LiveEvent, RunHost, RunSnapshot, TaskAssignment};
 
 /// Scripted, recording [`RunHost`] for tests.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct FakeRunHost {
     snapshots: Mutex<HashMap<String, RunSnapshot>>,
     tasks: Mutex<HashMap<(String, String), TaskAssignment>>,
@@ -22,12 +23,33 @@ pub struct FakeRunHost {
     review_counts: Mutex<HashMap<String, (usize, usize)>>,
     events: Mutex<HashMap<String, Vec<EventRecord>>>,
     started: Mutex<Vec<(String, String, Value)>>,
+    live_tx: broadcast::Sender<LiveEvent>,
+}
+
+impl Default for FakeRunHost {
+    fn default() -> Self {
+        Self {
+            snapshots: Mutex::default(),
+            tasks: Mutex::default(),
+            delivered: Mutex::default(),
+            progress: Mutex::default(),
+            review_counts: Mutex::default(),
+            events: Mutex::default(),
+            started: Mutex::default(),
+            live_tx: broadcast::channel(64).0,
+        }
+    }
 }
 
 impl FakeRunHost {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Publish a live event to subscribers (test driver for the SSE live tail).
+    pub fn publish(&self, event: LiveEvent) {
+        let _ = self.live_tx.send(event);
     }
 
     /// Set the snapshot returned by `run_snapshot` for `run_id`.
@@ -85,6 +107,10 @@ impl FakeRunHost {
 
 #[async_trait::async_trait]
 impl RunHost for FakeRunHost {
+    fn subscribe_events(&self) -> broadcast::Receiver<LiveEvent> {
+        self.live_tx.subscribe()
+    }
+
     async fn start_workflow(
         &self,
         flow: &str,

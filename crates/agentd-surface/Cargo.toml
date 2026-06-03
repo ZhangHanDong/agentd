@@ -30,6 +30,9 @@ async-trait = "0.1"
 # futures::stream::iter builds the finite SSE replay stream.
 axum = { workspace = true }
 futures = "0.3"
+# The live SSE tail (P1): replay frames then tail a lossy broadcast, awaiting a
+# snapshot resync inside the generator — async-stream keeps that readable.
+async-stream = "0.3"
 
 [dev-dependencies]
 # Self path dep enabling the in-crate test-support so tool tests inject the

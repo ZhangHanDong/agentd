@@ -204,6 +204,36 @@ async fn production_runhost_drives_execute_dot_to_done() {
 }
 
 #[tokio::test]
+async fn emit_persists_and_broadcasts() {
+    let (host, _dir) = production_host().await;
+    let run = RunId::from_string("r1");
+    // Subscribe BEFORE the run starts so the live event is captured.
+    let mut rx = host.subscribe_events();
+
+    run_repo::record_run(host.store().pool(), &run, "draft.dot", "sha")
+        .await
+        .expect("record");
+    host.start_run(&run).await.expect("start"); // parks at propose_spec -> emits run_parked
+
+    // Persisted (durable/audit).
+    let persisted = host.events_from(&run, 0).await.expect("events");
+    assert_eq!(
+        persisted.iter().filter(|e| e.kind == "run_parked").count(),
+        1,
+        "the event is persisted"
+    );
+
+    // Broadcast (the live tail) — the same event, non-blocking.
+    let live = rx.try_recv().expect("a live event was broadcast");
+    assert_eq!(live.run_id, "r1");
+    assert_eq!(live.event.kind, "run_parked");
+    assert_eq!(
+        live.event.seq, persisted[0].seq,
+        "same seq as the persisted row"
+    );
+}
+
+#[tokio::test]
 async fn production_runhost_events_from_unknown_run_is_empty() {
     let (host, _dir) = production_host().await;
     let events = host

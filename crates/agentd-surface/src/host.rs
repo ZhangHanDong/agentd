@@ -8,6 +8,7 @@ use agentd_core::CoreError;
 use agentd_core::types::{NodeId, ReviewRunId, RunId, TaskRunId};
 use agentd_core::{EngineEvent, RunProgress};
 use serde_json::Value;
+use tokio::sync::broadcast;
 
 /// A run's state, for `query_run`.
 #[derive(Debug, Clone)]
@@ -40,9 +41,24 @@ pub struct EventRecord {
     pub payload: String,
 }
 
+/// A live event for the SSE tail (P1): an [`EventRecord`] tagged with its
+/// `run_id`, broadcast on the host's lossy channel. `Clone` because
+/// `tokio::sync::broadcast` requires it.
+#[derive(Debug, Clone)]
+pub struct LiveEvent {
+    pub run_id: String,
+    pub event: EventRecord,
+}
+
 /// The seam: deliver engine events and read the bits the tools need.
 #[async_trait::async_trait]
 pub trait RunHost: Send + Sync {
+    /// Subscribe to the host's live event broadcast — the SSE live tail (P1).
+    /// LOSSY + bounded: a slow subscriber lags (and is realigned with a snapshot)
+    /// rather than backpressuring the engine. The surface filters by `run_id`.
+    /// Not `async` — taking a receiver is synchronous.
+    fn subscribe_events(&self) -> broadcast::Receiver<LiveEvent>;
+
     /// Create and start a run of `flow` (`"draft"`/`"execute"`) as `run_id` with
     /// an initial `context`, executing from the start node to the first park (or
     /// completion). The daemon's `POST /runs` control path; the host records the

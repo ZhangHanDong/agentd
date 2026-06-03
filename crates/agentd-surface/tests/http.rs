@@ -70,6 +70,8 @@ async fn http_get_run_unknown_is_404() {
 
 #[tokio::test]
 async fn http_sse_replays_from_cursor() {
+    // The SSE tail is now LIVE (P1); a terminal event in the replay closes the
+    // stream so this oneshot collects a finite body deterministically.
     let host = FakeRunHost::new();
     host.set_events(
         "r1",
@@ -84,6 +86,11 @@ async fn http_sse_replays_from_cursor() {
                 kind: "node.parked".into(),
                 payload: r#"{"node":"review"}"#.into(),
             },
+            EventRecord {
+                seq: 3,
+                kind: "run_finished".into(),
+                payload: "{}".into(),
+            },
         ],
     );
     let resp = get(app(host), "/runs/r1/events?from_seq=1").await;
@@ -91,14 +98,10 @@ async fn http_sse_replays_from_cursor() {
     let body = body_string(resp).await;
     assert!(body.contains("node.parked"), "replays seq > 1: {body}");
     assert!(!body.contains("run.started"), "skips seq <= cursor: {body}");
-}
-
-#[tokio::test]
-async fn http_sse_empty_when_no_events() {
-    let resp = get(app(FakeRunHost::new()), "/runs/r1/events").await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_string(resp).await;
-    assert!(!body.contains("event:"), "no event frame: {body:?}");
+    assert!(
+        body.contains("run_finished"),
+        "closes on the terminal event: {body}"
+    );
 }
 
 #[tokio::test]

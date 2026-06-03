@@ -19,8 +19,8 @@ is P0.9.
 - `router(AppState { host })` builds the `Router`; `AppState` holds only `Arc<dyn RunHost>` (the surface stays store-free — the production host maps `agentd-store` event rows to `EventRecord` in P0.9).
 - `GET /healthz` returns `200` with body `ok`.
 - `GET /runs/:id` calls `query_run` over the host: `Ok` → `200` JSON `{status, current_node, completed_nodes, context}`; the `not_found` (`NotFound`) error → `404`.
-- `GET /runs/:id/events?from_seq=N` returns a `text/event-stream` replaying the host's events with `seq > from_seq`, each as one SSE frame (`id` = seq, `event` = kind, `data` = payload), then ends the stream. `from_seq` defaults to `0` when absent.
-- The replay stream is FINITE (`futures::stream::iter`, no keep-alive); a non-integer `from_seq` is rejected by the query extractor with `400`.
+- `GET /runs/:id/events?from_seq=N` returns a `text/event-stream` replaying the host's events with `seq > from_seq`, each as one SSE frame (`id` = seq, `event` = kind, `data` = payload). `from_seq` defaults to `0` when absent. As of P1 the stream then TAILS new events live and closes on a terminal event — the live-tail + backpressure behaviour is specified in `p75-sse-live-tail.spec.md`; this route spec keeps the replay + cursor + 400-validation contract.
+- A non-integer `from_seq` is rejected by the query extractor with `400` (before the stream).
 
 ## Boundaries
 
@@ -58,17 +58,11 @@ Scenario: GET an unknown run is 404
   When GET /runs/ghost is requested
   Then the response is 404
 
-Scenario: SSE replays events after the from_seq cursor
+Scenario: SSE replays events after the from_seq cursor then closes on the terminal
   Test: http_sse_replays_from_cursor
-  Given a host with events seq 1 "run.started" and seq 2 "node.parked" for run "r1"
+  Given a host with events seq 1 "run.started", seq 2 "node.parked", seq 3 "run_finished" for run "r1"
   When GET /runs/r1/events?from_seq=1 is requested
-  Then the response is 200 and the body contains "node.parked" but not "run.started"
-
-Scenario: SSE with no events is an empty 200 stream
-  Test: http_sse_empty_when_no_events
-  Given a host with no events for run "r1"
-  When GET /runs/r1/events is requested
-  Then the response is 200 and the body contains no event frame
+  Then the response is 200 and the body contains "node.parked" and "run_finished" but not "run.started"
 
 Scenario: a non-integer from_seq is rejected with 400
   Test: http_sse_invalid_from_seq_is_400

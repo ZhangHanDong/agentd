@@ -1,25 +1,30 @@
 //! The daemon's HTTP+SSE observability surface (design §7.2). An axum `Router`
 //! over the [`RunHost`] seam: `/healthz`, `/runs/:id` (the `query_run`
-//! snapshot), and `/runs/:id/events` (a finite SSE replay from a `seq` cursor).
+//! snapshot), and `/runs/:id/events` (a LIVE SSE tail — P1: replay from a `seq`
+//! cursor, then stream new events until the run terminates, with a lossy
+//! broadcast so a slow dashboard never backpressures the engine).
 //! Driven in tests by `tower::oneshot`; bound to a listener by the daemon (P0.9).
 
 use std::convert::Infallible;
 use std::sync::Arc;
 
+use async_stream::stream;
 use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::response::sse::{Event, Sse};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
+use futures::Stream;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::sync::broadcast;
 
 use agentd_core::RunProgress;
 use agentd_core::types::RunId;
 
 use crate::error::SurfaceError;
-use crate::host::RunHost;
+use crate::host::{EventRecord, LiveEvent, RunHost, RunSnapshot};
 use crate::tools::query_run::{QueryRunInput, query_run};
 
 /// Shared state for the surface routes: the [`RunHost`] seam the handlers read.
@@ -113,31 +118,105 @@ struct EventsQuery {
     from_seq: i64,
 }
 
-/// `GET /runs/:id/events?from_seq=N` — a finite SSE replay of the run's events
-/// with `seq > from_seq`, then the stream ends (no live tail in v0).
+/// `GET /runs/:id/events?from_seq=N` — the LIVE SSE tail (P1): replay the run's
+/// events with `seq > from_seq`, then stream new events until the run terminates.
 async fn run_events(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(q): Query<EventsQuery>,
 ) -> Response {
     let run = RunId::from_string(id);
-    match state.host.events_from(&run, q.from_seq).await {
-        Ok(events) => {
-            let frames: Vec<Result<Event, Infallible>> = events
-                .into_iter()
-                .map(|e| {
-                    Ok(Event::default()
-                        .id(e.seq.to_string())
-                        .event(e.kind)
-                        .data(e.payload))
-                })
-                .collect();
-            Sse::new(futures::stream::iter(frames)).into_response()
-        }
-        Err(_) => (
+    // Subscribe BEFORE replaying so no event emitted during the replay read is
+    // missed (the seq overlap is deduped in the stream).
+    let rx = state.host.subscribe_events();
+    let Ok(replay) = state.host.events_from(&run, q.from_seq).await else {
+        return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": "internal" })),
         )
-            .into_response(),
+            .into_response();
+    };
+    Sse::new(live_event_stream(replay, rx, state.host.clone(), run))
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+/// The live SSE stream (P1, herdr/mosh): yield the replayed frames, then tail
+/// `rx` for new live events of `run` (deduping the seq overlap with the replay),
+/// closing on a terminal event (`run_finished`/`run_failed`). A LAGGING receiver
+/// gets ONE `state_resync` snapshot frame — realign to latest, not backfill —
+/// rather than an error. Pub so it can be tested deterministically over a
+/// pre-loaded receiver.
+pub fn live_event_stream(
+    replay: Vec<EventRecord>,
+    mut rx: broadcast::Receiver<LiveEvent>,
+    host: Arc<dyn RunHost>,
+    run: RunId,
+) -> impl Stream<Item = Result<Event, Infallible>> {
+    let run_id = run.as_str().to_string();
+    stream! {
+        let mut max_seq = i64::MIN;
+        for rec in replay {
+            max_seq = max_seq.max(rec.seq);
+            let terminal = is_terminal_kind(&rec.kind);
+            yield Ok(event_frame(&rec));
+            if terminal {
+                return;
+            }
+        }
+        loop {
+            match rx.recv().await {
+                Ok(live) => {
+                    if live.run_id != run_id || live.event.seq <= max_seq {
+                        continue; // not this run, or a deduped replay-overlap event
+                    }
+                    max_seq = live.event.seq;
+                    let terminal = is_terminal_kind(&live.event.kind);
+                    yield Ok(event_frame(&live.event));
+                    if terminal {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    // Slow subscriber: resync to the authoritative latest state
+                    // (mosh) instead of backfilling every dropped event.
+                    if let Ok(Some(snap)) = host.run_snapshot(&run).await {
+                        let terminal = is_terminal_status(&snap.status);
+                        yield Ok(resync_frame(&snap));
+                        if terminal {
+                            break;
+                        }
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
     }
+}
+
+fn event_frame(rec: &EventRecord) -> Event {
+    Event::default()
+        .id(rec.seq.to_string())
+        .event(rec.kind.clone())
+        .data(rec.payload.clone())
+}
+
+fn resync_frame(snap: &RunSnapshot) -> Event {
+    let data = json!({
+        "status": snap.status,
+        "current_node": snap.current_node,
+        "completed_nodes": snap.completed_nodes,
+        "context": snap.context,
+    });
+    Event::default()
+        .event("state_resync")
+        .data(data.to_string())
+}
+
+fn is_terminal_kind(kind: &str) -> bool {
+    kind == "run_finished" || kind == "run_failed"
+}
+
+fn is_terminal_status(status: &str) -> bool {
+    status == "finished" || status == "failed"
 }

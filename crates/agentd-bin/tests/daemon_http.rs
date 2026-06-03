@@ -8,6 +8,7 @@ use agentd_bin::{ProductionRunHost, SystemClock, daemon};
 use agentd_core::test_support::{FakeBackend, MempalStub, RecordingCommandRunner};
 use agentd_core::types::RunId;
 use agentd_store::{SqliteStore, run_repo};
+use agentd_surface::mcp_server::dispatch;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -38,6 +39,40 @@ async fn router_with_started_run() -> (Router, tempfile::TempDir) {
         .await
         .expect("record run");
     host.start_run(&run).await.expect("start run");
+    (daemon::build_router(Arc::new(host)), dir)
+}
+
+/// Like [`router_with_started_run`] but drives the run to `done` (emitting the
+/// `run_finished` terminal) so a oneshot `GET /events` on the now-LIVE SSE tail
+/// (P1) collects a finite body instead of hanging.
+async fn router_with_finished_run() -> (Router, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteStore::connect(&dir.path().join("agentd.db"))
+        .await
+        .expect("connect");
+    let host = ProductionRunHost::new(
+        store,
+        Box::new(FakeBackend::new()),
+        Box::new(RecordingCommandRunner::new()),
+        Box::new(MempalStub::new()),
+        Box::new(SystemClock),
+        workflows_dir(),
+    );
+    let run = RunId::from_string("r1");
+    run_repo::record_run(host.store().pool(), &run, "draft.dot", "sha")
+        .await
+        .expect("record run");
+    host.start_run(&run).await.expect("start run"); // parks at propose_spec
+    dispatch(
+        &host,
+        "submit_outcome",
+        serde_json::json!({
+            "run_id": "r1", "node_id": "propose_spec", "attempt": 1, "status": "success",
+            "context_updates": {}, "suggested_next": []
+        }),
+    )
+    .await
+    .expect("submit_outcome drives the run to done");
     (daemon::build_router(Arc::new(host)), dir)
 }
 
@@ -106,9 +141,15 @@ async fn post_runs_creates_and_starts_a_draft_run() {
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert_eq!(v["status"], "parked", "parked at propose_spec: {body}");
 
-    let (es, events) = get(app, "/runs/r1/events").await;
-    assert_eq!(es, StatusCode::OK);
-    assert!(events.contains("run_parked"), "events: {events:?}");
+    // The run was created + started: its snapshot reflects the park. (We avoid
+    // GET /events here — the live tail would not close on a still-parked run.)
+    let (snap_status, snap) = get(app, "/runs/r1").await;
+    assert_eq!(snap_status, StatusCode::OK);
+    let sv: serde_json::Value = serde_json::from_str(&snap).expect("json");
+    assert_eq!(
+        sv["current_node"], "propose_spec",
+        "run created + started: {snap}"
+    );
 }
 
 #[tokio::test]
@@ -145,8 +186,12 @@ async fn daemon_router_serves_run_snapshot() {
 
 #[tokio::test]
 async fn daemon_router_streams_run_events() {
-    let (app, _dir) = router_with_started_run().await;
+    let (app, _dir) = router_with_finished_run().await;
     let (status, body) = get(app, "/runs/r1/events").await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("run_parked"), "events body: {body:?}");
+    assert!(
+        body.contains("run_finished"),
+        "the terminal closes the live stream: {body:?}"
+    );
 }

@@ -14,9 +14,14 @@ use agentd_core::handler::{HandlerRegistry, Ports};
 use agentd_core::ports::{AgentBackend, Clock, CommandRunner, MempalClient, Store};
 use agentd_core::types::{NodeId, ReviewRunId, RunId};
 use agentd_store::{SqliteStore, event_repo, review_repo, run_repo, task_repo};
-use agentd_surface::host::{EventRecord, RunHost, RunSnapshot, TaskAssignment};
+use agentd_surface::host::{EventRecord, LiveEvent, RunHost, RunSnapshot, TaskAssignment};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tokio::sync::broadcast;
+
+/// Capacity of the live-event broadcast: a subscriber more than this many events
+/// behind lags and is realigned with a snapshot (P1).
+const LIVE_BROADCAST_CAPACITY: usize = 256;
 
 /// The daemon's production `RunHost`. Holds the real store + the swappable ports
 /// as trait objects (the daemon supplies `TmuxBackend`/`SystemClock`/…; tests
@@ -30,6 +35,9 @@ pub struct ProductionRunHost {
     clock: Box<dyn Clock>,
     registry: HandlerRegistry,
     workflows_dir: PathBuf,
+    /// The live-event broadcast (P1): the emit point publishes here for the SSE
+    /// tail. Lossy/bounded — `send` never blocks the engine on a slow subscriber.
+    live_tx: broadcast::Sender<LiveEvent>,
 }
 
 impl std::fmt::Debug for ProductionRunHost {
@@ -58,6 +66,7 @@ impl ProductionRunHost {
             clock,
             registry: HandlerRegistry::with_builtins(),
             workflows_dir: workflows_dir.into(),
+            live_tx: broadcast::channel(LIVE_BROADCAST_CAPACITY).0,
         }
     }
 
@@ -132,7 +141,18 @@ impl ProductionRunHost {
             }
             RunProgress::Ignored { .. } => return Ok(()),
         };
-        event_repo::append(self.store.pool(), run_id, kind, &payload.to_string()).await?;
+        let payload = payload.to_string();
+        // DUAL-WRITE: persist (durable/audit) then broadcast (the live SSE tail).
+        let seq = event_repo::append(self.store.pool(), run_id, kind, &payload).await?;
+        // Lossy + non-blocking: an absent/slow subscriber never blocks the engine.
+        let _ = self.live_tx.send(LiveEvent {
+            run_id: run_id.as_str().to_string(),
+            event: EventRecord {
+                seq,
+                kind: kind.to_string(),
+                payload,
+            },
+        });
         Ok(())
     }
 
@@ -157,6 +177,10 @@ impl ProductionRunHost {
 
 #[async_trait::async_trait]
 impl RunHost for ProductionRunHost {
+    fn subscribe_events(&self) -> broadcast::Receiver<LiveEvent> {
+        self.live_tx.subscribe()
+    }
+
     async fn start_workflow(
         &self,
         flow: &str,
