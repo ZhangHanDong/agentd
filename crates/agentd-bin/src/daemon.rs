@@ -45,12 +45,41 @@ pub async fn build_production_host(config: &DaemonConfig) -> Result<ProductionRu
     ))
 }
 
-/// Boot the daemon: build the production host, bind the listener, and serve the
-/// HTTP/SSE surface. Logs the bound address and any in-flight parked runs.
+/// The clear "a daemon already owns this port" message (P1 startup guard). One
+/// helper so the detection path can't drift from any other reference to it.
+fn already_running_msg(addr: SocketAddr) -> String {
+    format!("a daemon is already running on {addr} — refusing to start a second instance")
+}
+
+/// Bind the daemon's TCP listener, mapping the already-running case to a clear
+/// message (P1 startup guard). For TCP `bind` ITSELF is the race-free
+/// live-vs-free detector: `AddrInUse` means a live listener already owns the
+/// port (no probe, no TOCTOU). Other bind errors pass through as their string.
 ///
 /// # Errors
-/// Returns any store/bind/serve error as a boxed error.
+/// [`already_running_msg`] on `AddrInUse`; the underlying error's text otherwise.
+pub async fn bind_listener(addr: SocketAddr) -> Result<tokio::net::TcpListener, String> {
+    match tokio::net::TcpListener::bind(addr).await {
+        Ok(listener) => Ok(listener),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => Err(already_running_msg(addr)),
+        Err(e) => Err(format!("cannot bind {addr}: {e}")),
+    }
+}
+
+/// Boot the daemon: bind the listener FIRST (so an already-running instance
+/// fails fast on the clear guard message before opening the store), then build
+/// the production host and serve the HTTP/SSE surface. Logs the bound address
+/// and any in-flight parked runs.
+///
+/// # Errors
+/// Returns any bind/store/serve error as a boxed error.
 pub async fn serve(config: DaemonConfig) -> Result<(), Box<dyn std::error::Error>> {
+    // Bind before any startup work: a second instance returns the guard message
+    // without opening the SQLite store or doing recovery (fail-fast, P1).
+    let addr = SocketAddr::from(([127, 0, 0, 1], config.port));
+    let listener = bind_listener(addr).await?;
+    tracing::info!(%addr, "agentd daemon listening");
+
     let host = build_production_host(&config).await?;
     if let Ok(parked) = agentd_store::run_repo::count_in_flight(host.store().pool()).await {
         tracing::info!(
@@ -59,9 +88,6 @@ pub async fn serve(config: DaemonConfig) -> Result<(), Box<dyn std::error::Error
         );
     }
     let app = build_router(Arc::new(host));
-    let addr = SocketAddr::from(([127, 0, 0, 1], config.port));
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!(%addr, "agentd daemon listening");
     axum::serve(listener, app).await?;
     Ok(())
 }

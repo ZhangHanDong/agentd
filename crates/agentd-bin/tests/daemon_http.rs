@@ -195,3 +195,35 @@ async fn daemon_router_streams_run_events() {
         "the terminal closes the live stream: {body:?}"
     );
 }
+
+// --- P1 #4: startup guard — `bind_listener` clear already-running detection ---
+
+#[tokio::test]
+async fn bind_listener_succeeds_on_free_port() {
+    // Port 0 → the OS assigns a free port; AddrInUse cannot occur.
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+    let listener = daemon::bind_listener(addr).await.expect("free port binds");
+    assert!(
+        listener.local_addr().expect("local_addr").port() != 0,
+        "the OS assigned a concrete port"
+    );
+}
+
+#[tokio::test]
+async fn bind_listener_reports_already_running() {
+    // A live listener already owns the port: a second bind must report the
+    // friendly already-running message (race-free via AddrInUse), not a raw OS
+    // error — and name the address so the operator knows which port.
+    let held = tokio::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .expect("hold a port");
+    let addr = held.local_addr().expect("addr");
+    let err = daemon::bind_listener(addr)
+        .await
+        .expect_err("the port is taken");
+    assert!(
+        err.contains("already running"),
+        "friendly already-running message, not a raw OS error: {err}"
+    );
+    assert!(err.contains(&addr.to_string()), "names the address: {err}");
+}
