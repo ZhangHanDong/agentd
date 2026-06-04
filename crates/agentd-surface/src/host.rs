@@ -7,6 +7,7 @@
 use agentd_core::CoreError;
 use agentd_core::types::{NodeId, ReviewRunId, RunId, TaskRunId};
 use agentd_core::{EngineEvent, RunProgress};
+use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::broadcast;
 
@@ -50,6 +51,16 @@ pub struct LiveEvent {
     pub event: EventRecord,
 }
 
+/// A run's headline state for the `GET /runs` overview (P1). `Serialize` for the
+/// JSON list response.
+#[derive(Debug, Clone, Serialize)]
+pub struct RunSummary {
+    pub run_id: String,
+    pub status: String,
+    pub current_node: Option<String>,
+    pub started_at: i64,
+}
+
 /// The seam: deliver engine events and read the bits the tools need.
 #[async_trait::async_trait]
 pub trait RunHost: Send + Sync {
@@ -58,6 +69,12 @@ pub trait RunHost: Send + Sync {
     /// rather than backpressuring the engine. The surface filters by `run_id`.
     /// Not `async` — taking a receiver is synchronous.
     fn subscribe_events(&self) -> broadcast::Receiver<LiveEvent>;
+
+    /// List every run with its current status — the `GET /runs` overview (P1).
+    ///
+    /// # Errors
+    /// [`CoreError`] on a store failure.
+    async fn list_runs(&self) -> Result<Vec<RunSummary>, CoreError>;
 
     /// Create and start a run of `flow` (`"draft"`/`"execute"`) as `run_id` with
     /// an initial `context`, executing from the start node to the first park (or

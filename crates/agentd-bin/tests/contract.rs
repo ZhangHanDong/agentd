@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use agentd_bin::{ProductionRunHost, SystemClock};
 use agentd_core::engine::RunProgress;
+use agentd_core::ports::RunStatus;
 use agentd_core::test_support::{FakeBackend, MempalStub, RecordingCommandRunner};
 use agentd_core::types::RunId;
 use agentd_store::{SqliteStore, review_repo, run_repo};
@@ -231,6 +232,42 @@ async fn emit_persists_and_broadcasts() {
         live.event.seq, persisted[0].seq,
         "same seq as the persisted row"
     );
+}
+
+#[tokio::test]
+async fn production_list_runs_reflects_statuses() {
+    let (host, _dir) = production_host().await;
+    // run a: started -> parks (status stays "running"; only terminal updates it).
+    let a = RunId::from_string("a");
+    run_repo::record_run(host.store().pool(), &a, "draft.dot", "sha")
+        .await
+        .expect("record a");
+    host.start_run(&a).await.expect("start a");
+    // run b: recorded then marked finished.
+    let b = RunId::from_string("b");
+    run_repo::record_run(host.store().pool(), &b, "draft.dot", "sha")
+        .await
+        .expect("record b");
+    run_repo::update_run_status(host.store().pool(), &b, RunStatus::Finished)
+        .await
+        .expect("finish b");
+
+    let runs = host.list_runs().await.expect("list_runs");
+    assert_eq!(runs.len(), 2, "both runs listed");
+    assert!(
+        runs[0].started_at >= runs[1].started_at,
+        "most-recently-started first"
+    );
+    let a_sum = runs
+        .iter()
+        .find(|r| r.run_id == "a")
+        .expect("run a present");
+    let b_sum = runs
+        .iter()
+        .find(|r| r.run_id == "b")
+        .expect("run b present");
+    assert_eq!(a_sum.status, "running", "the started run is in-flight");
+    assert_eq!(b_sum.status, "finished");
 }
 
 #[tokio::test]

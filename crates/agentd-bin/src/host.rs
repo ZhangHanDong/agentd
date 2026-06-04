@@ -14,7 +14,9 @@ use agentd_core::handler::{HandlerRegistry, Ports};
 use agentd_core::ports::{AgentBackend, Clock, CommandRunner, MempalClient, Store};
 use agentd_core::types::{NodeId, ReviewRunId, RunId};
 use agentd_store::{SqliteStore, event_repo, review_repo, run_repo, task_repo};
-use agentd_surface::host::{EventRecord, LiveEvent, RunHost, RunSnapshot, TaskAssignment};
+use agentd_surface::host::{
+    EventRecord, LiveEvent, RunHost, RunSnapshot, RunSummary, TaskAssignment,
+};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
@@ -179,6 +181,19 @@ impl ProductionRunHost {
 impl RunHost for ProductionRunHost {
     fn subscribe_events(&self) -> broadcast::Receiver<LiveEvent> {
         self.live_tx.subscribe()
+    }
+
+    async fn list_runs(&self) -> Result<Vec<RunSummary>, CoreError> {
+        let rows = run_repo::list_runs(self.store.pool()).await?;
+        Ok(rows
+            .into_iter()
+            .map(|(run_id, status, current_node, started_at)| RunSummary {
+                run_id,
+                status,
+                current_node,
+                started_at,
+            })
+            .collect())
     }
 
     async fn start_workflow(

@@ -11,7 +11,7 @@ use agentd_core::{EngineEvent, RunProgress};
 use serde_json::Value;
 use tokio::sync::broadcast;
 
-use crate::host::{EventRecord, LiveEvent, RunHost, RunSnapshot, TaskAssignment};
+use crate::host::{EventRecord, LiveEvent, RunHost, RunSnapshot, RunSummary, TaskAssignment};
 
 /// Scripted, recording [`RunHost`] for tests.
 #[derive(Debug)]
@@ -24,6 +24,8 @@ pub struct FakeRunHost {
     events: Mutex<HashMap<String, Vec<EventRecord>>>,
     started: Mutex<Vec<(String, String, Value)>>,
     live_tx: broadcast::Sender<LiveEvent>,
+    runs: Mutex<Vec<RunSummary>>,
+    list_runs_fails: Mutex<bool>,
 }
 
 impl Default for FakeRunHost {
@@ -37,6 +39,8 @@ impl Default for FakeRunHost {
             events: Mutex::default(),
             started: Mutex::default(),
             live_tx: broadcast::channel(64).0,
+            runs: Mutex::default(),
+            list_runs_fails: Mutex::default(),
         }
     }
 }
@@ -50,6 +54,16 @@ impl FakeRunHost {
     /// Publish a live event to subscribers (test driver for the SSE live tail).
     pub fn publish(&self, event: LiveEvent) {
         let _ = self.live_tx.send(event);
+    }
+
+    /// Set the runs returned by `list_runs` (the `GET /runs` overview).
+    pub fn set_runs(&self, runs: Vec<RunSummary>) {
+        *self.runs.lock().expect("runs lock") = runs;
+    }
+
+    /// Make `list_runs` return an error (for the `GET /runs` 500 path).
+    pub fn fail_list_runs(&self) {
+        *self.list_runs_fails.lock().expect("list_runs_fails lock") = true;
     }
 
     /// Set the snapshot returned by `run_snapshot` for `run_id`.
@@ -109,6 +123,13 @@ impl FakeRunHost {
 impl RunHost for FakeRunHost {
     fn subscribe_events(&self) -> broadcast::Receiver<LiveEvent> {
         self.live_tx.subscribe()
+    }
+
+    async fn list_runs(&self) -> Result<Vec<RunSummary>, CoreError> {
+        if *self.list_runs_fails.lock().expect("list_runs_fails lock") {
+            return Err(CoreError::Store("injected list_runs failure".to_string()));
+        }
+        Ok(self.runs.lock().expect("runs lock").clone())
     }
 
     async fn start_workflow(

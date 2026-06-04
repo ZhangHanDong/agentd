@@ -125,6 +125,33 @@ pub async fn read_status(
     }))
 }
 
+/// List every run as `(id, status, current_node, started_at)`, most-recently-
+/// started first — the at-a-glance overview behind `GET /runs` (P1). No new
+/// columns: the `runs` table already has all four.
+///
+/// # Errors
+/// Returns [`StoreError::Sqlx`] on a database failure.
+pub async fn list_runs(
+    pool: &SqlitePool,
+) -> Result<Vec<(String, String, Option<String>, i64)>, StoreError> {
+    let rows = sqlx::query(
+        "SELECT id, status, current_node, started_at FROM runs ORDER BY started_at DESC",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            (
+                r.get::<String, _>("id"),
+                r.get::<String, _>("status"),
+                r.get::<Option<String>, _>("current_node"),
+                r.get::<i64, _>("started_at"),
+            )
+        })
+        .collect())
+}
+
 /// Count runs that are neither finished nor failed — the in-flight runs the
 /// daemon re-attaches to on boot (each resumable from its checkpoint).
 ///

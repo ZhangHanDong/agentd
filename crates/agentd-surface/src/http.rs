@@ -44,10 +44,22 @@ impl std::fmt::Debug for AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
-        .route("/runs", post(start_run))
+        .route("/runs", post(start_run).get(get_runs))
         .route("/runs/:id", get(get_run))
         .route("/runs/:id/events", get(run_events))
         .with_state(state)
+}
+
+/// `GET /runs` — the at-a-glance overview: every run's current status (P1).
+async fn get_runs(State(state): State<AppState>) -> Response {
+    match state.host.list_runs().await {
+        Ok(runs) => Json(runs).into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "internal" })),
+        )
+            .into_response(),
+    }
 }
 
 #[derive(Debug, Deserialize)]
