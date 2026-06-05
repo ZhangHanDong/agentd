@@ -100,10 +100,12 @@ mod tests {
 
 #[derive(Debug, Args)]
 pub struct RunStartArgs {
-    /// Which standalone workflow to run.
+    /// Which standalone workflow to run (draft, execute, spike, docs-only,
+    /// bugfix-rapid, refactor-only).
     #[arg(long, value_enum)]
     pub flow: Flow,
-    /// The issue id (draft) or frozen-spec id (execute) for this run.
+    /// The run id — an issue id (draft / bugfix-rapid / docs-only / spike) or a
+    /// frozen-spec id (execute / refactor-only).
     pub id: String,
     /// Optional run-context file for the run.
     #[arg(long)]
