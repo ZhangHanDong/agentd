@@ -199,20 +199,74 @@ impl WorktreeProvider for GitWorktreeProvider {
                 String::from_utf8_lossy(&out.stderr).trim()
             )));
         }
-        // Porcelain: `worktree <path>` lines. Keep only POOL worktrees, matched
-        // by the `wt-` dir-name prefix — robust to the relative/symlinked/
-        // canonical path differences `git` reports (e.g. macOS /tmp →
-        // /private/tmp) that a `base`-prefix match would silently miss.
-        let text = String::from_utf8_lossy(&out.stdout);
-        Ok(text
-            .lines()
-            .filter_map(|l| l.strip_prefix("worktree "))
-            .map(PathBuf::from)
-            .filter(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("wt-"))
-            })
-            .collect())
+        Ok(pool_worktrees(&String::from_utf8_lossy(&out.stdout)))
+    }
+}
+
+/// Parse `git worktree list --porcelain` and return ONLY pool worktrees — those
+/// whose dir name is exactly `wt-<digits>-<digits>` (what [`WorktreePool::allocate`]
+/// mints). A TIGHT match feeding boot-GC's `git worktree remove --force`: a
+/// foreign worktree — even one named `wt-feature` — is never returned, so the
+/// `--force` delete can't touch a tree the pool did not create. Matching by
+/// dir-name (not the reported path prefix) is also robust to the canonical/
+/// symlinked paths git reports (e.g. macOS /tmp → /private/tmp).
+fn pool_worktrees(porcelain: &str) -> Vec<PathBuf> {
+    porcelain
+        .lines()
+        .filter_map(|l| l.strip_prefix("worktree "))
+        .map(PathBuf::from)
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(is_pool_name)
+        })
+        .collect()
+}
+
+/// True only for the exact `wt-<digits>-<digits>` shape the pool mints — NOT a
+/// loose `wt-` prefix (which would match a human's `wt-feature`).
+fn is_pool_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("wt-") else {
+        return false;
+    };
+    let mut parts = rest.split('-');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(pid), Some(n), None) => {
+            !pid.is_empty()
+                && !n.is_empty()
+                && pid.bytes().all(|c| c.is_ascii_digit())
+                && n.bytes().all(|c| c.is_ascii_digit())
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_pool_name, pool_worktrees};
+    use std::path::PathBuf;
+
+    #[test]
+    fn pool_worktrees_keeps_only_pool_dirs_preserving_foreign() {
+        // The main tree, a pool worktree, and a human's `my-feature` worktree.
+        let porcelain = "worktree /repo\nHEAD aaa\n\n\
+             worktree /repo/.agentd/worktrees/wt-4321-0\nHEAD bbb\ndetached\n\n\
+             worktree /repo/my-feature\nHEAD ccc\nbranch refs/heads/my-feature\n";
+        assert_eq!(
+            pool_worktrees(porcelain),
+            vec![PathBuf::from("/repo/.agentd/worktrees/wt-4321-0")],
+            "only the wt-<pid>-<n> pool worktree; main tree + foreign 'my-feature' preserved"
+        );
+    }
+
+    #[test]
+    fn is_pool_name_is_tight_not_a_loose_prefix() {
+        assert!(is_pool_name("wt-1-0"));
+        assert!(is_pool_name("wt-99999-12"));
+        assert!(!is_pool_name("wt-feature"), "loose prefix must NOT match");
+        assert!(!is_pool_name("wt-1"), "needs both parts");
+        assert!(!is_pool_name("wt-1-0-x"), "no extra parts");
+        assert!(!is_pool_name("wt-1-"), "empty second part");
+        assert!(!is_pool_name("my-feature"));
     }
 }

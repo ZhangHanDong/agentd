@@ -35,14 +35,21 @@ extraction (see Out of Scope) — a deliberate, documented partial.
   `spawn(req)`, if `req.worktree` is the `"."` auto-sentinel (what frozen core
   passes), allocate a pool worktree and override `req.worktree` before delegating
   to the inner backend; any other (explicit) worktree passes through unchanged.
-  The composition root (`build_production_host`) wraps `TmuxBackend` in it; the
-  engine, handlers, and core stay untouched (D1).
+  The engine, handlers, and core stay untouched (D1). The decorator + provider
+  are built and unit-tested, but WIRING into `build_production_host` is DEFERRED
+  (see Out of Scope) — activating under D1 would strand the agent's work.
 - Cleanup is BOOT-GC only: at daemon start, `WorktreePool::gc_on_boot` removes
   every leftover pool worktree (`provider.list` → `remove` each). Nothing pool-
   owned survives a restart — in-flight runs re-spawn fresh on resume from
   checkpoint — so reclaiming all leftovers at boot is correct. No continuous /
   periodic / liveness GC (the trait has no `kill`; intra-process release needs
   the missing lifecycle).
+- The `list` filter feeding boot-GC's `git worktree remove --force` is TIGHT: a
+  pure `pool_worktrees`/`is_pool_name` keeps only the exact `wt-<digits>-<digits>`
+  shape the pool mints. A foreign worktree — even one a human named `wt-feature`
+  — is never returned, so the `--force` delete can only touch trees the pool
+  created. (Dir-name match, not a path prefix — robust to the canonical/symlinked
+  paths git reports, e.g. macOS /tmp → /private/tmp.)
 
 ## Boundaries
 
@@ -60,6 +67,13 @@ extraction (see Out of Scope) — a deliberate, documented partial.
 
 ## Out of Scope
 
+- ACTIVATION — wiring `PooledBackend` into the daemon `serve()` path. Deferred:
+  under D1 the downstream `tool` nodes (`verify_lifecycle`'s goal_gate, `open_pr`)
+  run in the daemon cwd, not the agent's worktree (the frozen tool handler leaves
+  `RunOpts.cwd = None`), so isolating the agent into a worktree the gate + PR
+  never read would trade a collision for STRANDED work. Needs a worktree→pipeline
+  bridge — the same P2 core change as the per-`task_run` lifecycle below. The
+  mechanism + tests land now; activation is one wrapper line when the bridge does.
 - Per-`task_run` `worktree_path` persistence + release on `complete_task_run`:
   the backend can't correlate a spawn to its task_run under frozen core (spawn
   precedes `insert_task_run`; `SpawnRequest` carries no run/node id). Needs the
@@ -107,3 +121,15 @@ Scenario: a provider failure at allocation is surfaced
   Given a WorktreePool whose provider fails to create a worktree
   When allocate is called
   Then it returns an error
+
+Scenario: boot-GC's filter spares foreign worktrees
+  Test: pool_worktrees_keeps_only_pool_dirs_preserving_foreign
+  Given git worktree porcelain output with the main tree, a wt-<pid>-<n> pool worktree, and a human's named worktree
+  When the pool-worktree filter parses it
+  Then only the pool worktree is returned, so boot-GC's force-remove never touches the main tree or the foreign one
+
+Scenario: the pool-name match is tight, not a loose prefix
+  Test: is_pool_name_is_tight_not_a_loose_prefix
+  Given candidate worktree directory names
+  When is_pool_name classifies them
+  Then only the exact wt-<digits>-<digits> shape matches and a name like wt-feature does not
