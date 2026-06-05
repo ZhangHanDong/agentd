@@ -9,7 +9,9 @@ use agentd_core::CoreError;
 use agentd_store::SqliteStore;
 use agentd_surface::host::RunHost;
 use agentd_surface::http::{AppState, router};
-use agentd_tmux::{Config, TmuxBackend, TokioCommandRunner};
+use agentd_tmux::{
+    Config, GitWorktreeProvider, PooledBackend, TmuxBackend, TokioCommandRunner, WorktreePool,
+};
 use axum::Router;
 
 use crate::cli::DaemonConfig;
@@ -23,18 +25,29 @@ pub fn build_router(host: Arc<dyn RunHost>) -> Router {
 }
 
 /// Construct the production host from a real `SqliteStore`, the real
-/// `TmuxBackend`, the offline mempal, and the system clock. Spawning real agents
-/// is a runtime (deployment) concern; constructing the host does not touch tmux.
+/// `TmuxBackend` wrapped in a worktree-pooling decorator (§7.3 P1.3 — so
+/// concurrent agents get isolated worktrees instead of colliding in the repo
+/// root), the offline mempal, and the system clock. Runs the worktree boot-GC
+/// before serving. Spawning real agents is a runtime (deployment) concern;
+/// constructing the host does not touch tmux.
 ///
 /// # Errors
 /// [`CoreError`] if the store cannot be opened/migrated.
 pub async fn build_production_host(config: &DaemonConfig) -> Result<ProductionRunHost, CoreError> {
     let store = SqliteStore::connect(&config.db_path).await?;
-    let backend = TmuxBackend::new(
+    let tmux = TmuxBackend::new(
         Arc::new(TokioCommandRunner::new()),
         PathBuf::from("tmux"),
         Config::default(),
     );
+    // Isolated worktrees under the standalone `.agentd/worktrees/` convention,
+    // created from the daemon's cwd repo. Boot-GC reclaims any leftovers from a
+    // prior run (nothing pool-owned survives a restart — runs re-spawn fresh).
+    let pool = WorktreePool::new(Arc::new(GitWorktreeProvider::new(".", ".agentd/worktrees")));
+    if let Err(e) = pool.gc_on_boot().await {
+        tracing::warn!(error = %e, "worktree boot-GC failed; leftover worktrees may remain");
+    }
+    let backend = PooledBackend::new(tmux, pool);
     Ok(ProductionRunHost::new(
         store,
         Box::new(backend),

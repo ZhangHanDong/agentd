@@ -13,9 +13,11 @@ pub mod backend;
 pub mod config;
 pub mod discovery;
 pub mod error;
+pub mod pool;
 pub mod runner;
 
 pub use backend::{CaptureOpts, ShutdownMethod, ShutdownOpts, ShutdownReport, TmuxBackend};
 pub use config::{Config, ReadyPatterns};
 pub use error::BackendError;
+pub use pool::{GitWorktreeProvider, PooledBackend, WorktreePool, WorktreeProvider};
 pub use runner::TokioCommandRunner;
