@@ -355,3 +355,162 @@ fn draft_dot_rejects_missing_terminal_variant() {
         "violation should report the missing terminal, got {err:?}"
     );
 }
+
+// ─── §7.3 P1.7: spike / docs-only / bugfix-rapid / refactor-only ─────────────
+
+// Drive a SINGLE-agent-park workflow (one codergen park, then tool nodes) to
+// Finished: execute to the park, submit the agent's success, expect done. Tool
+// nodes default to exit-0 on an empty runner queue, so any goal_gate they carry
+// is met — covers spike, docs-only, and bugfix-rapid.
+async fn walk_single_park_to_done(file: &str) {
+    let g = load(file);
+    let h = Harness::new();
+    let engine = h.engine(&g);
+    let parked = engine.execute(&h.run_id).await.expect("execute");
+    let task_run_id: TaskRunId = match park_reason(&parked) {
+        ParkReason::AgentOutcome { task_run_id } => task_run_id.clone(),
+        other => panic!("expected AgentOutcome park, got {other:?}"),
+    };
+    let progress = engine
+        .deliver_event(EngineEvent::AgentOutcomeSubmitted {
+            task_run_id,
+            outcome: Outcome::success(),
+        })
+        .await
+        .expect("deliver agent outcome");
+    assert_eq!(
+        progress,
+        RunProgress::Finished {
+            run_id: h.run_id.clone()
+        },
+        "{file} should reach Finished"
+    );
+}
+
+// Assert a workflow has exactly one goal_gate_unmet recovery edge routing to a
+// non-terminal (the global-gate discipline; mirrors execute.dot's check).
+fn assert_single_recovery_to_nonterminal(file: &str) {
+    let g = load(file);
+    let recovery: Vec<_> = g
+        .edges
+        .iter()
+        .filter(|e| e.attr("label") == Some("goal_gate_unmet"))
+        .collect();
+    assert_eq!(
+        recovery.len(),
+        1,
+        "{file}: one goal_gate_unmet recovery edge"
+    );
+    let target = recovery[0].to.as_str();
+    let terminals: Vec<&str> = g.terminals().iter().map(|n| n.id.as_str()).collect();
+    assert!(
+        !terminals.contains(&target),
+        "{file}: recovery edge must route to a non-terminal, got '{target}'"
+    );
+}
+
+#[test]
+fn spike_dot_validates() {
+    assert!(!load("spike.dot").nodes.is_empty(), "spike.dot has nodes");
+}
+
+#[tokio::test]
+async fn spike_dot_walks_to_done() {
+    walk_single_park_to_done("spike.dot").await;
+}
+
+#[test]
+fn docs_only_dot_validates() {
+    assert!(
+        !load("docs-only.dot").nodes.is_empty(),
+        "docs-only.dot has nodes"
+    );
+}
+
+#[tokio::test]
+async fn docs_only_dot_walks_to_done() {
+    walk_single_park_to_done("docs-only.dot").await;
+}
+
+#[test]
+fn bugfix_rapid_dot_validates() {
+    assert!(
+        !load("bugfix-rapid.dot").nodes.is_empty(),
+        "bugfix-rapid.dot has nodes"
+    );
+}
+
+#[test]
+fn bugfix_rapid_dot_has_goal_gate_unmet_recovery_edge() {
+    assert_single_recovery_to_nonterminal("bugfix-rapid.dot");
+}
+
+#[tokio::test]
+async fn bugfix_rapid_dot_walks_to_done() {
+    walk_single_park_to_done("bugfix-rapid.dot").await;
+}
+
+#[test]
+fn refactor_only_dot_validates() {
+    assert!(
+        !load("refactor-only.dot").nodes.is_empty(),
+        "refactor-only.dot has nodes"
+    );
+}
+
+#[test]
+fn refactor_only_dot_has_goal_gate_unmet_recovery_edge() {
+    assert_single_recovery_to_nonterminal("refactor-only.dot");
+}
+
+#[tokio::test]
+async fn refactor_only_dot_walks_to_done() {
+    // Two parks: implement (agent) then review (fan_out, 3 verdicts).
+    let g = load("refactor-only.dot");
+    let h = Harness::new();
+    let engine = h.engine(&g);
+
+    let parked = engine.execute(&h.run_id).await.expect("execute");
+    let task_run_id: TaskRunId = match park_reason(&parked) {
+        ParkReason::AgentOutcome { task_run_id } => task_run_id.clone(),
+        other => panic!("expected AgentOutcome park at implement, got {other:?}"),
+    };
+    // implement success -> verify_lifecycle (tool ok) -> review parks for 3.
+    let parked = engine
+        .deliver_event(EngineEvent::AgentOutcomeSubmitted {
+            task_run_id,
+            outcome: Outcome::success(),
+        })
+        .await
+        .expect("deliver implement outcome");
+    let review_run_id = match park_reason(&parked) {
+        ParkReason::ReviewVerdicts {
+            review_run_id,
+            expected,
+        } => {
+            assert_eq!(*expected, 3, "three reviewers");
+            review_run_id.clone()
+        }
+        other => panic!("expected ReviewVerdicts park at review, got {other:?}"),
+    };
+    // 3 pass verdicts -> aggregate -> open_pr -> report -> done (both gates met).
+    let mut last = None;
+    for reviewer in ["claude-sec", "codex-perf", "gemini-readability"] {
+        last = Some(
+            engine
+                .deliver_event(EngineEvent::ReviewVerdictSubmitted {
+                    review_run_id: review_run_id.clone(),
+                    reviewer_id: AgentId::parsed(reviewer),
+                    verdict: VerdictValue::Pass,
+                })
+                .await
+                .expect("deliver verdict"),
+        );
+    }
+    assert_eq!(
+        last.expect("a final progress"),
+        RunProgress::Finished {
+            run_id: h.run_id.clone()
+        }
+    );
+}

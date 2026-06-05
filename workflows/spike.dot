@@ -1,0 +1,19 @@
+// spike.dot — exploratory throwaway (§7.3 P1.7). Goal is LEARNING, not a PR:
+// the implementer agent investigates and writes findings; the run reports them
+// and ends. No verify gate, no adversarial review, no PR — a spike is allowed
+// to be incomplete by design. Parks once, at `explore` (the agent).
+//
+// Conforms to the frozen agentd-core DOT grammar (codergen/tool, one Mdiamond
+// start, one Msquare terminal). cmd= strings are STATIC whitespace-split argv —
+// the frozen tool handler does no ${...} substitution and sets no cwd/env, so
+// standalone paths are fixed `.agentd/run/*` conventions.
+digraph spike {
+  "start"   [shape=Mdiamond];
+  "explore" [handler="codergen", role="implementer", initial_prompt_includes="issue_id,issue_title,issue_body"];
+  "report"  [handler="tool", cmd="cat .agentd/run/report.md", timeout_secs="30"];
+  "done"    [shape=Msquare];
+
+  "start"   -> "explore";
+  "explore" -> "report";
+  "report"  -> "done";
+}

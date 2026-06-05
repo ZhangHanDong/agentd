@@ -216,11 +216,8 @@ impl RunHost for ProductionRunHost {
         run_id: &RunId,
         _context: Value,
     ) -> Result<RunProgress, CoreError> {
-        let file = match flow {
-            "draft" => "draft.dot",
-            "execute" => "execute.dot",
-            other => return Err(CoreError::Invariant(format!("unknown flow '{other}'"))),
-        };
+        let file = flow_to_file(flow)
+            .ok_or_else(|| CoreError::Invariant(format!("unknown flow '{flow}'")))?;
         // The initial `context` is accepted but not seeded in the MVP — the
         // shipped workflows use fixed paths, not context vars (real-env gap).
         let src = std::fs::read_to_string(self.workflows_dir.join(file))?;
@@ -318,6 +315,22 @@ impl RunHost for ProductionRunHost {
     }
 }
 
+/// Map a wire flow name to its shipped `.dot` file, or `None` for an unknown
+/// flow. The single source of truth for the daemon side of the flow triple
+/// (clap-derived value / `agentctl::cli::Flow::name` / this arm) — kept as a
+/// pure fn so the mapping is unit-testable without starting a run (§7.3 P1.7).
+fn flow_to_file(flow: &str) -> Option<&'static str> {
+    match flow {
+        "draft" => Some("draft.dot"),
+        "execute" => Some("execute.dot"),
+        "spike" => Some("spike.dot"),
+        "docs-only" => Some("docs-only.dot"),
+        "bugfix-rapid" => Some("bugfix-rapid.dot"),
+        "refactor-only" => Some("refactor-only.dot"),
+        _ => None,
+    }
+}
+
 /// Lowercase hex SHA-256 of `data` (the workflow content sha).
 fn sha256_hex(data: &[u8]) -> String {
     let digest = Sha256::digest(data);
@@ -327,4 +340,40 @@ fn sha256_hex(data: &[u8]) -> String {
         let _ = write!(out, "{b:02x}");
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::flow_to_file;
+    use std::path::PathBuf;
+
+    fn workflows_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workflows")
+    }
+
+    #[test]
+    fn flow_to_file_resolves_every_shipped_flow() {
+        // Every shipped flow name maps to a file that EXISTS — catches a
+        // start_workflow arm that drifts from the actual file or the CLI name.
+        for flow in [
+            "draft",
+            "execute",
+            "spike",
+            "docs-only",
+            "bugfix-rapid",
+            "refactor-only",
+        ] {
+            let mapped = flow_to_file(flow);
+            assert!(
+                mapped.is_some(),
+                "flow '{flow}' must map to a file, not 'unknown flow'"
+            );
+            let file = mapped.expect("just asserted Some");
+            assert!(
+                workflows_dir().join(file).exists(),
+                "flow '{flow}' -> '{file}' must exist under workflows/"
+            );
+        }
+        assert!(flow_to_file("bogus").is_none(), "unknown flow -> None");
+    }
 }

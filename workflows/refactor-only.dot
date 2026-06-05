@@ -1,0 +1,33 @@
+// refactor-only.dot — a behavior-preserving refactor (§7.3 P1.7): no upstream
+// spec drafting (it starts from existing code + a refactor intent), but it KEEPS
+// both guards — `verify_lifecycle` (tests/lifecycle still pass) AND the adversarial
+// fan-out `review` (a refactor is risky precisely because behavior must not drift).
+// Effectively execute.dot minus `pull_frozen_spec`/`draft_plan`. Parks at
+// `implement` (the agent) and at `review` (the 3 reviewers).
+//
+// Conforms to the frozen agentd-core DOT grammar. TWO goal_gates
+// (`verify_lifecycle`, `aggregate`); the node routing to `done` (`report`)
+// carries the `[label="goal_gate_unmet"]` recovery edge back to a NON-terminal
+// (`implement`). The single `parallel.fan_out` (`review`) auto-pairs with the
+// single `parallel.fan_in` (`aggregate`). cmd= strings are STATIC argv.
+digraph refactor_only {
+  "start"            [shape=Mdiamond];
+  "pull_context"     [handler="tool", cmd="cat .agentd/run/issue.md", timeout_secs="30"];
+  "implement"        [handler="codergen", role="implementer", initial_prompt_includes="issue_id,issue_title,issue_body"];
+  "verify_lifecycle" [handler="tool", cmd="agent-spec lifecycle .agentd/run/frozen.spec.md --code . --min-score 0.7 --format text", timeout_secs="300", goal_gate=true];
+  "review"           [handler="parallel.fan_out", reviewers="claude-sec,codex-perf,gemini-readability", bundle="frozen", visibility="blind"];
+  "aggregate"        [handler="parallel.fan_in", aggregator="majority_pass", goal_gate=true];
+  "open_pr"          [handler="tool", cmd="gh pr create --fill", timeout_secs="120"];
+  "report"           [handler="tool", cmd="cat .agentd/run/report.md", timeout_secs="30"];
+  "done"             [shape=Msquare];
+
+  "start"            -> "pull_context";
+  "pull_context"     -> "implement";
+  "implement"        -> "verify_lifecycle";
+  "verify_lifecycle" -> "review";
+  "review"           -> "aggregate";
+  "aggregate"        -> "open_pr";
+  "open_pr"          -> "report";
+  "report"           -> "done"      [condition="outcome=success"];
+  "report"           -> "implement" [label="goal_gate_unmet"];
+}

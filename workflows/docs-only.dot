@@ -1,0 +1,21 @@
+// docs-only.dot — a documentation change (§7.3 P1.7): no code lifecycle gate and
+// no adversarial code review (docs carry no spec-acceptance criterion), so the
+// graph is LINEAR and low-ceremony — the doc-writer agent edits and the change
+// opens a PR directly. Parks once, at `write_docs`. (No lint node: a docs change
+// produces no spec draft to lint — that would reference a file it never creates.)
+//
+// Conforms to the frozen agentd-core DOT grammar. No goal_gate → no recovery
+// edge needed. cmd= strings are STATIC whitespace-split argv (.agentd/run/*
+// conventions); open_pr uses the operator's ambient `gh` auth (standalone, D6).
+digraph docs_only {
+  "start"      [shape=Mdiamond];
+  "write_docs" [handler="codergen", role="implementer", initial_prompt_includes="issue_id,issue_title,issue_body"];
+  "open_pr"    [handler="tool", cmd="gh pr create --fill", timeout_secs="120"];
+  "report"     [handler="tool", cmd="cat .agentd/run/report.md", timeout_secs="30"];
+  "done"       [shape=Msquare];
+
+  "start"      -> "write_docs";
+  "write_docs" -> "open_pr";
+  "open_pr"    -> "report";
+  "report"     -> "done";
+}

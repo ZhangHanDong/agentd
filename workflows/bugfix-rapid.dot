@@ -1,0 +1,28 @@
+// bugfix-rapid.dot — a fast bugfix (§7.3 P1.7): a light, single-agent path that
+// KEEPS the spec-acceptance gate (a fix must still pass `verify_lifecycle`) but
+// SKIPS the adversarial fan-out review for speed. Parks once, at `implement`.
+//
+// Conforms to the frozen agentd-core DOT grammar. ONE goal_gate
+// (`verify_lifecycle`); the gate is GLOBAL and fires when a node routes to a
+// terminal, so the node routing to `done` (`report`) carries the
+// `[label="goal_gate_unmet"]` recovery edge back to a NON-terminal (`implement`)
+// that can satisfy the gate on a re-run — without it the run would Stuck at the
+// done transition (validate does NOT catch this; the walk-test does).
+// cmd= strings are STATIC whitespace-split argv (.agentd/run/* conventions).
+digraph bugfix_rapid {
+  "start"            [shape=Mdiamond];
+  "pull_context"     [handler="tool", cmd="cat .agentd/run/issue.md", timeout_secs="30"];
+  "implement"        [handler="codergen", role="implementer", initial_prompt_includes="issue_id,issue_title,issue_body"];
+  "verify_lifecycle" [handler="tool", cmd="agent-spec lifecycle .agentd/run/frozen.spec.md --code . --min-score 0.7 --format text", timeout_secs="300", goal_gate=true];
+  "open_pr"          [handler="tool", cmd="gh pr create --fill", timeout_secs="120"];
+  "report"           [handler="tool", cmd="cat .agentd/run/report.md", timeout_secs="30"];
+  "done"             [shape=Msquare];
+
+  "start"            -> "pull_context";
+  "pull_context"     -> "implement";
+  "implement"        -> "verify_lifecycle";
+  "verify_lifecycle" -> "open_pr";
+  "open_pr"          -> "report";
+  "report"           -> "done"      [condition="outcome=success"];
+  "report"           -> "implement" [label="goal_gate_unmet"];
+}

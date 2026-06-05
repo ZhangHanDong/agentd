@@ -36,6 +36,14 @@ pub enum Flow {
     Draft,
     /// `execute.dot` — frozen spec → PR.
     Execute,
+    /// `spike.dot` — exploratory throwaway (no gate/review/PR).
+    Spike,
+    /// `docs-only.dot` — a docs change (linear, no review).
+    DocsOnly,
+    /// `bugfix-rapid.dot` — a fast fix (keeps the gate, skips review).
+    BugfixRapid,
+    /// `refactor-only.dot` — behavior-preserving (keeps gate + review).
+    RefactorOnly,
 }
 
 impl Flow {
@@ -45,15 +53,47 @@ impl Flow {
         match self {
             Self::Draft => "draft.dot",
             Self::Execute => "execute.dot",
+            Self::Spike => "spike.dot",
+            Self::DocsOnly => "docs-only.dot",
+            Self::BugfixRapid => "bugfix-rapid.dot",
+            Self::RefactorOnly => "refactor-only.dot",
         }
     }
 
-    /// The flow's wire name (`"draft"`/`"execute"`) for the `POST /runs` body.
+    /// The flow's wire name for the `POST /runs` body — the file stem, identical
+    /// to the daemon's `flow_to_file` arm (the flow triple's shared string).
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
             Self::Draft => "draft",
             Self::Execute => "execute",
+            Self::Spike => "spike",
+            Self::DocsOnly => "docs-only",
+            Self::BugfixRapid => "bugfix-rapid",
+            Self::RefactorOnly => "refactor-only",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Flow;
+    use clap::ValueEnum;
+    use std::path::PathBuf;
+
+    #[test]
+    fn cli_flow_variants_map_to_existing_files() {
+        let wf = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workflows");
+        for flow in Flow::value_variants() {
+            let file = flow.file_name();
+            assert!(wf.join(file).exists(), "Flow file '{file}' must exist");
+            // name() is the file stem — the wire string shared with the daemon's
+            // flow_to_file arm; this keeps the flow triple from drifting.
+            assert_eq!(
+                format!("{}.dot", flow.name()),
+                file,
+                "name() + .dot must equal file_name()"
+            );
         }
     }
 }
