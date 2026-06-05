@@ -47,6 +47,25 @@ pub async fn append(
     Ok(seq)
 }
 
+/// The run's most recent event as `(kind, payload)`, or `None` if it has none.
+/// Backs the same-node re-park dedup at the emit point (P1): a `run_parked` whose
+/// payload equals the last event is a redundant re-park and is suppressed. Uses
+/// the `idx_events_run_seq` index (`ORDER BY seq DESC LIMIT 1`).
+///
+/// # Errors
+/// Returns [`StoreError::Sqlx`] on a database failure.
+pub async fn last(
+    pool: &SqlitePool,
+    run_id: &RunId,
+) -> Result<Option<(String, String)>, StoreError> {
+    let row =
+        sqlx::query("SELECT kind, payload FROM events WHERE run_id = ? ORDER BY seq DESC LIMIT 1")
+            .bind(run_id.as_str())
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.map(|r| (r.get::<String, _>("kind"), r.get::<String, _>("payload"))))
+}
+
 /// Return a run's events with `seq > after_seq`, ordered by `seq` ascending —
 /// the SSE replay cursor. Pass `after_seq = 0` to read from the start. Uses the
 /// `idx_events_run_seq` index.

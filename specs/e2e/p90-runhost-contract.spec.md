@@ -16,6 +16,7 @@ tmux / rmcp are the deployment checklist.
 
 - The host's `start_run(run_id)` resolves the run's graph from `runs.workflow_path` and executes to the first park (emitting `run_parked`); `dispatch("submit_outcome", …)` resolves the open task via `find_open_task_run` and advances the run (emitting `run_finished` on completion).
 - The emit point writes ONE row per STATE-CHANGING `RunProgress`: `Parked`→`run_parked`, `Finished`→`run_finished`, `Failed`→`run_failed`; `Ignored` emits nothing. Payloads are compact JSON.
+- Consecutive same-node re-parks are DEDUPED (P1 re-park-noise gap): a `Parked` progress emits nothing — no event row AND no live broadcast — when the run's most recent event is already a `run_parked` with the same node payload. A fan-out review re-parks at the same node per non-final verdict (e.g. `majority_pass` over 3 reviewers re-parks at `review` after the 1st pass); only the FIRST park at a node emits. Distinct-node parks and ALL terminals (`run_finished`/`run_failed`) always emit. This keeps both the durable log and the SSE tail/replay free of same-node duplicates. (`event_repo::last` supplies the most-recent-event check.)
 - `draft.dot` walks: `start_run` parks at `propose_spec`; submitting its success drives `lint_spec`+`push_draft` to `done` (Finished). The store, checkpoints, and event rows all persist to a real SQLite file.
 - A replayed `submit_outcome` for an already-closed task is rejected (its open task is gone) and emits NO new event row.
 
@@ -24,6 +25,7 @@ tmux / rmcp are the deployment checklist.
 ### Allowed Changes
 
 - crates/agentd-bin/**
+- crates/agentd-store/**
 - specs/e2e/**
 
 ### Forbidden
@@ -55,6 +57,12 @@ Scenario: the production host drives execute.dot (fan-out review) to done
   Given a production RunHost with a recorded execute.dot run
   When start_run parks at implement, its success is submitted, and three reviewers submit pass verdicts (via submit_review, learning review_run_id from the store)
   Then the run reaches status "finished" and the emitted events park at implement and review before run_finished
+
+Scenario: a same-node re-park is deduped to a single run_parked
+  Test: production_runhost_dedupes_same_node_reparks
+  Given an execute.dot run driven to its review fan-out park
+  When one reviewer submits a non-final pass verdict that re-parks at the same review node, then the remaining reviewers complete it
+  Then exactly one run_parked event exists for the review node and the run reaches finished
 
 Scenario: events_from for an unknown run is empty
   Test: production_runhost_events_from_unknown_run_is_empty

@@ -271,6 +271,73 @@ async fn production_list_runs_reflects_statuses() {
 }
 
 #[tokio::test]
+async fn production_runhost_dedupes_same_node_reparks() {
+    // P1 re-park-noise: a fan-out review re-parks at the SAME node per non-final
+    // verdict; the emit point must dedup so only the first park at a node emits.
+    let (host, _dir) = production_host().await;
+    let run = RunId::from_string("e1");
+    run_repo::record_run(host.store().pool(), &run, "execute.dot", "sha")
+        .await
+        .expect("record");
+
+    // start -> implement park; implement success -> review (fan_out) park.
+    host.start_run(&run).await.expect("start");
+    agent_submit_success(&host, "e1", "implement")
+        .await
+        .expect("submit implement");
+    let review_run_id = review_repo::find_open_review_run(host.store().pool(), &run)
+        .await
+        .expect("find review run")
+        .expect("an open review run");
+
+    // 1 of 3 pass verdicts (majority_pass) does NOT decide -> re-parks at review.
+    agent_submit_review(&host, review_run_id.as_str(), "claude-sec")
+        .await
+        .expect("submit r1");
+    // Confirm it WAS a same-node re-park (still at review), so the dedup assertion
+    // below is meaningful and not vacuous.
+    let mid = host
+        .run_snapshot(&run)
+        .await
+        .expect("snap")
+        .expect("exists");
+    assert_eq!(
+        mid.current_node.as_deref(),
+        Some("review"),
+        "the 1st verdict re-parks at the same review node"
+    );
+
+    // The remaining reviewers complete the review -> the run drives to done.
+    for reviewer in ["codex-perf", "gemini-readability"] {
+        agent_submit_review(&host, review_run_id.as_str(), reviewer)
+            .await
+            .expect("submit review");
+    }
+    let snap = host
+        .run_snapshot(&run)
+        .await
+        .expect("snap")
+        .expect("exists");
+    assert_eq!(snap.status, "finished", "execute.dot reached done");
+
+    // The same-node re-park emitted no duplicate: exactly one run_parked for review.
+    let events = host.events_from(&run, 0).await.expect("events");
+    let review_parks = events
+        .iter()
+        .filter(|e| e.kind == "run_parked" && e.payload == r#"{"node":"review"}"#)
+        .count();
+    assert_eq!(
+        review_parks,
+        1,
+        "the same-node re-park is deduped to one run_parked: {:?}",
+        events
+            .iter()
+            .map(|e| (e.kind.as_str(), e.payload.as_str()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
 async fn production_runhost_events_from_unknown_run_is_empty() {
     let (host, _dir) = production_host().await;
     let events = host
