@@ -327,6 +327,7 @@ fn flow_to_file(flow: &str) -> Option<&'static str> {
         "docs-only" => Some("docs-only.dot"),
         "bugfix-rapid" => Some("bugfix-rapid.dot"),
         "refactor-only" => Some("refactor-only.dot"),
+        "bootstrap" => Some("bootstrap.dot"),
         _ => None,
     }
 }
@@ -362,6 +363,7 @@ mod tests {
             "docs-only",
             "bugfix-rapid",
             "refactor-only",
+            "bootstrap",
         ] {
             let mapped = flow_to_file(flow);
             assert!(

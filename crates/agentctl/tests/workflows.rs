@@ -514,3 +514,19 @@ async fn refactor_only_dot_walks_to_done() {
         }
     );
 }
+
+// ─── §7.3 P1.5: bootstrap ────────────────────────────────────────────────────
+
+#[test]
+fn bootstrap_dot_validates() {
+    assert!(
+        !load("bootstrap.dot").nodes.is_empty(),
+        "bootstrap.dot has nodes"
+    );
+}
+
+#[tokio::test]
+async fn bootstrap_dot_walks_to_done() {
+    // scaffold (tool ok) -> discover (codergen) parks -> lint/report (tool ok) -> done.
+    walk_single_park_to_done("bootstrap.dot").await;
+}

@@ -44,6 +44,8 @@ pub enum Flow {
     BugfixRapid,
     /// `refactor-only.dot` — behavior-preserving (keeps gate + review).
     RefactorOnly,
+    /// `bootstrap.dot` — derive a starter spec from an existing codebase.
+    Bootstrap,
 }
 
 impl Flow {
@@ -57,6 +59,7 @@ impl Flow {
             Self::DocsOnly => "docs-only.dot",
             Self::BugfixRapid => "bugfix-rapid.dot",
             Self::RefactorOnly => "refactor-only.dot",
+            Self::Bootstrap => "bootstrap.dot",
         }
     }
 
@@ -71,6 +74,7 @@ impl Flow {
             Self::DocsOnly => "docs-only",
             Self::BugfixRapid => "bugfix-rapid",
             Self::RefactorOnly => "refactor-only",
+            Self::Bootstrap => "bootstrap",
         }
     }
 }
@@ -101,11 +105,11 @@ mod tests {
 #[derive(Debug, Args)]
 pub struct RunStartArgs {
     /// Which standalone workflow to run (draft, execute, spike, docs-only,
-    /// bugfix-rapid, refactor-only).
+    /// bugfix-rapid, refactor-only, bootstrap).
     #[arg(long, value_enum)]
     pub flow: Flow,
-    /// The run id — an issue id (draft / bugfix-rapid / docs-only / spike) or a
-    /// frozen-spec id (execute / refactor-only).
+    /// The run id — an issue id (draft / bugfix-rapid / docs-only / spike), a
+    /// frozen-spec id (execute / refactor-only), or a repo label (bootstrap).
     pub id: String,
     /// Optional run-context file for the run.
     #[arg(long)]
