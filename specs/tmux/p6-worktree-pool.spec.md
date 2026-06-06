@@ -74,6 +74,10 @@ extraction (see Out of Scope) — a deliberate, documented partial.
   never read would trade a collision for STRANDED work. Needs a worktree→pipeline
   bridge — the same P2 core change as the per-`task_run` lifecycle below. The
   mechanism + tests land now; activation is one wrapper line when the bridge does.
+  BRIDGE SCOPE: the cwd-split affects EVERY tool+agent workflow, not just
+  execute.dot's verify/PR — bootstrap.dot (`scaffold`/`lint` in cwd vs `discover`
+  in W) and refactor-only.dot have the same shape, so the bridge must point all
+  tool nodes at the run's worktree, not special-case one graph.
 - Per-`task_run` `worktree_path` persistence + release on `complete_task_run`:
   the backend can't correlate a spawn to its task_run under frozen core (spawn
   precedes `insert_task_run`; `SpawnRequest` carries no run/node id). Needs the
