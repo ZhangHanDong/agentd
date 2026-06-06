@@ -72,10 +72,17 @@ hack) in favor of a worktree threaded from where the run starts.
 
 **OPEN design axis — per-run vs per-task_run worktree (decide before building):**
 - *Per-run* (one worktree per run, reused across its nodes): simpler, clean
-  allocate-at-start / release-at-terminal lifecycle. Argument it's safe: within a
-  run, the writer (`implement`) parks one-at-a-time; the `goal_gate_unmet → implement`
-  re-loop is SEQUENTIAL (a later attempt, not concurrent); `fan_out` reviewers run
-  concurrently but READ the frozen bundle. **Recommended.**
+  allocate-at-start / release-at-terminal lifecycle. **Recommended — but it rests
+  on one assumption that is C1's entry-gate, not a settled fact:** *at most one
+  open writer task_run per run at a time.* The graph SHAPE suggests this (the
+  writer `implement` parks for its outcome; the `goal_gate_unmet → implement`
+  re-loop looks like a later sequential attempt; `fan_out` reviewers run
+  concurrently but READ the frozen bundle). **VERIFY against the engine's
+  park/deliver flow before building C1** — if the engine can ever hold two
+  task_runs open on one run concurrently (e.g. a retry spawned before the prior
+  outcome is delivered), per-run collides and ships the exact bug-class P1.3
+  exists to fix. This is the third time the season's cheap model would have been
+  wrong; do not bank it.
 - *Per-task_run* (the design-doc/P1.3 literal): needed only if a future workflow
   has CONCURRENT writer task_runs within one run. None shipped does. Costs the
   spawn→task_run correlation (C3).
