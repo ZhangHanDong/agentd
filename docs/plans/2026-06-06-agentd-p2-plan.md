@@ -187,14 +187,16 @@ redundant.
 - **Unfreezing core regresses a subtle invariant** the 84 tests don't cover
   (e.g. a park/replay edge). Mitigation: TDD each change; treat any engine_execute
   / checkpoint / goal_gate test flake as a stop-the-line.
-- **Latent concurrent-verdict double-advance race (ships TODAY, verified
-  2026-06-07).** The daemon delivers `submit_review` concurrently with no per-run
+- **Concurrent-verdict double-advance race (LATENT, verified 2026-06-07; FIXED by
+  Foundation A, committed).** The shared `ProductionRunHost.deliver` had no per-run
   lock; N reviewers can all resolve the same review park before any verdict insert,
   then all see `collected == expected` and all advance the run → double
   `gh pr create` / double-finish / (via the goal-gate loop) multiple writer
-  task_runs. NOT worktree-specific — it is a pre-existing correctness bug. The
-  contract test misses it (verdicts submitted sequentially). Closed by §4
-  Foundation A (per-run delivery serialization), which is also C1's prerequisite —
-  so the worktree work and this bug fix share one root change.
+  task_runs. NOT worktree-specific — a pre-existing correctness bug. It is LATENT
+  (not live) because the rmcp/MCP wire that lets agent processes reach `deliver`
+  concurrently is deployment-deferred — but certain once that wire lands (the
+  real-agent path). The contract test missed it (verdicts submitted sequentially).
+  CLOSED by §4 Foundation A (per-run delivery serialization in the shared host),
+  which is also C1's prerequisite — the worktree work and this fix share one root.
 - **Scope creep into the optional refactor** (§5). Hold the line: P2 is unblock,
   not rearchitecture — the rearchitecture is already done.

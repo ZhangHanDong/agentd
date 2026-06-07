@@ -4,6 +4,7 @@
 //! construction + a read.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use agentd_bin::{ProductionRunHost, SystemClock};
 use agentd_core::engine::RunProgress;
@@ -334,6 +335,55 @@ async fn production_runhost_dedupes_same_node_reparks() {
             .iter()
             .map(|e| (e.kind.as_str(), e.payload.as_str()))
             .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn concurrent_review_verdicts_advance_run_once() {
+    // P2 Foundation A (smoke guard; deterministic only WITH the per-run lock — the
+    // run_lock_is_per_run unit test is the mechanism proof). Without serialization,
+    // N concurrent verdicts can each advance the run → multiple run_finished.
+    let (host, _dir) = production_host().await;
+    let host = Arc::new(host);
+    let run = RunId::from_string("e1");
+    run_repo::record_run(host.store().pool(), &run, "execute.dot", "sha")
+        .await
+        .expect("record");
+    host.start_run(&run).await.expect("start"); // parks at implement
+    agent_submit_success(&host, "e1", "implement")
+        .await
+        .expect("submit implement"); // -> review park
+    let review_run_id = review_repo::find_open_review_run(host.store().pool(), &run)
+        .await
+        .expect("find review run")
+        .expect("an open review run");
+
+    // The three reviewers submit CONCURRENTLY on the shared host.
+    let mut tasks = Vec::new();
+    for reviewer in ["claude-sec", "codex-perf", "gemini-readability"] {
+        let h = host.clone();
+        let rr = review_run_id.as_str().to_string();
+        tasks.push(tokio::spawn(async move {
+            agent_submit_review(h.as_ref(), &rr, reviewer).await
+        }));
+    }
+    for t in tasks {
+        t.await.expect("join").expect("submit_review ok");
+    }
+
+    let snap = host
+        .run_snapshot(&run)
+        .await
+        .expect("snap")
+        .expect("exists");
+    assert_eq!(snap.status, "finished", "the run advanced to finished");
+    let events = host.events_from(&run, 0).await.expect("events");
+    let finishes = events.iter().filter(|e| e.kind == "run_finished").count();
+    assert_eq!(
+        finishes,
+        1,
+        "the run advanced EXACTLY once, not N times: {:?}",
+        events.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>()
     );
 }
 

@@ -4,7 +4,9 @@
 //! (P0.7 D2). agentd-core stays frozen (D1): `deliver` just constructs `Engine`
 //! and calls `deliver_event` (which loads the checkpoint and resumes internally).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use agentd_core::CoreError;
 use agentd_core::dot::parser;
@@ -25,6 +27,25 @@ use tokio::sync::broadcast;
 /// behind lags and is realigned with a snapshot (P1).
 const LIVE_BROADCAST_CAPACITY: usize = 256;
 
+/// Per-run lock registry (P2 Foundation A): hands out one `Arc<Mutex>` per run id
+/// so the daemon can serialize a run's advancing operations (`deliver`/`start_run`)
+/// while different runs proceed concurrently. The std mutex guards only the
+/// map's get-or-insert and is never held across an `.await`. No eviction — one
+/// entry per distinct run id, bounded by run volume (see p98 Out of Scope).
+#[derive(Default)]
+struct RunLockRegistry {
+    locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl RunLockRegistry {
+    /// The lock for `run_id` — the SAME `Arc` for a given run, a different one
+    /// for a different run.
+    fn lock_for(&self, run_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut map = self.locks.lock().expect("run-lock map poisoned");
+        map.entry(run_id.to_string()).or_default().clone()
+    }
+}
+
 /// The daemon's production `RunHost`. Holds the real store + the swappable ports
 /// as trait objects (the daemon supplies `TmuxBackend`/`SystemClock`/…; tests
 /// supply the in-memory fakes), and re-resolves each run's graph from
@@ -40,6 +61,9 @@ pub struct ProductionRunHost {
     /// The live-event broadcast (P1): the emit point publishes here for the SSE
     /// tail. Lossy/bounded — `send` never blocks the engine on a slow subscriber.
     live_tx: broadcast::Sender<LiveEvent>,
+    /// Per-run delivery serialization (P2 Foundation A): one lock per run id, so
+    /// concurrent events for one run can't double-advance it.
+    run_locks: RunLockRegistry,
 }
 
 impl std::fmt::Debug for ProductionRunHost {
@@ -69,6 +93,7 @@ impl ProductionRunHost {
             registry: HandlerRegistry::with_builtins(),
             workflows_dir: workflows_dir.into(),
             live_tx: broadcast::channel(LIVE_BROADCAST_CAPACITY).0,
+            run_locks: RunLockRegistry::default(),
         }
     }
 
@@ -121,6 +146,10 @@ impl ProductionRunHost {
     /// # Errors
     /// [`CoreError`] on a store/handler/engine failure or an unresolved graph.
     pub async fn start_run(&self, run_id: &RunId) -> Result<RunProgress, CoreError> {
+        // Serialize per run (P2 Foundation A): every run-advancing op on one run
+        // is mutually exclusive, so it can't race a concurrent deliver.
+        let lock = self.run_locks.lock_for(run_id.as_str());
+        let _guard = lock.lock().await;
         let (graph, sha) = self.resolve_graph(run_id).await?;
         let progress = self.engine(&graph, &sha).execute(run_id).await?;
         self.emit(run_id, &progress).await?;
@@ -228,11 +257,18 @@ impl RunHost for ProductionRunHost {
 
     async fn deliver(&self, event: EngineEvent) -> Result<RunProgress, CoreError> {
         // Resolve the run from the event; an unmatched event is replay-safe Ignored.
+        // (Read-only resolve — safe unlocked; concurrent callers for one run all
+        // resolve the same run id while the park is open, then serialize below.)
         let Some(run_id) = self.run_for_event(&event).await? else {
             return Ok(RunProgress::Ignored {
                 reason: "no open park matches this event (unknown or already resolved)".to_string(),
             });
         };
+        // Serialize per run (P2 Foundation A): the mutation runs INSIDE the lock,
+        // so a serialized later caller's `deliver_event` re-resolves the gate and
+        // sees the prior insert — exactly one caller advances, the rest re-park.
+        let lock = self.run_locks.lock_for(run_id.as_str());
+        let _guard = lock.lock().await;
         let (graph, sha) = self.resolve_graph(&run_id).await?;
         let progress = self.engine(&graph, &sha).deliver_event(event).await?;
         self.emit(&run_id, &progress).await?;
@@ -345,11 +381,27 @@ fn sha256_hex(data: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::flow_to_file;
+    use super::{RunLockRegistry, flow_to_file};
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     fn workflows_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workflows")
+    }
+
+    #[test]
+    fn run_lock_is_per_run() {
+        // The mechanism the per-run serialization rests on: concurrent callers for
+        // ONE run must contend on the SAME lock; different runs must not.
+        let reg = RunLockRegistry::default();
+        let a1 = reg.lock_for("r1");
+        let a2 = reg.lock_for("r1");
+        let b = reg.lock_for("r2");
+        assert!(Arc::ptr_eq(&a1, &a2), "same run id -> the same lock");
+        assert!(
+            !Arc::ptr_eq(&a1, &b),
+            "different run id -> a different lock (cross-run delivery stays concurrent)"
+        );
     }
 
     #[test]
