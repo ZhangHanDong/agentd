@@ -70,24 +70,33 @@ tool handler just passes `None` today, so the runner side is a no-op change.
 Retires the deferred `PooledBackend` decorator (the per-spawn override + boot-GC
 hack) in favor of a worktree threaded from where the run starts.
 
-**OPEN design axis — per-run vs per-task_run worktree (decide before building):**
-- *Per-run* (one worktree per run, reused across its nodes): simpler, clean
-  allocate-at-start / release-at-terminal lifecycle. **Recommended — but it rests
-  on one assumption that is C1's entry-gate, not a settled fact:** *at most one
-  open writer task_run per run at a time.* The graph SHAPE suggests this (the
-  writer `implement` parks for its outcome; the `goal_gate_unmet → implement`
-  re-loop looks like a later sequential attempt; `fan_out` reviewers run
-  concurrently but READ the frozen bundle). **VERIFY against the engine's
-  park/deliver flow before building C1** — if the engine can ever hold two
-  task_runs open on one run concurrently (e.g. a retry spawned before the prior
-  outcome is delivered), per-run collides and ships the exact bug-class P1.3
-  exists to fix. This is the third time the season's cheap model would have been
-  wrong; do not bank it.
-- *Per-task_run* (the design-doc/P1.3 literal): needed only if a future workflow
-  has CONCURRENT writer task_runs within one run. None shipped does. Costs the
-  spawn→task_run correlation (C3).
-- Recommendation: **per-run**, and document the concurrency assumption it rests
-  on so a future concurrent-writer workflow re-opens it deliberately.
+**Per-run vs per-task_run — VERIFIED (2026-06-07), and it has a prerequisite.**
+The entry-gate question (*≤1 open writer task_run per run at a time?*) was checked
+against the engine's park/deliver flow:
+- The engine is strictly sequential WITHIN a call (`run_loop`/`step_once` runs one
+  node, returns at the first `Park`), and `codergen` is the SOLE writer-task_run
+  source (one `insert_task_run` per park); `fan_out` makes `review_run`s +
+  read-only reviewer agents, never writer task_runs. So per *call*, ≤1 writer
+  task_run holds. ✓
+- BUT the daemon delivers CONCURRENTLY with no per-run lock, and the shipped
+  N-reviewer review is N concurrent `submit_review → deliver_event` on one run.
+  Race: all N `lookup_park_by_review_run` (gated `count < expected`) resolve the
+  SAME open park before any `insert_review_verdict`; then all N count
+  `collected == expected` and all return `Done` → **N concurrent `run_loop`s on one
+  run**. Via `goal_gate_unmet → implement`, each spawns a codergen → **multiple
+  open writer task_runs on one run** → per-run worktree collides. (It is also a
+  pre-existing double-advance / double-`gh pr create` bug — see Risks — and the
+  contract test misses it by submitting the 3 verdicts SEQUENTIALLY.)
+
+**Conclusion:** per-run is the right model, but it is safe ONLY WITH **per-run
+delivery serialization** in the daemon (serialize `deliver_event` per `run_id` — a
+per-run lock/queue/actor). With it, concurrent same-run events queue, the engine
+stays sequential, ≤1 writer task_run holds — assumption SATISFIED, not assumed.
+That serialization is independently valuable (it closes the latent race below), so
+it is promoted to a P2 foundation (§4 step 1).
+- *Per-task_run* (the design-doc/P1.3 literal) would avoid the per-run assumption
+  but does NOT fix the double-advance race (which exists regardless), and costs the
+  spawn→task_run correlation (C3). Not recommended — fix the root (serialization).
 
 **Migration:** worktree is runtime-resolved (like the graph from `workflow_path`)
 — NOT checkpoint state. Per-run needs no new persisted column; per-task_run would
@@ -138,16 +147,21 @@ C3 = thread the task_run id into the worktree allocation + persist `worktree_pat
 
 ## 4. Sequencing & rough budget
 
-1. **Foundation: store back-compat migration test harness** (~30) — the net the
+0. **Foundation A: per-run delivery serialization** (~40) — serialize
+   `deliver_event` per `run_id` in the daemon. C1's per-run worktree REQUIRES it
+   (verified §2/C1), and it independently closes the latent concurrent-verdict
+   double-advance race (§6) that ships TODAY. Must precede C1. Add a CONCURRENT
+   N-verdict test (the existing contract test submits sequentially and misses it).
+1. **Foundation B: store back-compat migration test harness** (~30) — the net the
    84 fresh-state core tests don't provide; precedes any schema change.
 2. **C1 worktree threading** (~60–90) → **activate P1.3** (~30). Highest value:
-   unblocks isolation end-to-end for every tool+agent workflow.
+   unblocks isolation end-to-end for every tool+agent workflow. Depends on Fnd A.
 3. **C2 Delphi round** (~50–70) → **P1.4 Delphi loop + stance pack** (~140).
 4. **(Optional) structural cleanup** (§5).
 
-Total load-bearing: ~360–430 rounds incl. the re-activations (vs the design doc's
-200–400 for "extraction" that's already done — the budget moved from refactor to
-feature-unblock).
+Total load-bearing: ~400–470 rounds incl. the re-activations + the serialization
+foundation (vs the design doc's 200–400 for "extraction" that's already done — the
+budget moved from refactor to feature-unblock + the race fix C1 surfaced).
 
 ## 5. Optional structural items (weighed, low priority)
 
@@ -173,8 +187,14 @@ redundant.
 - **Unfreezing core regresses a subtle invariant** the 84 tests don't cover
   (e.g. a park/replay edge). Mitigation: TDD each change; treat any engine_execute
   / checkpoint / goal_gate test flake as a stop-the-line.
-- **The per-run worktree concurrency assumption** (C1) is correctness-load-bearing
-  — if a future workflow runs concurrent writer task_runs in one run, per-run
-  collides. Documented as an explicit assumption to re-open, not a silent default.
+- **Latent concurrent-verdict double-advance race (ships TODAY, verified
+  2026-06-07).** The daemon delivers `submit_review` concurrently with no per-run
+  lock; N reviewers can all resolve the same review park before any verdict insert,
+  then all see `collected == expected` and all advance the run → double
+  `gh pr create` / double-finish / (via the goal-gate loop) multiple writer
+  task_runs. NOT worktree-specific — it is a pre-existing correctness bug. The
+  contract test misses it (verdicts submitted sequentially). Closed by §4
+  Foundation A (per-run delivery serialization), which is also C1's prerequisite —
+  so the worktree work and this bug fix share one root change.
 - **Scope creep into the optional refactor** (§5). Hold the line: P2 is unblock,
   not rearchitecture — the rearchitecture is already done.
