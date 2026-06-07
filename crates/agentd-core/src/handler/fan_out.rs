@@ -49,11 +49,15 @@ impl Handler for FanOutHandler {
             .insert_review_run(&run_id, &node_id, expected, &context_sha)
             .await?;
 
+        // C1a plumbing: reviewers receive the run's worktree mechanically
+        // (None→"."); whether they SHOULD run in the live writer tree given the
+        // frozen review bundle is a deferred C1b semantic (see p9).
+        let worktree = ctx.worktree().unwrap_or_else(|| std::path::Path::new("."));
         for role in &roles {
             let prompt = format!("adversarial review (context_sha={context_sha})");
             ctx.ports
                 .backend
-                .spawn(spawn_request(role, Some(prompt)))
+                .spawn(spawn_request(role, Some(prompt), worktree))
                 .await?;
         }
 

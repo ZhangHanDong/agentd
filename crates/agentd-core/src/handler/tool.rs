@@ -46,6 +46,9 @@ impl Handler for ToolHandler {
 
         let opts = RunOpts {
             timeout,
+            // C1a: run the tool in the run's worktree if threaded; None → the
+            // process cwd (today's behavior).
+            cwd: ctx.worktree().map(std::path::Path::to_path_buf),
             ..RunOpts::default()
         };
         match ctx.ports.runner.run(&program, &args, opts).await {

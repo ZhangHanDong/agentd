@@ -66,6 +66,9 @@ pub struct HandlerCtx<'a> {
     pub context: &'a crate::types::RunContext,
     pub ports: Ports<'a>,
     staged: serde_json::Map<String, serde_json::Value>,
+    /// The run's worktree, threaded from the engine (P2 C1a). `None` → the spawn
+    /// + tool handlers fall back to `"."` (today's behavior).
+    worktree: Option<&'a std::path::Path>,
 }
 
 impl std::fmt::Debug for HandlerCtx<'_> {
@@ -94,7 +97,22 @@ impl<'a> HandlerCtx<'a> {
             context,
             ports,
             staged: serde_json::Map::new(),
+            worktree: None,
         }
+    }
+
+    /// Thread the run's worktree (P2 C1a). Builder so the 22 `new()` call sites
+    /// stay unchanged; default `None`.
+    #[must_use]
+    pub fn with_worktree(mut self, worktree: Option<&'a std::path::Path>) -> Self {
+        self.worktree = worktree;
+        self
+    }
+
+    /// The run's worktree, or `None` (handlers fall back to `"."`).
+    #[must_use]
+    pub fn worktree(&self) -> Option<&std::path::Path> {
+        self.worktree
     }
 
     /// Stage a context update (the ctx-staged channel — see the type docs).
@@ -138,18 +156,21 @@ pub(crate) fn sha256_hex(data: &[u8]) -> String {
 }
 
 /// Build a `SpawnRequest` for `role` with sensible P0.1 defaults (claude-code
-/// CLI, direct launch, cwd worktree). Shared by `codergen` and `fan_out`.
+/// CLI, direct launch). Shared by `codergen` and `fan_out`; `worktree` is the
+/// run's worktree threaded via [`HandlerCtx::worktree`] (P2 C1a — callers pass
+/// `ctx.worktree().unwrap_or(Path::new("."))`, so `None` reproduces today's `.`).
 #[must_use]
 pub(crate) fn spawn_request(
     role: &str,
     initial_prompt: Option<String>,
+    worktree: &std::path::Path,
 ) -> crate::types::SpawnRequest {
     use crate::types::{AgentId, CliKind, LaunchStrategy, SpawnRequest};
     SpawnRequest {
         agent_id: AgentId::parsed(role),
         mxid: None,
         cli: CliKind::ClaudeCode,
-        worktree: std::path::PathBuf::from("."),
+        worktree: worktree.to_path_buf(),
         initial_prompt,
         env_overrides: std::collections::HashMap::new(),
         launch_strategy: LaunchStrategy::Direct,

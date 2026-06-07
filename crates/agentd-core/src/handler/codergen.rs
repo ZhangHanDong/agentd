@@ -52,9 +52,10 @@ impl Handler for CodergenHandler {
 
         let run_id = ctx.run_id.clone();
         let node_id = NodeId::parsed(&ctx.node.id);
+        let worktree = ctx.worktree().unwrap_or_else(|| std::path::Path::new("."));
         ctx.ports
             .backend
-            .spawn(spawn_request(&role, Some(prompt)))
+            .spawn(spawn_request(&role, Some(prompt), worktree))
             .await?;
         let task_run_id = ctx.ports.store.insert_task_run(&run_id, &node_id).await?;
         ctx.stage(

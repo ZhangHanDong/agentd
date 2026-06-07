@@ -2,6 +2,7 @@
 //! real tmux backend is tested against this exact shape.
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use crate::ports::{CommandError, CommandOutput, CommandRunner, RunOpts};
@@ -11,6 +12,9 @@ use crate::ports::{CommandError, CommandOutput, CommandRunner, RunOpts};
 pub struct RecordedCall {
     pub program: String,
     pub args: Vec<String>,
+    /// The working directory the call requested (`RunOpts.cwd`) — lets a test
+    /// assert a `tool` node ran in the threaded worktree (P2 C1a).
+    pub cwd: Option<PathBuf>,
 }
 
 /// Records every `run` call and returns scripted results in FIFO order. When
@@ -45,11 +49,12 @@ impl CommandRunner for RecordingCommandRunner {
         &self,
         program: &str,
         args: &[String],
-        _opts: RunOpts,
+        opts: RunOpts,
     ) -> Result<CommandOutput, CommandError> {
         self.calls.lock().expect("calls lock").push(RecordedCall {
             program: program.to_string(),
             args: args.to_vec(),
+            cwd: opts.cwd,
         });
         self.scripted
             .lock()

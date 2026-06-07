@@ -7,6 +7,7 @@
 //! so `deliver_event` treats an unmatched event as `RunProgress::Ignored`.
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 
 use crate::CoreError;
 use crate::engine::{Checkpoint, EngineEvent, HandlerStep, RunProgress, goal_gate};
@@ -29,6 +30,9 @@ pub struct Engine<'a> {
     registry: &'a HandlerRegistry,
     ports: Ports<'a>,
     workflow_sha: String,
+    /// The run's worktree, threaded into each `HandlerCtx` (P2 C1a); `None` →
+    /// handlers fall back to `"."`.
+    worktree: Option<PathBuf>,
 }
 
 /// Mutable per-run state threaded through the loop and snapshotted into a
@@ -68,7 +72,17 @@ impl<'a> Engine<'a> {
             registry,
             ports,
             workflow_sha: workflow_sha.into(),
+            worktree: None,
         }
+    }
+
+    /// Thread the run's worktree into the handlers (P2 C1a). Builder so the 5
+    /// `new()` call sites stay unchanged; default `None` (handlers fall back to
+    /// `"."`). The daemon resolves a per-run worktree in C1b.
+    #[must_use]
+    pub fn with_worktree(mut self, worktree: Option<PathBuf>) -> Self {
+        self.worktree = worktree;
+        self
     }
 
     /// Run `run_id` from the graph's start node until it finishes, fails, or parks.
@@ -162,7 +176,8 @@ impl<'a> Engine<'a> {
                 .registry
                 .get(kind)
                 .ok_or_else(|| CoreError::UnknownHandler(format!("{kind:?}")))?;
-            let mut ctx = HandlerCtx::new(&run_id, self.graph, node, &state.context, self.ports);
+            let mut ctx = HandlerCtx::new(&run_id, self.graph, node, &state.context, self.ports)
+                .with_worktree(self.worktree.as_deref());
             let step = handler.resume(&mut ctx, event).await?;
             let staged = ctx.staged_updates().clone();
             (step, staged)
@@ -268,7 +283,8 @@ impl<'a> Engine<'a> {
                     .ok_or_else(|| CoreError::UnknownHandler(format!("{kind:?}")))?;
                 let (step, staged) = {
                     let mut ctx =
-                        HandlerCtx::new(run_id, self.graph, node, &state.context, self.ports);
+                        HandlerCtx::new(run_id, self.graph, node, &state.context, self.ports)
+                            .with_worktree(self.worktree.as_deref());
                     let step = handler.run(&mut ctx).await?;
                     let staged = ctx.staged_updates().clone();
                     (step, staged)
