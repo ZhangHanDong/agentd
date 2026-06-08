@@ -1,18 +1,19 @@
-//! P2 C1a: the engine threads an optional per-run worktree down to the spawn +
-//! tool handlers. Names match `specs/core/p9-worktree-ctx-threading.spec.md`.
-//! `with_worktree(Some(W))` → the codergen `SpawnRequest.worktree` and the tool
-//! `RunOpts.cwd`; the default `None` reproduces today's `"."`.
+//! P2 C1a: the engine threads an optional worktree down to the AGENT spawn.
+//! Names match `specs/core/p9-worktree-ctx-threading.spec.md`.
+//! `with_worktree(Some(W))` → the codergen `SpawnRequest.worktree`; the default
+//! `None` reproduces today's `"."`. (Tool-node cwd is NOT threaded — see the
+//! design-faithful redirect note below.)
 
 use std::path::PathBuf;
 
 use agentd_core::dot::parser;
-use agentd_core::engine::{Engine, EngineEvent, ParkReason, RunProgress};
+use agentd_core::engine::{Engine, ParkReason, RunProgress};
 use agentd_core::graph::NodeGraph;
 use agentd_core::handler::{HandlerRegistry, Ports};
 use agentd_core::test_support::{
     FakeBackend, FixedClock, InMemoryStore, MempalStub, RecordingCommandRunner,
 };
-use agentd_core::types::{Outcome, RunId, TaskRunId};
+use agentd_core::types::{RunId, TaskRunId};
 
 struct Harness {
     run_id: RunId,
@@ -95,44 +96,11 @@ async fn engine_threads_worktree_to_spawn_request() {
     );
 }
 
-#[tokio::test]
-async fn engine_threads_worktree_to_tool_cwd() {
-    let h = Harness::new();
-    let g = graph();
-    let wt = PathBuf::from("/tmp/wt-run-1");
-    // impl parks; deliver its success so the tool node `check` runs.
-    let parked = h
-        .engine(&g, Some(wt.clone()))
-        .execute(&h.run_id)
-        .await
-        .expect("execute");
-    let tr = task_run_id(&parked);
-    let progress = h
-        .engine(&g, Some(wt.clone()))
-        .deliver_event(EngineEvent::AgentOutcomeSubmitted {
-            task_run_id: tr,
-            outcome: Outcome::success(),
-        })
-        .await
-        .expect("deliver");
-    assert_eq!(
-        progress,
-        RunProgress::Finished {
-            run_id: h.run_id.clone()
-        }
-    );
-    let echo = h
-        .runner
-        .calls()
-        .into_iter()
-        .find(|c| c.program == "echo")
-        .expect("the tool node `check` ran `echo`");
-    assert_eq!(
-        echo.cwd,
-        Some(wt),
-        "the threaded worktree becomes the tool node's cwd"
-    );
-}
+// NOTE (design-faithful C1 redirect): the worktree threads to the AGENT spawn
+// (codergen/fan_out `SpawnRequest.worktree`), NOT to tool-node cwd — tool nodes
+// run in the daemon cwd and receive the worktree as a `--code <worktree>` arg
+// via variable substitution (restored in R2). The former
+// `engine_threads_worktree_to_tool_cwd` test was removed with that wiring.
 
 #[tokio::test]
 async fn engine_without_worktree_spawns_in_dot() {

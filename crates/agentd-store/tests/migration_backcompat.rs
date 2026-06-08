@@ -6,10 +6,8 @@
 
 use std::path::PathBuf;
 
-use agentd_core::types::RunId;
-use agentd_store::{SqliteStore, run_repo};
+use sqlx::SqlitePool;
 use sqlx::sqlite::SqlitePoolOptions;
-use sqlx::{Row, SqlitePool};
 
 fn migrations_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("migrations")
@@ -36,59 +34,12 @@ async fn apply(pool: &SqlitePool, file: &str) {
         .unwrap_or_else(|e| panic!("apply migration {file}: {e}"));
 }
 
-#[tokio::test]
-async fn migration_0002_preserves_existing_runs() {
-    let pool = raw_pool().await;
-    apply(&pool, "0001_init.sql").await;
-    // Seed a run under the OLD (0001) schema — no worktree_path column exists yet.
-    sqlx::query(
-        "INSERT INTO runs (id, workflow_sha, status, started_at, last_heartbeat) \
-         VALUES (?, ?, ?, ?, ?)",
-    )
-    .bind("r1")
-    .bind("sha")
-    .bind("running")
-    .bind(1_i64)
-    .bind(1_i64)
-    .execute(&pool)
-    .await
-    .expect("seed a pre-migration run");
-
-    // The migration under test.
-    apply(&pool, "0002_runs_worktree_path.sql").await;
-
-    // The deployed row survives, and the new column defaulted to NULL.
-    let row = sqlx::query("SELECT id, worktree_path FROM runs WHERE id = 'r1'")
-        .fetch_one(&pool)
-        .await
-        .expect("the pre-existing run survives 0002");
-    assert_eq!(row.get::<String, _>("id"), "r1");
-    assert_eq!(
-        row.get::<Option<String>, _>("worktree_path"),
-        None,
-        "a deployed run gets worktree_path NULL under 0002"
-    );
-}
-
-#[tokio::test]
-async fn migration_0002_adds_worktree_path_column() {
-    // Via the REAL migrator (SqliteStore::connect runs 0001 + 0002).
-    let dir = tempfile::tempdir().expect("tempdir");
-    let store = SqliteStore::connect(&dir.path().join("agentd.db"))
-        .await
-        .expect("connect");
-    run_repo::insert_run(store.pool(), &RunId::from_string("r1"), "sha")
-        .await
-        .expect("insert run");
-    let wt: Option<String> = sqlx::query_scalar("SELECT worktree_path FROM runs WHERE id = 'r1'")
-        .fetch_one(store.pool())
-        .await
-        .expect("worktree_path column exists after migration");
-    assert_eq!(
-        wt, None,
-        "the migrated schema has worktree_path, default NULL"
-    );
-}
+// NOTE (design-faithful C1 redirect): the `0002 runs.worktree_path` migration was
+// REVERTED — the design's per-task_run worktree lives on the existing
+// `task_runs.worktree_path` (nullable in 0001), so no new column is needed for
+// the worktree. The harness below STANDS (model-agnostic, reusable); its first
+// REAL subject is now C2's `review_runs` round migration. Until then, the
+// self-test keeps it honest.
 
 #[tokio::test]
 async fn backcompat_harness_detects_row_loss() {

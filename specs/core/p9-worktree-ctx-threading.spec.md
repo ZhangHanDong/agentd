@@ -30,10 +30,15 @@ C1a means "the pipe carries water," NOT "C1 done."
 - `spawn_request` gains a `worktree: &Path` parameter and sets `req.worktree` to
   it (replacing the hardcoded `"."`). `codergen` and `fan_out` pass
   `ctx.worktree().unwrap_or(Path::new("."))` — so `None` reproduces today's `"."`.
-- The `tool` handler sets `RunOpts.cwd = ctx.worktree().map(Path::to_path_buf)`
-  (today it is `None`); `None` worktree → `None` cwd (unchanged).
+- The worktree threads to the AGENT spawn ONLY. Tool nodes do NOT take it as cwd
+  — REVERTED in the design-faithful redirect: tool nodes run in the daemon cwd
+  (where the `.agentd/run/` runtime-state convention lives), and a code tool
+  receives the worktree as an explicit `--code $worktree` ARG via `${...}`
+  substitution (R2). Threading the worktree to tool cwd (the original C1a) broke
+  `cat .agentd/run/...` tools — those paths are untracked, so a `git worktree`
+  does not contain them.
 - Test support: `RecordedCall` gains `cwd: Option<PathBuf>` captured from
-  `RunOpts.cwd`, so a test can assert a tool node ran in the threaded worktree.
+  `RunOpts.cwd` (kept additively; useful once substitution-driven cwd lands).
 - The daemon's `ProductionRunHost::engine(graph, sha)` passes NO worktree (stays
   `None`) in C1a — allocation is C1b. C1a changes no runtime behavior.
 
@@ -77,12 +82,6 @@ Scenario: a provided worktree reaches the spawned agent
   Given an Engine built with_worktree(Some(W)) over the in-memory fakes and a graph with a codergen node
   When the run executes to the codergen park
   Then the recorded SpawnRequest's worktree is W
-
-Scenario: a provided worktree becomes the tool node's cwd
-  Test: engine_threads_worktree_to_tool_cwd
-  Given an Engine built with_worktree(Some(W)) and a graph whose codergen success leads to a tool node
-  When the codergen outcome is delivered and the tool node runs
-  Then the recorded tool call's cwd is Some(W)
 
 Scenario: no worktree preserves the current "." default
   Test: engine_without_worktree_spawns_in_dot

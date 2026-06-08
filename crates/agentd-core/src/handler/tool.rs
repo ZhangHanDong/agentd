@@ -46,9 +46,12 @@ impl Handler for ToolHandler {
 
         let opts = RunOpts {
             timeout,
-            // C1a: run the tool in the run's worktree if threaded; None → the
-            // process cwd (today's behavior).
-            cwd: ctx.worktree().map(std::path::Path::to_path_buf),
+            // Tool nodes run in the DAEMON cwd, not a worktree (design-faithful C1
+            // redirect): a code tool instead receives the worktree as an explicit
+            // `--code <worktree>` argument via variable substitution (restored in
+            // R2), so cwd stays where the `.agentd/run/` runtime-state convention
+            // lives. Threading the worktree to cwd here (C1a) broke the tools that
+            // read from `.agentd/run/` (untracked, so absent from a git worktree).
             ..RunOpts::default()
         };
         match ctx.ports.runner.run(&program, &args, opts).await {
