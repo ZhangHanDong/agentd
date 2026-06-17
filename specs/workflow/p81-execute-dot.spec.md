@@ -20,7 +20,7 @@ later scenarios.
 - `execute.dot`: `start` → `pull_frozen_spec`(tool) → `draft_plan`(tool, shells `agent-spec plan` — NOT a planner agent) → `implement`(codergen, role=implementer) → `verify_lifecycle`(tool, goal_gate=true) → `review`(parallel.fan_out, reviewers=3, bundle=frozen, visibility=blind) → `aggregate`(parallel.fan_in, aggregator=majority_pass, goal_gate=true) → `open_pr`(tool, `gh pr create`) → `report_acceptance`(tool) → `done`(Msquare).
 - The terminal-routing node `report_acceptance` has two outgoing edges: `report_acceptance -> done [condition="outcome=success"]` and the recovery edge `report_acceptance -> implement [label="goal_gate_unmet"]` to a non-terminal (so an unmet gate recovers instead of going Stuck).
 - Exactly one `parallel.fan_out` feeds the one `parallel.fan_in` (P0.1 supports a single unpaired fan_out per fan_in).
-- All `cmd=` are static whitespace-split argv (no `${...}`); `open_pr` relies on ambient `gh` auth (standalone, D6).
+- execute.dot's shipped `cmd=` use static whitespace-split argv; `open_pr` relies on ambient `gh` auth (standalone, D6). (The `tool` handler implements `${...}` substitution as of P2 R2 — `specs/core/p10`; execute.dot migrates to `${worktree}` in R3.)
 
 ## Boundaries
 
@@ -32,8 +32,8 @@ later scenarios.
 
 ### Forbidden
 
-- Do not modify any file under crates/agentd-core/** (D1 — the grammar/engine are frozen).
-- Do not use `${...}` / `$run_dir` substitution in any `cmd=`.
+- Do not modify any file under crates/agentd-core/** (the DOT grammar is stable;
+  core engine changes are P2's own specs, not this workflow spec).
 
 ## Out of Scope
 

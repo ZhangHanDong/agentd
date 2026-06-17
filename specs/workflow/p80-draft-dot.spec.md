@@ -17,7 +17,7 @@ scenario (added with the walk-test task).
 
 - `draft.dot` is a linear graph: `start`(Mdiamond) → `fetch_issue_context`(tool) → `propose_spec`(codergen, role=spec-writer) → `lint_spec`(tool) → `push_draft`(tool) → `done`(Msquare).
 - Handler values are exactly the frozen `HandlerKind::parse` strings (`tool`, `codergen`); shapes are `Mdiamond` (the single start) and `Msquare` (the single terminal).
-- Every `tool` `cmd=` is a static whitespace-split argv (no `${...}` substitution — the frozen `tool` handler does not implement it); standalone file paths are fixed conventions.
+- `draft.dot`'s shipped `cmd=` use static whitespace-split argv over fixed standalone file paths. (The `tool` handler DOES implement `${...}` substitution as of P2 R2 — see `specs/core/p10`; draft.dot just doesn't use it yet, pending the R3 per-task_run worktree.)
 - The graph has exactly one start and one terminal and passes `NodeGraph::from_ast` with zero violations.
 
 ## Boundaries
@@ -30,8 +30,8 @@ scenario (added with the walk-test task).
 
 ### Forbidden
 
-- Do not modify any file under crates/agentd-core/** (D1 — the DOT grammar is frozen).
-- Do not use `${...}` / `$run_dir` substitution in any `cmd=` (the frozen tool handler does whitespace-split argv only).
+- Do not modify any file under crates/agentd-core/** (the DOT grammar is stable;
+  core engine changes are P2's own specs, not this workflow spec).
 
 ## Out of Scope
 

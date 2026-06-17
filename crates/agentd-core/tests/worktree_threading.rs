@@ -7,13 +7,13 @@
 use std::path::PathBuf;
 
 use agentd_core::dot::parser;
-use agentd_core::engine::{Engine, ParkReason, RunProgress};
+use agentd_core::engine::{Engine, EngineEvent, ParkReason, RunProgress};
 use agentd_core::graph::NodeGraph;
 use agentd_core::handler::{HandlerRegistry, Ports};
 use agentd_core::test_support::{
     FakeBackend, FixedClock, InMemoryStore, MempalStub, RecordingCommandRunner,
 };
-use agentd_core::types::{RunId, TaskRunId};
+use agentd_core::types::{Outcome, RunId, TaskRunId};
 
 struct Harness {
     run_id: RunId,
@@ -118,5 +118,68 @@ async fn engine_without_worktree_spawns_in_dot() {
         spawned[0].worktree,
         PathBuf::from("."),
         "no worktree preserves the current '.' default"
+    );
+}
+
+#[tokio::test]
+async fn tool_cmd_substitutes_worktree_and_context_var() {
+    // R2: a tool node's `${worktree}` resolves from the threaded worktree and
+    // `${task_run_id}` from the context the codergen node staged — proving the
+    // var map = context entries + worktree, substituted per argv element.
+    let src = r#"digraph wt {
+        "start" [shape=Mdiamond];
+        "impl"  [handler=codergen, role="implementer"];
+        "check" [handler=tool, cmd="verify --code ${worktree} --run ${task_run_id}"];
+        "done"  [shape=Msquare];
+        "start" -> "impl";
+        "impl"  -> "check";
+        "check" -> "done";
+    }"#;
+    let ast = parser::parse(src).expect("parse");
+    let g = NodeGraph::from_ast(&ast).expect("validate");
+    let h = Harness::new();
+    let wt = PathBuf::from("/tmp/wt-X");
+
+    let parked = h
+        .engine(&g, Some(wt.clone()))
+        .execute(&h.run_id)
+        .await
+        .expect("execute");
+    let tr = task_run_id(&parked); // codergen staged this into the context
+    let progress = h
+        .engine(&g, Some(wt.clone()))
+        .deliver_event(EngineEvent::AgentOutcomeSubmitted {
+            task_run_id: tr.clone(),
+            outcome: Outcome::success(),
+        })
+        .await
+        .expect("deliver");
+    assert_eq!(
+        progress,
+        RunProgress::Finished {
+            run_id: h.run_id.clone()
+        }
+    );
+
+    let call = h
+        .runner
+        .calls()
+        .into_iter()
+        .find(|c| c.program == "verify")
+        .expect("the tool node `check` ran `verify`");
+    assert!(
+        call.args.contains(&wt.to_string_lossy().into_owned()),
+        "${{worktree}} substituted to W: {:?}",
+        call.args
+    );
+    assert!(
+        call.args.contains(&tr.as_str().to_string()),
+        "${{task_run_id}} substituted from context: {:?}",
+        call.args
+    );
+    assert!(
+        !call.args.iter().any(|a| a.contains("${")),
+        "no literal '${{' remains: {:?}",
+        call.args
     );
 }
