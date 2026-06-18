@@ -11,11 +11,20 @@ tags: [core, store, bin, handler, p2, worktree, draft]
 ## Intent
 
 Make the worktree real (R1 reverted the wrong cwd model; R2 restored `${...}`
-substitution). R3a allocates a per-task_run worktree for the IMPLEMENTER agent
-(codergen), spawns the agent INTO it, persists it on `task_runs.worktree_path`
-(the column Foundation B left), and stages it into the run context so a later
-code tool resolves `${worktree}` to it — closing the loop the design intends
-(`agent-spec lifecycle … --code ${worktree}`).
+substitution). R3a is the INERT MECHANISM HALF (like C1a): the `WorktreeAllocator`
+port, the codergen reorder behind it, `set_task_run_worktree`, and the builder
+seam — so when an allocator IS injected, codergen allocates a per-task_run
+worktree, spawns the agent into it, persists `task_runs.worktree_path`, and stages
+it so a downstream tool resolves `${worktree}`. Proven by FAKE-allocator tests.
+
+INERT BY DESIGN: the daemon keeps passing `None` and execute.dot stays UNMIGRATED,
+so behavior is unchanged and every existing test stays green. ACTIVATION is R3b,
+done as ONE COHERENT UNIT — because half-activating strands the reviewers:
+injecting the allocator alone makes `implement` run in W while `review` (fan_out,
+out of R3a) still spawns in `"."` and `verify --code .` checks the wrong tree.
+R3b must inject + give reviewers W + migrate execute.dot's `verify` AND `review`
+together, with the real `start_run` e2e. R3a does NOT touch the daemon, agentd-tmux,
+or execute.dot.
 
 Load-bearing assumption (VERIFIED): a value codergen stages into the context
 survives the park/resume — `step_once` merges staged updates into `state.context`
@@ -46,10 +55,11 @@ worktree stages identically.
 - A new additive `Store` method `set_task_run_worktree(task_run_id, path)` writes
   `task_runs.worktree_path` (the existing column). Additive — no migration
   (Foundation B's harness guards future ones; this column already exists).
-- Migrate `execute.dot`'s `verify_lifecycle` `--code .` → `--code ${worktree}` so
-  the spec-acceptance gate verifies the IMPLEMENTER's worktree (R2's substitution
-  resolves it from the staged context). draft.dot needs no change (its tools read
-  `.agentd/run/` only; no `--code`).
+- `allocate → spawn → set_task_run_worktree` is NON-ATOMIC best-effort: a spawn
+  failure can orphan a freshly-allocated worktree, and a persist failure after a
+  successful spawn leaves W unrecorded. Acceptable for the MVP (same non-atomicity
+  class as the logged checkpoint/outcome gap); stated, not silent. Cleanup of
+  orphans is R3b's GC concern.
 - C1a SUPERSESSION (stated, not silent): per-task_run context-staging supersedes
   C1a's Engine-level `with_worktree` / `ctx.worktree()` — codergen now allocates
   locally and does NOT read the Engine worktree. C1a's threading is left INERT in
@@ -62,22 +72,26 @@ worktree stages identically.
 ### Allowed Changes
 
 - crates/agentd-core/** (the `WorktreeAllocator` port, codergen reorder, the
-  HandlerCtx/Engine builder, the Store-trait method)
+  HandlerCtx/Engine builder, the `Store`-trait method)
 - crates/agentd-store/** (the `set_task_run_worktree` impl)
-- crates/agentd-bin/** (inject the allocator + the daemon wiring)
-- crates/agentd-tmux/** (a `WorktreeAllocator` impl over `GitWorktreeProvider`)
-- workflows/execute.dot
-- specs/core/**, specs/workflow/p81-execute-dot.spec.md
+- specs/core/**
 
 ### Forbidden
 
-- Do not allocate worktrees for reviewers / `fan_out` (R3b — reviewers are not
-  task_runs; see Out of Scope).
-- Do not change `open_pr` to operate from the worktree (R3b — needs a branch).
+- Do NOT inject the allocator in the daemon, add a real (git) allocator impl, or
+  migrate any workflow — that is R3b's coherent ACTIVATION (see Out of Scope). The
+  daemon keeps passing `None`; R3a is inert.
+- Do not allocate worktrees for reviewers / `fan_out` (R3b).
 - No new migration: `task_runs.worktree_path` already exists.
 
-## Out of Scope (R3b — open questions, parked deliberately)
+## Out of Scope (R3b — activation + the open forks, parked deliberately)
 
+- ACTIVATION as one coherent unit: inject the real allocator in the daemon
+  (`agentd-bin`/`agentd-tmux` over `GitWorktreeProvider`), migrate execute.dot's
+  `verify_lifecycle` `--code .` → `--code ${worktree}` AND give `review`'s
+  reviewers W, and the REAL e2e (the p9 guard: a real `start_run` records the
+  allocated worktree, not `"."` — which only has something to assert once the
+  daemon injects, i.e. in R3b, not under an inert R3a).
 - REVIEWER worktrees: design line 168 says "each reviewer gets its own worktree
   pwd", but reviewers are spawned by `fan_out` and are NOT task_runs — keyed by
   what? sharing/forking the implementer's W? An open fork for R3b.
@@ -86,6 +100,10 @@ worktree stages identically.
 - RESTART: a persisted `worktree_path` points to a worktree P1.3 boot-GC would
   delete on restart; reuse-if-exists vs reallocate vs spare-in-flight is R3b. (Do
   NOT wire boot-GC in R3a.)
+- BOOT-GC NAMING: P1.3's boot-GC filter matches `wt-<digits>-<digits>`; the real
+  R3b allocator names worktrees by `task_run_id` (a ULID), which that filter won't
+  match — R3b must either name them to fit the filter or update the filter (with
+  its foreign-preservation test).
 - REMOVING C1a's now-vestigial Engine `with_worktree` threading — R3b cleanup.
 
 ## Completion Criteria (R3a)
