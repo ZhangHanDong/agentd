@@ -6,8 +6,8 @@
 
 use std::path::PathBuf;
 
-use sqlx::SqlitePool;
 use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::{Row, SqlitePool};
 
 fn migrations_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("migrations")
@@ -37,9 +37,9 @@ async fn apply(pool: &SqlitePool, file: &str) {
 // NOTE (design-faithful C1 redirect): the `0002 runs.worktree_path` migration was
 // REVERTED — the design's per-task_run worktree lives on the existing
 // `task_runs.worktree_path` (nullable in 0001), so no new column is needed for
-// the worktree. The harness below STANDS (model-agnostic, reusable); its first
-// REAL subject is now C2's `review_runs` round migration. Until then, the
-// self-test keeps it honest.
+// the worktree. The harness below STANDS (model-agnostic, reusable). P108 now
+// uses it for C2's `review_runs` round migration; the self-test still proves
+// the harness is not vacuous.
 
 #[tokio::test]
 async fn backcompat_harness_detects_row_loss() {
@@ -63,4 +63,34 @@ async fn backcompat_harness_detects_row_loss() {
         found.is_none(),
         "the harness observes row loss — its preservation check is real"
     );
+}
+
+#[tokio::test]
+async fn review_runs_round_migration_preserves_existing_rows() {
+    let pool = raw_pool().await;
+    apply(&pool, "0001_init.sql").await;
+    sqlx::query(
+        "INSERT INTO runs (id, workflow_sha, status, started_at, last_heartbeat) \
+         VALUES ('r1','sha','running',1,1)",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed run");
+    sqlx::query(
+        "INSERT INTO review_runs \
+         (id, run_id, node_id, expected, context_sha, started_at) \
+         VALUES ('rr1','r1','review',3,'csha',1)",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed old review run");
+
+    apply(&pool, "0002_review_runs_round.sql").await;
+
+    let row = sqlx::query("SELECT round FROM review_runs WHERE id = 'rr1'")
+        .fetch_one(&pool)
+        .await
+        .expect("review run survived");
+    let round: i64 = row.get("round");
+    assert_eq!(round, 1, "pre-migration review runs default to round 1");
 }

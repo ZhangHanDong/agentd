@@ -7,41 +7,35 @@ tags: [workflow, dot, p1, bootstrap, agent-spec]
 
 Ship a `bootstrap.dot` template: the brownfield entry point — point agentd at an
 existing codebase and get a starter spec out, so a repo with no specs can adopt
-the agent-spec/agentd loop. §7.3 P1.5 named `agent-spec discover --from-codebase`
-for this, but that subcommand does NOT exist in the shipped agent-spec (0.2.7) —
-it is a "Phase 9" future feature. Rather than ship a workflow whose tool node
-fails today (`unrecognized subcommand`), the AGENT performs the from-codebase
-discovery — an LLM reading the code and writing the spec, which is more faithful
-than a CLI heuristic anyway — scaffolded and quality-checked by the agent-spec
-commands that DO exist (`init`, `lint`).
+the agent-spec/agentd loop. P112 supersedes the original P85 fallback now that
+the installed `agent-spec` CLI ships `discover --from-codebase`: bootstrap uses
+the real discover command instead of parking a spec-writer agent.
 
-`start → scaffold (agent-spec init) → discover (agent reads code, writes the
-spec) → lint (agent-spec lint) → report → done`. Parks once, at `discover`.
+`start → discover_spec (agent-spec discover --from-codebase) → lint
+(agent-spec lint) → report → done`. It no longer parks.
 
 ## Decisions
 
 - The graph conforms to the frozen DOT grammar (passes `agentctl flow validate`,
-  so check.sh's dot-validate covers it) and composes only existing handlers
-  (`tool` / `codergen`) — no new grammar, no core change (D1).
-- `scaffold` is `tool` running `agent-spec init --level task --name bootstrap`,
-  which CREATES `bootstrap.spec.md` (verified — `init` writes a file, not
-  stdout). `discover` is `codergen` (`role="spec-writer"`): the agent reads the
-  codebase and fills that spec — this is the from-codebase discovery. `lint` is
-  `tool` running `agent-spec lint bootstrap.spec.md --min-score 0.7`.
+  so check.sh's dot-validate covers it) and composes only the existing `tool`
+  handler — no new grammar, no core change (D1).
+- `discover_spec` is `tool` running `agent-spec discover --from-codebase --code .
+  --name bootstrap --out bootstrap.spec.md`; `lint` is `tool` running
+  `agent-spec lint bootstrap.spec.md --min-score 0.7`.
 - LINEAR (no `goal_gate`, like draft.dot): `lint` is ADVISORY — a low-quality
   bootstrap still completes and surfaces, rather than blocking the terminal; a
-  human iterates. No recovery edge.
+  human iterates. Discovery itself must succeed before lint/report run. No
+  recovery edge.
 - `cmd=` strings are STATIC whitespace-split argv over the standalone convention
-  (the frozen tool handler does no `${...}`/cwd/env); `init`/`lint` operate on
-  `bootstrap.spec.md` in the run cwd, `report` on `.agentd/run/report.md`.
+  (the frozen tool handler does no `${...}`/cwd/env); `discover`/`lint` operate
+  on `bootstrap.spec.md` in the run cwd, `report` on `.agentd/run/report.md`.
 - WIRED to be launchable (not an inert file): the agentctl `Flow` value-enum
   gains a `Bootstrap` variant and the daemon's `flow_to_file` gains a `bootstrap`
   arm, sharing one wire string — the same flow-triple the §7.3 P1.7 round-trip
   tests (`flow_to_file_resolves_every_shipped_flow`,
   `cli_flow_variants_map_to_existing_files`) guard, now extended to cover it.
-- Proven by a walk-test on the REAL `Engine` over in-memory fakes (one codergen
-  park at `discover`; the tool nodes default to exit-0): the run reaches
-  `Finished`.
+- Proven by a walk-test on the REAL `Engine` over in-memory fakes: the all-tool
+  run reaches `Finished` without an agent park.
 
 ## Boundaries
 
@@ -57,14 +51,11 @@ spec) → lint (agent-spec lint) → report → done`. Parks once, at `discover`
 
 - Do not modify any file under crates/agentd-core/** (D1).
 - Do not add new handlers/grammar — compose only the existing vocabulary.
-- Do not reference `agent-spec discover` (unshipped) in the shipped workflow.
+- Do not park a spec-writer agent for bootstrap discovery now that the CLI
+  command exists.
 
 ## Out of Scope
 
-- The literal `agent-spec discover --from-codebase` integration — revisit when
-  agent-spec ships it (Phase 9); the agent-driven discovery stands in until then.
-- Seeding the agent's codebase context (`initial_prompt_includes`) — the MVP
-  real-env gap shared with draft/execute; the walk-test uses fake ports.
 - Real agent/tmux execution (deployment).
 
 ## Completion Criteria
@@ -76,9 +67,9 @@ Scenario: bootstrap.dot validates
   Then it returns Ok with no validation violations
 
 Scenario: bootstrap.dot walks to done
-  Test: bootstrap_dot_walks_to_done
+  Test: bootstrap_dot_walks_to_done_without_agent_park
   Given the bootstrap.dot graph on the real Engine with in-memory fake ports
-  When scaffold succeeds, the discover agent submits success, and lint/report succeed
+  When discover_spec, lint, and report succeed
   Then the run reaches Finished
 
 Scenario: the bootstrap flow is wired and launchable

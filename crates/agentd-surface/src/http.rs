@@ -13,7 +13,7 @@ use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::{IntoResponse, Json, Response};
+use axum::response::{Html, IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use futures::Stream;
 use serde::Deserialize;
@@ -44,10 +44,17 @@ impl std::fmt::Debug for AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/dashboard", get(dashboard))
+        .route("/dashboard/", get(dashboard))
         .route("/runs", post(start_run).get(get_runs))
         .route("/runs/:id", get(get_run))
         .route("/runs/:id/events", get(run_events))
         .with_state(state)
+}
+
+#[allow(clippy::unused_async)] // axum handlers are async; the shell is embedded.
+async fn dashboard() -> Html<&'static str> {
+    Html(include_str!("dashboard.html"))
 }
 
 /// `GET /runs` — the at-a-glance overview: every run's current status (P1).

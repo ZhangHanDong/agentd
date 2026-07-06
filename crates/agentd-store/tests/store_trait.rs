@@ -9,7 +9,7 @@ use agentd_core::dot::parser;
 use agentd_core::engine::{Engine, EngineEvent, ParkReason, RunProgress};
 use agentd_core::graph::NodeGraph;
 use agentd_core::handler::{HandlerRegistry, Ports};
-use agentd_core::ports::Store;
+use agentd_core::ports::{RunStatus, Store};
 use agentd_core::test_support::{FakeBackend, FixedClock, MempalStub, RecordingCommandRunner};
 use agentd_core::types::{
     AgentId, Artifact, ArtifactKind, NodeId, Outcome, ReviewVerdict, RunId, VerdictValue,
@@ -58,7 +58,7 @@ async fn review_verdict_dedup_and_open_closed_parity() {
     let run = RunId::from_string("r");
     s.insert_run(&run, "sha").await.expect("run");
     let rr = s
-        .insert_review_run(&run, &NodeId::parsed("review"), 3, "csha")
+        .insert_review_run(&run, &NodeId::parsed("review"), 3, 1, "csha")
         .await
         .expect("review run");
     assert_eq!(s.review_expected(&rr).await.expect("expected"), Some(3));
@@ -72,6 +72,7 @@ async fn review_verdict_dedup_and_open_closed_parity() {
     let vote = |who: &str| ReviewVerdict {
         reviewer_id: AgentId::parsed(who),
         value: VerdictValue::Pass,
+        findings: String::new(),
     };
     s.insert_review_verdict(&rr, vote("a")).await.expect("a");
     s.insert_review_verdict(&rr, vote("a"))
@@ -100,6 +101,314 @@ async fn review_verdict_dedup_and_open_closed_parity() {
         "closed at 3/3"
     );
     assert_eq!(s.list_verdicts(&rr).await.expect("list").len(), 3);
+}
+
+#[tokio::test]
+async fn review_verdict_findings_round_trip_first_wins() {
+    let (s, _d) = store().await;
+    let run = RunId::from_string("r");
+    s.insert_run(&run, "sha").await.expect("run");
+    let rr = s
+        .insert_review_run(&run, &NodeId::parsed("review"), 1, 1, "csha")
+        .await
+        .expect("review run");
+
+    s.insert_review_verdict(
+        &rr,
+        ReviewVerdict {
+            reviewer_id: AgentId::parsed("claude-sec"),
+            value: VerdictValue::Fail,
+            findings: "first finding".to_string(),
+        },
+    )
+    .await
+    .expect("first verdict");
+    s.insert_review_verdict(
+        &rr,
+        ReviewVerdict {
+            reviewer_id: AgentId::parsed("claude-sec"),
+            value: VerdictValue::Pass,
+            findings: "second finding must not overwrite".to_string(),
+        },
+    )
+    .await
+    .expect("duplicate verdict is a no-op");
+
+    let verdicts = s.list_verdicts(&rr).await.expect("list");
+    assert_eq!(verdicts.len(), 1, "duplicate reviewer is still first-wins");
+    assert_eq!(verdicts[0].value, VerdictValue::Fail);
+    assert_eq!(verdicts[0].findings, "first finding");
+}
+
+#[tokio::test]
+async fn reviewer_worktree_mapping_is_take_once() {
+    let (s, _d) = store().await;
+    let run = RunId::from_string("r");
+    s.insert_run(&run, "sha").await.expect("run");
+    let rr = s
+        .insert_review_run(&run, &NodeId::parsed("review"), 1, 1, "csha")
+        .await
+        .expect("review run");
+    let reviewer = AgentId::parsed("claude-sec");
+    let path = PathBuf::from("/tmp/review-claude-sec");
+
+    s.set_review_worktree(&rr, &reviewer, &path)
+        .await
+        .expect("set reviewer worktree");
+
+    assert_eq!(
+        s.take_review_worktree(&rr, &reviewer)
+            .await
+            .expect("take first"),
+        Some(path),
+        "first take returns the reviewer worktree"
+    );
+    assert_eq!(
+        s.take_review_worktree(&rr, &reviewer)
+            .await
+            .expect("take second"),
+        None,
+        "second take is empty so replayed verdicts cannot release twice"
+    );
+}
+
+#[tokio::test]
+async fn active_worktree_paths_include_non_finished_task_and_review_worktrees() {
+    let (s, _d) = store().await;
+
+    let running = RunId::from_string("running");
+    s.insert_run(&running, "sha").await.expect("running run");
+    let running_task = s
+        .insert_task_run(&running, &NodeId::parsed("implement"))
+        .await
+        .expect("running task");
+    s.set_task_run_worktree(
+        &running_task,
+        &PathBuf::from("/tmp/wt-task-tr_0123456789ABCDEFGHJKMNPQRS"),
+    )
+    .await
+    .expect("running task worktree");
+    s.complete_task_run(&running_task)
+        .await
+        .expect("task may be complete before workflow terminal");
+    let running_review = s
+        .insert_review_run(&running, &NodeId::parsed("review"), 2, 1, "csha")
+        .await
+        .expect("running review");
+    let released_reviewer = AgentId::parsed("released");
+    s.set_review_worktree(
+        &running_review,
+        &released_reviewer,
+        &PathBuf::from("/tmp/wt-review-rr_0123456789ABCDEFGHJKMNPQRS-released"),
+    )
+    .await
+    .expect("set released reviewer worktree");
+    assert!(
+        s.take_review_worktree(&running_review, &released_reviewer)
+            .await
+            .expect("release reviewer")
+            .is_some(),
+        "released reviewer path was present before take"
+    );
+    s.set_review_worktree(
+        &running_review,
+        &AgentId::parsed("active"),
+        &PathBuf::from("/tmp/wt-review-rr_0123456789ABCDEFGHJKMNPQRS-active"),
+    )
+    .await
+    .expect("set active reviewer worktree");
+
+    let failed = RunId::from_string("failed");
+    s.insert_run(&failed, "sha").await.expect("failed run");
+    let failed_task = s
+        .insert_task_run(&failed, &NodeId::parsed("implement"))
+        .await
+        .expect("failed task");
+    s.set_task_run_worktree(
+        &failed_task,
+        &PathBuf::from("/tmp/wt-task-tr_11111111111111111111111111"),
+    )
+    .await
+    .expect("failed task worktree");
+    let failed_review = s
+        .insert_review_run(&failed, &NodeId::parsed("review"), 1, 1, "csha")
+        .await
+        .expect("failed review");
+    s.set_review_worktree(
+        &failed_review,
+        &AgentId::parsed("debug"),
+        &PathBuf::from("/tmp/wt-review-rr_11111111111111111111111111-debug"),
+    )
+    .await
+    .expect("failed reviewer worktree");
+    s.update_run_status(&failed, RunStatus::Failed)
+        .await
+        .expect("mark failed");
+
+    let finished = RunId::from_string("finished");
+    s.insert_run(&finished, "sha").await.expect("finished run");
+    let finished_task = s
+        .insert_task_run(&finished, &NodeId::parsed("implement"))
+        .await
+        .expect("finished task");
+    s.set_task_run_worktree(
+        &finished_task,
+        &PathBuf::from("/tmp/wt-task-tr_22222222222222222222222222"),
+    )
+    .await
+    .expect("finished task worktree");
+    let finished_review = s
+        .insert_review_run(&finished, &NodeId::parsed("review"), 1, 1, "csha")
+        .await
+        .expect("finished review");
+    s.set_review_worktree(
+        &finished_review,
+        &AgentId::parsed("done"),
+        &PathBuf::from("/tmp/wt-review-rr_22222222222222222222222222-done"),
+    )
+    .await
+    .expect("finished reviewer worktree");
+    s.update_run_status(&finished, RunStatus::Finished)
+        .await
+        .expect("mark finished");
+
+    let paths = s.active_worktree_paths().await.expect("active paths");
+    let paths: std::collections::HashSet<PathBuf> = paths.into_iter().collect();
+
+    assert!(
+        paths.contains(&PathBuf::from("/tmp/wt-task-tr_0123456789ABCDEFGHJKMNPQRS")),
+        "running workflow keeps task worktree even after task_run completion"
+    );
+    assert!(
+        paths.contains(&PathBuf::from(
+            "/tmp/wt-review-rr_0123456789ABCDEFGHJKMNPQRS-active"
+        )),
+        "unreleased reviewer worktree for running workflow is active"
+    );
+    assert!(
+        paths.contains(&PathBuf::from("/tmp/wt-task-tr_11111111111111111111111111")),
+        "failed workflow keeps task worktree for debugging"
+    );
+    assert!(
+        paths.contains(&PathBuf::from(
+            "/tmp/wt-review-rr_11111111111111111111111111-debug"
+        )),
+        "failed workflow keeps unreleased reviewer worktree for debugging"
+    );
+    assert!(
+        !paths.contains(&PathBuf::from(
+            "/tmp/wt-review-rr_0123456789ABCDEFGHJKMNPQRS-released"
+        )),
+        "released reviewer worktree is no longer active"
+    );
+    assert!(
+        !paths.contains(&PathBuf::from("/tmp/wt-task-tr_22222222222222222222222222")),
+        "finished workflow task worktree is boot-GC cleanup debris"
+    );
+    assert!(
+        !paths.contains(&PathBuf::from(
+            "/tmp/wt-review-rr_22222222222222222222222222-done"
+        )),
+        "finished workflow reviewer worktree is boot-GC cleanup debris"
+    );
+}
+
+#[tokio::test]
+async fn failed_worktree_cleanup_candidates_include_only_failed_runs() {
+    let (s, _d) = store().await;
+
+    let running = RunId::from_string("cleanup-running");
+    s.insert_run(&running, "sha").await.expect("running run");
+    let running_task = s
+        .insert_task_run(&running, &NodeId::parsed("implement"))
+        .await
+        .expect("running task");
+    let running_task_path = PathBuf::from(format!("/tmp/wt-task-{}", running_task.as_str()));
+    s.set_task_run_worktree(&running_task, &running_task_path)
+        .await
+        .expect("running worktree");
+
+    let failed = RunId::from_string("cleanup-failed");
+    s.insert_run(&failed, "sha").await.expect("failed run");
+    let failed_task = s
+        .insert_task_run(&failed, &NodeId::parsed("implement"))
+        .await
+        .expect("failed task");
+    let failed_task_path = PathBuf::from(format!("/tmp/wt-task-{}", failed_task.as_str()));
+    s.set_task_run_worktree(&failed_task, &failed_task_path)
+        .await
+        .expect("failed task worktree");
+    let failed_review = s
+        .insert_review_run(&failed, &NodeId::parsed("review"), 2, 1, "csha")
+        .await
+        .expect("failed review");
+    let failed_reviewer = AgentId::parsed("debug");
+    let failed_review_path = PathBuf::from(format!(
+        "/tmp/wt-review-{}-{}",
+        failed_review.as_str(),
+        failed_reviewer.as_str()
+    ));
+    s.set_review_worktree(&failed_review, &failed_reviewer, &failed_review_path)
+        .await
+        .expect("failed review worktree");
+    let released_reviewer = AgentId::parsed("released");
+    let released_review_path = PathBuf::from(format!(
+        "/tmp/wt-review-{}-{}",
+        failed_review.as_str(),
+        released_reviewer.as_str()
+    ));
+    s.set_review_worktree(&failed_review, &released_reviewer, &released_review_path)
+        .await
+        .expect("released review worktree");
+    assert!(
+        s.take_review_worktree(&failed_review, &released_reviewer)
+            .await
+            .expect("take released reviewer")
+            .is_some(),
+        "released reviewer worktree existed before take"
+    );
+    s.update_run_status(&failed, RunStatus::Failed)
+        .await
+        .expect("mark failed");
+
+    let finished = RunId::from_string("cleanup-finished");
+    s.insert_run(&finished, "sha").await.expect("finished run");
+    let finished_task = s
+        .insert_task_run(&finished, &NodeId::parsed("implement"))
+        .await
+        .expect("finished task");
+    let finished_task_path = PathBuf::from(format!("/tmp/wt-task-{}", finished_task.as_str()));
+    s.set_task_run_worktree(&finished_task, &finished_task_path)
+        .await
+        .expect("finished worktree");
+    s.update_run_status(&finished, RunStatus::Finished)
+        .await
+        .expect("mark finished");
+
+    let candidates = s
+        .failed_worktree_cleanup_candidates()
+        .await
+        .expect("cleanup candidates");
+    let candidate_pairs: std::collections::HashSet<(String, PathBuf)> = candidates
+        .iter()
+        .map(|candidate| (candidate.key.clone(), candidate.path.clone()))
+        .collect();
+
+    assert_eq!(
+        candidate_pairs,
+        std::collections::HashSet::from([
+            (failed_task.as_str().to_string(), failed_task_path),
+            (
+                format!(
+                    "review-{}-{}",
+                    failed_review.as_str(),
+                    failed_reviewer.as_str()
+                ),
+                failed_review_path,
+            ),
+        ]),
+        "only failed-run task and unreleased reviewer worktrees are cleanup candidates"
+    );
 }
 
 #[tokio::test]
@@ -227,6 +536,7 @@ async fn engine_runs_canonical_flow_against_sqlite_store() {
                     review_run_id: review_run_id.clone(),
                     reviewer_id: AgentId::parsed(reviewer),
                     verdict: VerdictValue::Pass,
+                    findings: String::new(),
                 })
                 .await
                 .expect("verdict"),

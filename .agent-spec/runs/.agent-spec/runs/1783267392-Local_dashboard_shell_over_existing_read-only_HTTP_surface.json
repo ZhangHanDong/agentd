@@ -1,0 +1,10 @@
+{
+  "spec_name": "Local dashboard shell over existing read-only HTTP surface",
+  "passing": true,
+  "summary": "5/5 passed, 0 failed, 0 skipped, 0 uncertain",
+  "timestamp": 1783267392,
+  "vcs": {
+    "vcs_type": "git",
+    "change_ref": "4229024"
+  }
+}

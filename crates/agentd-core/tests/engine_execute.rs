@@ -217,6 +217,17 @@ const CANONICAL: &str = r#"digraph m {
     "aggregate" -> "end";
 }"#;
 
+const DELPHI_LOOP_GRAPH: &str = r#"digraph m {
+    "start" [shape=Mdiamond];
+    "review" [handler="parallel.fan_out", reviewers="claude-sec,codex-perf", visibility=delphi, max_rounds=3];
+    "aggregate" [handler="parallel.fan_in", aggregator="converge_or_majority_pass"];
+    "end" [shape=Msquare];
+    "start" -> "review";
+    "review" -> "aggregate";
+    "aggregate" -> "end" [condition="outcome=success"];
+    "aggregate" -> "review" [condition="outcome=partial_success"];
+}"#;
+
 #[tokio::test]
 async fn engine_full_canonical_dot_runs_to_completion_with_fakes() {
     let h = Harness::new();
@@ -256,6 +267,7 @@ async fn engine_full_canonical_dot_runs_to_completion_with_fakes() {
         ParkReason::ReviewVerdicts {
             review_run_id,
             expected,
+            ..
         } => {
             assert_eq!(*expected, 3);
             review_run_id.clone()
@@ -274,12 +286,78 @@ async fn engine_full_canonical_dot_runs_to_completion_with_fakes() {
                     review_run_id: review_run_id.clone(),
                     reviewer_id: agentd_core::types::AgentId::parsed(reviewer),
                     verdict: VerdictValue::Pass,
+                    findings: String::new(),
                 })
                 .await
                 .expect("deliver verdict"),
         );
     }
     assert_eq!(last.expect("a final progress"), finished(&h.run_id));
+}
+
+#[tokio::test]
+async fn engine_delphi_loop_reparks_second_round_before_max() {
+    let h = Harness::new();
+    let ast = parser::parse(DELPHI_LOOP_GRAPH).expect("parse");
+    let g = NodeGraph::from_ast(&ast).expect("validated Delphi graph");
+    let engine = h.engine(&g);
+
+    let parked = engine.execute(&h.run_id).await.expect("execute");
+    let first_review_run_id: ReviewRunId = match park_reason(&parked) {
+        ParkReason::ReviewVerdicts {
+            review_run_id,
+            expected,
+            round,
+        } => {
+            assert_eq!(*expected, 2);
+            assert_eq!(*round, 1);
+            review_run_id.clone()
+        }
+        other => panic!("expected ReviewVerdicts, got {other:?}"),
+    };
+
+    let first = engine
+        .deliver_event(EngineEvent::ReviewVerdictSubmitted {
+            review_run_id: first_review_run_id.clone(),
+            reviewer_id: agentd_core::types::AgentId::parsed("claude-sec"),
+            verdict: VerdictValue::Pass,
+            findings: String::new(),
+        })
+        .await
+        .expect("first verdict");
+    assert!(matches!(first, RunProgress::Parked { .. }));
+
+    let second = engine
+        .deliver_event(EngineEvent::ReviewVerdictSubmitted {
+            review_run_id: first_review_run_id.clone(),
+            reviewer_id: agentd_core::types::AgentId::parsed("codex-perf"),
+            verdict: VerdictValue::Fail,
+            findings: String::new(),
+        })
+        .await
+        .expect("second verdict");
+
+    match second {
+        RunProgress::Parked {
+            node_id,
+            reason:
+                ParkReason::ReviewVerdicts {
+                    review_run_id,
+                    expected,
+                    round,
+                },
+            ..
+        } => {
+            assert_eq!(node_id, NodeId::parsed("review"));
+            assert_eq!(expected, 2);
+            assert_eq!(round, 2);
+            assert_ne!(
+                review_run_id, first_review_run_id,
+                "round 2 should create a fresh review run"
+            );
+        }
+        other => panic!("expected round-2 review park, got {other:?}"),
+    }
 }
 
 // ─── STEP_CEILING backstop (regression for the engine review) ────────

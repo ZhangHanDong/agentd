@@ -1,0 +1,10 @@
+{
+  "spec_name": "Real Claude stdio smoke harness",
+  "passing": true,
+  "summary": "6/6 passed, 0 failed, 0 skipped, 0 uncertain",
+  "timestamp": 1783280779,
+  "vcs": {
+    "vcs_type": "git",
+    "change_ref": "4229024"
+  }
+}

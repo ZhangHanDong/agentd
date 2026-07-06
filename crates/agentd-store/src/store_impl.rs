@@ -5,7 +5,8 @@
 use agentd_core::CoreError;
 use agentd_core::engine::Checkpoint;
 use agentd_core::ports::{RunStatus, Store};
-use agentd_core::types::{NodeId, Outcome, ReviewRunId, ReviewVerdict, RunId, TaskRunId};
+use agentd_core::types::{AgentId, NodeId, Outcome, ReviewRunId, ReviewVerdict, RunId, TaskRunId};
+use std::path::{Path, PathBuf};
 
 use crate::store::SqliteStore;
 use crate::{checkpoint_repo, human_wait_repo, outcome_repo, review_repo, run_repo, task_repo};
@@ -75,12 +76,18 @@ impl Store for SqliteStore {
         run_id: &RunId,
         node_id: &NodeId,
         expected: usize,
+        round: u32,
         context_sha: &str,
     ) -> Result<ReviewRunId, CoreError> {
-        Ok(
-            review_repo::insert_review_run(self.pool(), run_id, node_id, expected, context_sha)
-                .await?,
+        Ok(review_repo::insert_review_run(
+            self.pool(),
+            run_id,
+            node_id,
+            expected,
+            round,
+            context_sha,
         )
+        .await?)
     }
 
     async fn lookup_park_by_review_run(
@@ -109,11 +116,36 @@ impl Store for SqliteStore {
         Ok(review_repo::review_expected(self.pool(), review_run_id).await?)
     }
 
+    async fn review_round(&self, review_run_id: &ReviewRunId) -> Result<Option<u32>, CoreError> {
+        Ok(review_repo::review_round(self.pool(), review_run_id).await?)
+    }
+
     async fn list_verdicts(
         &self,
         review_run_id: &ReviewRunId,
     ) -> Result<Vec<ReviewVerdict>, CoreError> {
         Ok(review_repo::list_verdicts(self.pool(), review_run_id).await?)
+    }
+
+    async fn set_review_worktree(
+        &self,
+        review_run_id: &ReviewRunId,
+        reviewer_id: &AgentId,
+        path: &Path,
+    ) -> Result<(), CoreError> {
+        let path = path.to_string_lossy();
+        Ok(
+            review_repo::set_review_worktree(self.pool(), review_run_id, reviewer_id, &path)
+                .await?,
+        )
+    }
+
+    async fn take_review_worktree(
+        &self,
+        review_run_id: &ReviewRunId,
+        reviewer_id: &AgentId,
+    ) -> Result<Option<PathBuf>, CoreError> {
+        Ok(review_repo::take_review_worktree(self.pool(), review_run_id, reviewer_id).await?)
     }
 
     async fn insert_task_run(
@@ -122,6 +154,23 @@ impl Store for SqliteStore {
         node_id: &NodeId,
     ) -> Result<TaskRunId, CoreError> {
         Ok(task_repo::insert_task_run(self.pool(), run_id, node_id).await?)
+    }
+
+    async fn set_task_run_agent(
+        &self,
+        task_run_id: &TaskRunId,
+        agent_id: &AgentId,
+    ) -> Result<(), CoreError> {
+        Ok(task_repo::set_task_run_agent(self.pool(), task_run_id, agent_id).await?)
+    }
+
+    async fn set_task_run_worktree(
+        &self,
+        task_run_id: &TaskRunId,
+        path: &Path,
+    ) -> Result<(), CoreError> {
+        let path = path.to_string_lossy();
+        Ok(task_repo::set_task_run_worktree(self.pool(), task_run_id, &path).await?)
     }
 
     async fn complete_task_run(&self, task_run_id: &TaskRunId) -> Result<(), CoreError> {

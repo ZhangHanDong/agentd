@@ -1,27 +1,25 @@
 // bootstrap.dot — the brownfield entry point (§7.3 P1.5): point agentd at an
-// EXISTING codebase and get a starter spec out. agent-spec has no
-// `discover --from-codebase` (Phase 9, unshipped in 0.2.7), so the AGENT does the
-// from-codebase discovery — reads the code and writes the spec — scaffolded by
-// `agent-spec init` and quality-checked by `agent-spec lint`. Parks once, at
-// `discover` (the spec-writer agent).
+// EXISTING codebase and get a starter spec out. agent-spec now ships
+// `discover --from-codebase`, so bootstrap is an all-tool workflow: discover the
+// initial spec, lint it, surface the report, and finish without parking an
+// agent.
 //
 // Conforms to the frozen agentd-core DOT grammar (codergen/tool, one Mdiamond
 // start, one Msquare terminal). LINEAR — `lint` is ADVISORY (no goal_gate, like
 // draft.dot): a low-quality bootstrap still completes and surfaces; a human
-// iterates. cmd= strings are STATIC whitespace-split argv (the frozen tool
-// handler does no ${...}/cwd/env); `init`/`lint` act on `bootstrap.spec.md` in
-// the run cwd, `report` on the `.agentd/run/*` convention.
+// iterates. Discovery itself must succeed before lint/report run. cmd= strings
+// are STATIC whitespace-split argv (the frozen tool handler does no
+// ${...}/cwd/env); `discover`/`lint` act on `bootstrap.spec.md` in the run cwd,
+// `report` on the `.agentd/run/*` convention.
 digraph bootstrap {
-  "start"     [shape=Mdiamond];
-  "scaffold"  [handler="tool", cmd="agent-spec init --level task --name bootstrap", timeout_secs="30"];
-  "discover"  [handler="codergen", role="spec-writer", initial_prompt_includes="repo_path,code_summary"];
-  "lint_spec" [handler="tool", cmd="agent-spec lint bootstrap.spec.md --min-score 0.7", timeout_secs="120"];
-  "report"    [handler="tool", cmd="cat .agentd/run/report.md", timeout_secs="30"];
-  "done"      [shape=Msquare];
+  "start"         [shape=Mdiamond];
+  "discover_spec" [handler="tool", cmd="agent-spec discover --from-codebase --code . --name bootstrap --out bootstrap.spec.md", timeout_secs="120"];
+  "lint_spec"     [handler="tool", cmd="agent-spec lint bootstrap.spec.md --min-score 0.7", timeout_secs="120"];
+  "report"        [handler="tool", cmd="cat .agentd/run/report.md", timeout_secs="30"];
+  "done"          [shape=Msquare];
 
-  "start"     -> "scaffold";
-  "scaffold"  -> "discover";
-  "discover"  -> "lint_spec";
-  "lint_spec" -> "report";
-  "report"    -> "done";
+  "start"         -> "discover_spec";
+  "discover_spec" -> "lint_spec" [condition="outcome=success"];
+  "lint_spec"     -> "report";
+  "report"        -> "done";
 }

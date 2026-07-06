@@ -10,10 +10,12 @@ use std::sync::{Arc, Mutex};
 
 use agentd_core::CoreError;
 use agentd_core::dot::parser;
-use agentd_core::engine::{Checkpoint, Engine, EngineEvent, RunProgress};
+use agentd_core::engine::{Checkpoint, Engine, EngineEvent, ParkReason, RunProgress};
 use agentd_core::graph::NodeGraph;
 use agentd_core::handler::{HandlerRegistry, Ports};
-use agentd_core::ports::{AgentBackend, Clock, CommandRunner, MempalClient, Store};
+use agentd_core::ports::{
+    AgentBackend, Clock, CommandRunner, MempalClient, Store, WorktreeAllocator,
+};
 use agentd_core::types::{NodeId, ReviewRunId, RunId};
 use agentd_store::{SqliteStore, event_repo, review_repo, run_repo, task_repo};
 use agentd_surface::host::{
@@ -56,6 +58,7 @@ pub struct ProductionRunHost {
     runner: Box<dyn CommandRunner>,
     mempal: Box<dyn MempalClient>,
     clock: Box<dyn Clock>,
+    worktree_allocator: Option<Box<dyn WorktreeAllocator>>,
     registry: HandlerRegistry,
     workflows_dir: PathBuf,
     /// The live-event broadcast (P1): the emit point publishes here for the SSE
@@ -90,6 +93,7 @@ impl ProductionRunHost {
             runner,
             mempal,
             clock,
+            worktree_allocator: None,
             registry: HandlerRegistry::with_builtins(),
             workflows_dir: workflows_dir.into(),
             live_tx: broadcast::channel(LIVE_BROADCAST_CAPACITY).0,
@@ -101,6 +105,16 @@ impl ProductionRunHost {
     #[must_use]
     pub fn store(&self) -> &SqliteStore {
         &self.store
+    }
+
+    /// Inject the optional per-`task_run` worktree allocator used by codergen.
+    #[must_use]
+    pub fn with_worktree_allocator(
+        mut self,
+        allocator: Option<Box<dyn WorktreeAllocator>>,
+    ) -> Self {
+        self.worktree_allocator = allocator;
+        self
     }
 
     /// Re-read + build the run's graph from `runs.workflow_path`, returning it
@@ -137,6 +151,7 @@ impl ProductionRunHost {
             },
             sha.to_string(),
         )
+        .with_worktree_allocator(self.worktree_allocator.as_deref())
     }
 
     /// Start a run: resolve its graph and execute from the start node to the
@@ -162,6 +177,14 @@ impl ProductionRunHost {
     /// JSON (no newlines — avoids the P0.7 D9 SSE CR/LF hazard).
     async fn emit(&self, run_id: &RunId, progress: &RunProgress) -> Result<(), CoreError> {
         let (kind, payload) = match progress {
+            RunProgress::Parked {
+                node_id,
+                reason: ParkReason::ReviewVerdicts { round, .. },
+                ..
+            } => (
+                "run_parked",
+                serde_json::json!({ "node": node_id.as_str(), "round": round }),
+            ),
             RunProgress::Parked { node_id, .. } => (
                 "run_parked",
                 serde_json::json!({ "node": node_id.as_str() }),
@@ -311,16 +334,16 @@ impl RunHost for ProductionRunHost {
         node_id: &NodeId,
     ) -> Result<Option<TaskAssignment>, CoreError> {
         let found = task_repo::find_open_task_run(self.store.pool(), run_id, node_id).await?;
-        Ok(found.map(|(task_run_id, worktree)| TaskAssignment {
-            task_run_id,
-            // agent_id/spec_path/plan_path/context_pack have no columns (P0.9 D5
-            // known gap); populated by the spawn context in the real-env path.
-            agent_id: String::new(),
-            worktree,
-            spec_path: None,
-            plan_path: None,
-            context_pack: None,
-        }))
+        Ok(
+            found.map(|(task_run_id, worktree, agent_id)| TaskAssignment {
+                task_run_id,
+                agent_id: agent_id.unwrap_or_default(),
+                worktree,
+                spec_path: None,
+                plan_path: None,
+                context_pack: None,
+            }),
+        )
     }
 
     async fn review_counts(
@@ -381,12 +404,34 @@ fn sha256_hex(data: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{RunLockRegistry, flow_to_file};
+    use super::{ProductionRunHost, RunLockRegistry, flow_to_file};
+    use crate::SystemClock;
+    use agentd_core::engine::{ParkReason, RunProgress};
+    use agentd_core::test_support::{FakeBackend, MempalStub, RecordingCommandRunner};
+    use agentd_core::types::{NodeId, ReviewRunId, RunId};
+    use agentd_store::{SqliteStore, run_repo};
+    use agentd_surface::host::RunHost;
     use std::path::PathBuf;
     use std::sync::Arc;
 
     fn workflows_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workflows")
+    }
+
+    async fn host_for_emit_tests() -> (ProductionRunHost, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SqliteStore::connect(&dir.path().join("agentd.db"))
+            .await
+            .expect("connect");
+        let host = ProductionRunHost::new(
+            store,
+            Box::new(FakeBackend::new()),
+            Box::new(RecordingCommandRunner::new()),
+            Box::new(MempalStub::new()),
+            Box::new(SystemClock),
+            workflows_dir(),
+        );
+        (host, dir)
     }
 
     #[test]
@@ -429,5 +474,46 @@ mod tests {
             );
         }
         assert!(flow_to_file("bogus").is_none(), "unknown flow -> None");
+    }
+
+    #[tokio::test]
+    async fn production_runhost_emits_review_reparks_when_round_differs() {
+        let (host, _dir) = host_for_emit_tests().await;
+        let run = RunId::from_string("round-dedup");
+        run_repo::record_run(host.store().pool(), &run, "execute.dot", "sha")
+            .await
+            .expect("record");
+
+        for round in [1, 2] {
+            host.emit(
+                &run,
+                &RunProgress::Parked {
+                    run_id: run.clone(),
+                    node_id: NodeId::parsed("review"),
+                    reason: ParkReason::ReviewVerdicts {
+                        review_run_id: ReviewRunId::from_string(format!("rr{round}")),
+                        expected: 3,
+                        round,
+                    },
+                },
+            )
+            .await
+            .expect("emit");
+        }
+
+        let events = host.events_from(&run, 0).await.expect("events");
+        let payloads: Vec<&str> = events
+            .iter()
+            .filter(|e| e.kind == "run_parked")
+            .map(|e| e.payload.as_str())
+            .collect();
+        assert_eq!(
+            payloads,
+            vec![
+                r#"{"node":"review","round":1}"#,
+                r#"{"node":"review","round":2}"#
+            ],
+            "different review rounds survive payload-based dedup"
+        );
     }
 }

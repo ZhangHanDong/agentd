@@ -15,7 +15,8 @@ pub struct SubmitReviewInput {
     pub review_run_id: String,
     pub reviewer_id: String,
     pub verdict: String,
-    /// Accepted but opaque in v0 — the daemon persists findings later.
+    /// Structured MCP findings. The engine/store layer treats the serialized
+    /// JSON as opaque text.
     #[serde(default)]
     pub findings: Vec<Value>,
 }
@@ -43,12 +44,15 @@ pub async fn submit_review(
         "blocker" => VerdictValue::Block,
         other => return Err(SurfaceError::Internal(format!("invalid verdict {other:?}"))),
     };
+    let findings = serde_json::to_string(&input.findings)
+        .map_err(|err| SurfaceError::Internal(format!("serialize findings: {err}")))?;
 
     let progress = host
         .deliver(EngineEvent::ReviewVerdictSubmitted {
             review_run_id: review_run_id.clone(),
             reviewer_id,
             verdict,
+            findings,
         })
         .await?;
     if let RunProgress::Ignored { .. } = progress {

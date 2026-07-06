@@ -41,6 +41,15 @@ fn req(worktree: &Path, strategy: LaunchStrategy) -> SpawnRequest {
     }
 }
 
+fn req_with_mcp_stdio(worktree: &Path, strategy: LaunchStrategy) -> SpawnRequest {
+    let mut request = req(worktree, strategy);
+    request.env_overrides.insert(
+        "AGENTD_MCP_STDIO_CMD".to_string(),
+        "agentd --db-path '/tmp/agentd db.sqlite' mcp-stdio".to_string(),
+    );
+    request
+}
+
 #[tokio::test]
 async fn spawn_returns_handle_with_parsed_pane_id() {
     let rec = Arc::new(RecordingCommandRunner::new());
@@ -121,6 +130,78 @@ async fn spawn_writes_launcher_and_amends_gitignore() {
 }
 
 #[tokio::test]
+async fn spawn_launcher_configures_claude_mcp_when_stdio_command_is_present() {
+    let rec = Arc::new(RecordingCommandRunner::new());
+    rec.push_output(ok("", 1));
+    rec.push_output(ok("", 0));
+    rec.push_output(ok("%1 222\n", 0));
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    backend(&rec)
+        .spawn(req_with_mcp_stdio(dir.path(), LaunchStrategy::Direct))
+        .await
+        .expect("spawn succeeds");
+
+    let mcp_config = dir.path().join(".agentd-mcp-claude-impl-a.json");
+    assert!(mcp_config.is_file(), "mcp config should be written");
+    let config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&mcp_config).expect("read mcp config"))
+            .expect("mcp config is valid json");
+    let agentd = &config["mcpServers"]["agentd"];
+    assert_eq!(agentd["type"], "stdio");
+    assert_eq!(agentd["command"], "sh");
+    assert_eq!(agentd["args"][0], "-lc");
+    assert_eq!(
+        agentd["args"][1],
+        "agentd --db-path '/tmp/agentd db.sqlite' mcp-stdio"
+    );
+
+    let launcher = dir.path().join(".agentd-launcher-claude-impl-a.sh");
+    let script = std::fs::read_to_string(&launcher).expect("read launcher");
+    assert!(
+        script.contains("exec claude --mcp-config "),
+        "launcher should pass --mcp-config: {script}"
+    );
+    assert!(
+        script.contains(".agentd-mcp-claude-impl-a.json"),
+        "launcher should point at the per-agent config: {script}"
+    );
+    assert!(
+        script.contains(" --strict-mcp-config"),
+        "launcher should restrict Claude to the generated config: {script}"
+    );
+}
+
+#[tokio::test]
+async fn spawn_without_stdio_command_keeps_plain_claude_launcher() {
+    let rec = Arc::new(RecordingCommandRunner::new());
+    rec.push_output(ok("", 1));
+    rec.push_output(ok("", 0));
+    rec.push_output(ok("%1 222\n", 0));
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    backend(&rec)
+        .spawn(req(dir.path(), LaunchStrategy::Direct))
+        .await
+        .expect("spawn succeeds");
+
+    assert!(
+        !dir.path().join(".agentd-mcp-claude-impl-a.json").exists(),
+        "plain launcher should not write an MCP config"
+    );
+    let launcher = dir.path().join(".agentd-launcher-claude-impl-a.sh");
+    let script = std::fs::read_to_string(&launcher).expect("read launcher");
+    assert!(
+        script.contains("exec claude\n"),
+        "launcher should keep plain claude exec: {script}"
+    );
+    assert!(
+        !script.contains("--mcp-config"),
+        "plain launcher should not pass mcp flags: {script}"
+    );
+}
+
+#[tokio::test]
 async fn spawn_systemd_strategy_wraps_launch() {
     let rec = Arc::new(RecordingCommandRunner::new());
     rec.push_output(ok("", 1));
@@ -197,6 +278,29 @@ async fn spawn_existing_session_skips_launcher() {
     assert!(
         !launcher.exists(),
         "no launcher when the session already exists"
+    );
+    assert_eq!(rec.calls().len(), 1, "only the has-session probe ran");
+}
+
+#[tokio::test]
+async fn spawn_existing_session_skips_mcp_config_artifacts() {
+    let rec = Arc::new(RecordingCommandRunner::new());
+    rec.push_output(ok("", 0)); // session exists
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let _ = backend(&rec)
+        .spawn(req_with_mcp_stdio(dir.path(), LaunchStrategy::Direct))
+        .await;
+
+    assert!(
+        !dir.path()
+            .join(".agentd-launcher-claude-impl-a.sh")
+            .exists(),
+        "no launcher when the session already exists"
+    );
+    assert!(
+        !dir.path().join(".agentd-mcp-claude-impl-a.json").exists(),
+        "no mcp config when the session already exists"
     );
     assert_eq!(rec.calls().len(), 1, "only the has-session probe ran");
 }
@@ -312,6 +416,40 @@ async fn spawn_twice_amends_gitignore_once() {
         .filter(|line| line.trim() == ".agentd-launcher-*.sh")
         .count();
     assert_eq!(count, 1, "pattern written exactly once: {gitignore:?}");
+}
+
+#[tokio::test]
+async fn spawn_gitignore_excludes_launcher_and_mcp_config_artifacts() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for pane in ["%1 1\n", "%2 2\n"] {
+        let rec = Arc::new(RecordingCommandRunner::new());
+        rec.push_output(ok("", 1));
+        rec.push_output(ok("", 0));
+        rec.push_output(ok(pane, 0));
+        backend(&rec)
+            .spawn(req_with_mcp_stdio(dir.path(), LaunchStrategy::Direct))
+            .await
+            .expect("spawn succeeds");
+    }
+
+    let gitignore =
+        std::fs::read_to_string(dir.path().join(".gitignore")).expect("read .gitignore");
+    let launcher_count = gitignore
+        .lines()
+        .filter(|line| line.trim() == ".agentd-launcher-*.sh")
+        .count();
+    let mcp_config_count = gitignore
+        .lines()
+        .filter(|line| line.trim() == ".agentd-mcp-*.json")
+        .count();
+    assert_eq!(
+        launcher_count, 1,
+        "launcher pattern written exactly once: {gitignore:?}"
+    );
+    assert_eq!(
+        mcp_config_count, 1,
+        "mcp config pattern written exactly once: {gitignore:?}"
+    );
 }
 
 #[tokio::test]

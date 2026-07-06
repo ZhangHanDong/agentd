@@ -15,6 +15,8 @@ worktree↔cwd conflict that cwd-threading (the reverted C1a) created.
 
 R2 is the MECHANISM. The shipped workflows still use static paths; they migrate to
 `${worktree}` in R3, once the per-task_run allocation makes that value real.
+The old Engine-level C1a worktree threading is superseded by the task-run worktree path,
+so `${worktree}` is now just another staged context variable.
 
 ## Decisions
 
@@ -22,9 +24,9 @@ R2 is the MECHANISM. The shipped workflows still use static paths; they migrate 
   split (program + each arg) — so a substituted value containing spaces stays ONE
   argv element, and there is no shell (argv exec), no re-split hazard, no shell
   injection surface.
-- The variable map for a tool node is: every top-level STRING entry in
-  `ctx.context` (e.g. `spec_path` / `task_run_id` once staged by a prior node),
-  PLUS `worktree` ← `ctx.worktree()` (absent when no worktree is threaded).
+- The variable map for a tool node is every top-level STRING entry in
+  `ctx.context` (e.g. `spec_path`, `task_run_id`, and `worktree` once staged by
+  a prior node). There is no hidden `ctx.worktree()` fallback.
 - An unknown `${name}` (not in the map) or an unterminated `${` is a LOUD error
   (`CoreError::Invariant` naming the node + the offending token) — never a silent
   passthrough or empty string. Substitution is a SINGLE pass: a value that itself
@@ -50,8 +52,7 @@ R2 is the MECHANISM. The shipped workflows still use static paths; they migrate 
 
 - Do not change any shipped workflow `cmd=` to use `${...}` (that is R3, which
   needs the real per-task_run worktree value).
-- Do not make the daemon pass a real worktree (R3); `ctx.worktree()` stays `None`
-  from the daemon for now.
+- Do not reintroduce Engine-level or HandlerCtx-level worktree threading.
 
 ## Out of Scope
 
@@ -80,8 +81,8 @@ Scenario: text without a substitution token is unchanged
   When it is substituted
   Then the result is byte-identical to the input
 
-Scenario: a tool node substitutes the threaded worktree and a context var
+Scenario: a tool node substitutes the staged worktree and a context var
   Test: tool_cmd_substitutes_worktree_and_context_var
-  Given an Engine with_worktree(Some(W)) and a graph whose codergen stages task_run_id then a tool node runs cmd "verify --code ${worktree} --run ${task_run_id}"
+  Given an Engine with a fake WorktreeAllocator returning W and a graph whose codergen stages worktree and task_run_id before a tool node runs cmd "verify --code ${worktree} --run ${task_run_id}"
   When the codergen outcome is delivered and the tool node runs
   Then the recorded tool call's args contain W and the staged task_run_id, with no literal "${" remaining

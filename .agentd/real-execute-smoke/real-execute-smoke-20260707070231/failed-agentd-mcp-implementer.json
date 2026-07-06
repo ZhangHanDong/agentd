@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "agentd": {
+      "args": [
+        "-lc",
+        "'/Users/zhangalex/Work/Projects/AI/agentd/target/debug/agentd' --db-path '/Users/zhangalex/Work/Projects/AI/agentd/.agentd/real-execute-smoke/real-execute-smoke-20260707070231/agentd.db' --workflows-dir '/Users/zhangalex/Work/Projects/AI/agentd/workflows' --repo-dir '/Users/zhangalex/Work/Projects/AI/agentd' --worktree-base '/Users/zhangalex/Work/Projects/AI/agentd/.agentd/real-execute-smoke/real-execute-smoke-20260707070231/worktrees' --log-level 'error' mcp-stdio"
+      ],
+      "command": "sh",
+      "type": "stdio"
+    }
+  }
+}

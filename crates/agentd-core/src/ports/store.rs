@@ -7,9 +7,11 @@
 //! `Engine::deliver_event` uses to resolve an incoming event back to the
 //! `(run_id, node_id)` that parked (D8/M4).
 
+use std::path::{Path, PathBuf};
+
 use crate::CoreError;
 use crate::engine::Checkpoint;
-use crate::types::{NodeId, Outcome, ReviewRunId, ReviewVerdict, RunId, TaskRunId};
+use crate::types::{AgentId, NodeId, Outcome, ReviewRunId, ReviewVerdict, RunId, TaskRunId};
 
 /// Lifecycle state of a run row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +77,7 @@ pub trait Store: Send + Sync {
         run_id: &RunId,
         node_id: &NodeId,
         expected: usize,
+        round: u32,
         context_sha: &str,
     ) -> Result<ReviewRunId, CoreError>;
     async fn lookup_park_by_review_run(
@@ -98,10 +101,27 @@ pub trait Store: Send + Sync {
         &self,
         review_run_id: &ReviewRunId,
     ) -> Result<Option<usize>, CoreError>;
+    /// The Delphi round this review run belongs to (`None` if unknown).
+    async fn review_round(&self, review_run_id: &ReviewRunId) -> Result<Option<u32>, CoreError>;
     async fn list_verdicts(
         &self,
         review_run_id: &ReviewRunId,
     ) -> Result<Vec<ReviewVerdict>, CoreError>;
+    /// Persist the worktree assigned to one reviewer in a review run.
+    async fn set_review_worktree(
+        &self,
+        review_run_id: &ReviewRunId,
+        reviewer_id: &AgentId,
+        path: &Path,
+    ) -> Result<(), CoreError>;
+    /// Return and mark consumed the reviewer worktree, if one is still pending
+    /// release. This is intentionally take-once so replayed reviewer verdicts
+    /// cannot release the same worktree twice.
+    async fn take_review_worktree(
+        &self,
+        review_run_id: &ReviewRunId,
+        reviewer_id: &AgentId,
+    ) -> Result<Option<PathBuf>, CoreError>;
 
     // ---- task runs (codergen) --------------------------------------------
     /// Insert a task run and return its generated id.
@@ -110,6 +130,18 @@ pub trait Store: Send + Sync {
         run_id: &RunId,
         node_id: &NodeId,
     ) -> Result<TaskRunId, CoreError>;
+    /// Persist the agent id that owns a task run.
+    async fn set_task_run_agent(
+        &self,
+        task_run_id: &TaskRunId,
+        agent_id: &AgentId,
+    ) -> Result<(), CoreError>;
+    /// Persist the worktree assigned to a task run.
+    async fn set_task_run_worktree(
+        &self,
+        task_run_id: &TaskRunId,
+        path: &Path,
+    ) -> Result<(), CoreError>;
     /// Mark a task run finished so a replayed `AgentOutcomeSubmitted` is a no-op
     /// (mirrors `wait.human`'s close-on-answer; the real store sets `finished_at`).
     async fn complete_task_run(&self, task_run_id: &TaskRunId) -> Result<(), CoreError>;

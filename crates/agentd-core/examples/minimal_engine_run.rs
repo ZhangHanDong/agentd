@@ -71,6 +71,7 @@ async fn main() {
                 review_run_id: review_run_id.clone(),
                 reviewer_id: AgentId::parsed(reviewer),
                 verdict: VerdictValue::Pass,
+                findings: String::new(),
             })
             .await
             .expect("deliver verdict");

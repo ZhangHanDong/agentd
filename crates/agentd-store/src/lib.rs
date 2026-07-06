@@ -26,6 +26,8 @@ pub mod store;
 mod store_impl;
 pub mod task_repo;
 mod util;
+pub mod worktree_cleanup_repo;
 
 pub use error::StoreError;
 pub use store::SqliteStore;
+pub use worktree_cleanup_repo::{FailedWorktreeCleanupCandidate, FailedWorktreeKind};

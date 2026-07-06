@@ -14,8 +14,9 @@ drops or mangles data a running daemon already wrote.
 > REVERTED. The design's worktree model is PER-TASK_RUN (each agent gets its own
 > worktree), which lives on the EXISTING `task_runs.worktree_path` (nullable in
 > `0001`) — so the per-run `runs.worktree_path` column is not needed. The HARNESS
-> below stands unchanged (model-agnostic, reusable); its first REAL subject is now
-> C2's `review_runs` round migration. Until then, the self-test keeps it honest.
+> below stands unchanged (model-agnostic, reusable). P108 now uses it for C2's
+> `review_runs` round migration, while the self-test remains to prove the
+> harness is not vacuous.
 
 The harness applies the REAL migration `.sql` files from disk via raw SQL, seeds
 rows, then applies a migration and asserts the rows survive — the test net the
@@ -52,9 +53,9 @@ green even if a migration drops or mangles data a running daemon already wrote).
 
 ## Out of Scope
 
-- A real migration to guard: the harness's first REAL subject is C2's
-  `review_runs` round migration (the `0002 runs.worktree_path` migration was
-  reverted — see the redirect note). Until then the self-test keeps it honest.
+- Additional migration semantics beyond row preservation for C2's
+  `review_runs` round migration. P108 covers that real migration; this spec's
+  self-test remains the reusable harness proof.
 - Testing sqlx's own apply mechanics (the `_sqlx_migrations` ledger, checksum
   drift, transactional rollback) — upstream's responsibility.
 

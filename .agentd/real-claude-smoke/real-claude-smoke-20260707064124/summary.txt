@@ -1,0 +1,9 @@
+result: advanced
+run_id: real-claude-smoke-20260707064124
+daemon_url: http://127.0.0.1:18787
+tmux_session: agentd-spec-writer
+state_dir: /Users/zhangalex/Work/Projects/AI/agentd/.agentd/real-claude-smoke/real-claude-smoke-20260707064124
+run_snapshot: /Users/zhangalex/Work/Projects/AI/agentd/.agentd/real-claude-smoke/real-claude-smoke-20260707064124/run_snapshot.json
+events_snapshot: /Users/zhangalex/Work/Projects/AI/agentd/.agentd/real-claude-smoke/real-claude-smoke-20260707064124/events.snapshot
+daemon_log: /Users/zhangalex/Work/Projects/AI/agentd/.agentd/real-claude-smoke/real-claude-smoke-20260707064124/daemon.log
+agentctl_out: /Users/zhangalex/Work/Projects/AI/agentd/.agentd/real-claude-smoke/real-claude-smoke-20260707064124/agentctl.out

@@ -12,18 +12,22 @@
 // Without it the run would Stuck at the done transition (validate does NOT catch
 // this — see crates/agentctl/tests/workflows.rs goal_gate negative walk-test).
 //
-// cmd= strings are STATIC whitespace-split argv (no ${...}; the frozen tool
-// handler sets no cwd/env). open_pr uses the operator's ambient `gh` auth /
-// GH_TOKEN (standalone, D6); Specify-provisioned token injection is P0.9/P1.
+// cmd= strings are whitespace-split argv. `verify_lifecycle` receives the
+// implementer's allocated worktree through `${worktree}`; runtime-state paths
+// under `.agentd/run/` still resolve in the daemon cwd. `publish_branch` commits
+// and pushes `${worktree}` to `agentd/${task_run_id}` before `open_pr` targets
+// that branch. `gh` auth / GH_TOKEN still comes from the operator's ambient
+// environment (standalone, D6); Specify-provisioned token injection is P0.9/P1.
 digraph execute {
   "start"             [shape=Mdiamond];
-  "pull_frozen_spec"  [handler="tool", cmd="cat .agentd/run/frozen.spec.md", timeout_secs="30"];
-  "draft_plan"        [handler="tool", cmd="agent-spec plan .agentd/run/frozen.spec.md", timeout_secs="120"];
+  "pull_frozen_spec"  [handler="tool", cmd="cat .agentd/run/frozen.spec.md", timeout_secs="30", context_updates="spec_path=.agentd/run/frozen.spec.md"];
+  "draft_plan"        [handler="tool", cmd="bash scripts/agentd_write_plan.sh .agentd/run/frozen.spec.md .agentd/run/plan.md", timeout_secs="120", context_updates="plan_path=.agentd/run/plan.md"];
   "implement"         [handler="codergen", role="implementer", initial_prompt_includes="spec_path,plan_path"];
-  "verify_lifecycle"  [handler="tool", cmd="agent-spec lifecycle .agentd/run/frozen.spec.md --code . --min-score 0.7 --format text", timeout_secs="300", goal_gate=true];
+  "verify_lifecycle"  [handler="tool", cmd="agent-spec lifecycle .agentd/run/frozen.spec.md --code ${worktree} --min-score 0.7 --format text", timeout_secs="300", goal_gate=true];
   "review"            [handler="parallel.fan_out", reviewers="claude-sec,codex-perf,gemini-readability", bundle="frozen", visibility="blind"];
   "aggregate"         [handler="parallel.fan_in", aggregator="majority_pass", goal_gate=true];
-  "open_pr"           [handler="tool", cmd="gh pr create --fill", timeout_secs="120"];
+  "publish_branch"    [handler="tool", cmd="bash scripts/agentd_publish_worktree.sh ${worktree} ${task_run_id}", timeout_secs="300"];
+  "open_pr"           [handler="tool", cmd="gh pr create --fill --head agentd/${task_run_id}", timeout_secs="120"];
   "report_acceptance" [handler="tool", cmd="cat .agentd/run/report.md", timeout_secs="30"];
   "done"              [shape=Msquare];
 
@@ -33,8 +37,9 @@ digraph execute {
   "implement"         -> "verify_lifecycle";
   "verify_lifecycle"  -> "review";
   "review"            -> "aggregate";
-  "aggregate"         -> "open_pr";
-  "open_pr"           -> "report_acceptance";
+  "aggregate"         -> "publish_branch"    [condition="outcome=success"];
+  "publish_branch"    -> "open_pr"           [condition="outcome=success"];
+  "open_pr"           -> "report_acceptance" [condition="outcome=success"];
   "report_acceptance" -> "done"      [condition="outcome=success"];
   "report_acceptance" -> "implement" [label="goal_gate_unmet"];
 }

@@ -192,6 +192,40 @@ async fn tool_handler_maps_nonzero_exit_to_fail() {
 }
 
 #[tokio::test]
+async fn tool_handler_stages_static_context_updates_on_success() {
+    let g = tool_graph(
+        r#", context_updates="spec_path=.agentd/run/frozen.spec.md,plan_path=.agentd/run/plan.md""#,
+    );
+    let node = g.node("run_it").expect("tool node");
+    let context = RunContext::new();
+    let deps = Deps::new();
+    deps.runner.push_output(Ok(CommandOutput {
+        stdout: String::new(),
+        stderr: String::new(),
+        status: 0,
+    }));
+    let mut ctx = HandlerCtx::new(&deps.run_id, &g, node, &context, deps.ports());
+
+    let outcome = done(ToolHandler.run(&mut ctx).await.expect("run"));
+
+    assert_eq!(outcome.status, Status::Success);
+    assert_eq!(
+        ctx.staged_updates()
+            .get("spec_path")
+            .and_then(serde_json::Value::as_str),
+        Some(".agentd/run/frozen.spec.md"),
+        "tool success stages the frozen spec path"
+    );
+    assert_eq!(
+        ctx.staged_updates()
+            .get("plan_path")
+            .and_then(serde_json::Value::as_str),
+        Some(".agentd/run/plan.md"),
+        "tool success stages the generated plan path"
+    );
+}
+
+#[tokio::test]
 async fn tool_handler_maps_command_error_to_retry() {
     let g = tool_graph("");
     let node = g.node("run_it").expect("tool node");

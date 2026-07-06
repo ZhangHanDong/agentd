@@ -13,8 +13,8 @@ engine driving the full canonical park/resume flow against the real database.
 
 ## Decisions
 
-- `insert_review_verdict` is idempotent per reviewer (`ON CONFLICT(review_run_id, reviewer_id) DO NOTHING`), so `count_verdicts` counts DISTINCT reviewers and a replayed verdict cannot reach quorum early.
-- `lookup_park_by_review_run` returns `Some` only while `count(verdicts) < expected`; `review_expected` reads the stored count; `list_verdicts` reconstructs `ReviewVerdict`s.
+- `insert_review_verdict` is idempotent per reviewer (`ON CONFLICT(review_run_id, reviewer_id) DO NOTHING`), so `count_verdicts` counts DISTINCT reviewers and a replayed verdict cannot reach quorum early. P113 also makes the first accepted verdict's opaque `findings` first-wins.
+- `lookup_park_by_review_run` returns `Some` only while `count(verdicts) < expected`; `review_expected` reads the stored count; `list_verdicts` reconstructs `ReviewVerdict`s including findings.
 - `insert_task_run` generates the id; `complete_task_run` sets `finished_at`; `lookup_park_by_task_run` returns `Some` only while `finished_at IS NULL` (so a replayed agent outcome no-ops).
 - The trait impl delegates each method to its repo; repos return `StoreError` and `?` converts to the trait's `CoreError`.
 
@@ -36,6 +36,12 @@ Scenario: Review verdicts dedupe per reviewer and the park opens/closes on quoru
   Given a review run expecting three reviewers
   When verdicts arrive (including a duplicate reviewer) and quorum is reached
   Then the duplicate does not count, the park is open below quorum and closed at quorum
+
+Scenario: Review verdict findings persist and duplicate reviewers do not overwrite them
+  Test: review_verdict_findings_round_trip_first_wins
+  Given a review run and duplicate verdict submissions from one reviewer
+  When the verdicts are inserted and listed
+  Then the listed verdict contains the first findings string
 
 Scenario: Completing a task run closes its park
   Test: task_run_complete_closes_park_parity

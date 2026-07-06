@@ -1,21 +1,20 @@
 //! Worktree pool (§7.3 P1.3): per-spawn isolated git worktrees via an
-//! `AgentBackend` decorator, keeping the frozen core untouched (D1).
+//! `AgentBackend` decorator plus the core `WorktreeAllocator` port.
 //!
-//! The core hardcodes `SpawnRequest.worktree = "."` and the daemon serializes
-//! nothing, so concurrent agents would collide in the repo root. [`PooledBackend`]
-//! wraps the real backend and, when it sees the `"."` auto-sentinel, swaps in a
-//! FRESH worktree from [`WorktreePool`]. No reuse → concurrent allocations are
-//! inherently distinct (isolation by fresh allocation, not by a lock; reuse
-//! would need the per-`task_run` release lifecycle that D1 defers to P2).
-//! Cleanup is boot-GC only: the trait has no `kill`, and nothing pool-owned
-//! survives a restart (in-flight runs re-spawn fresh on resume from checkpoint).
+//! The legacy [`PooledBackend`] path still swaps `"."` for a fresh worktree.
+//! The active P2 path allocates keyed implementer worktrees, and P104 adds
+//! reviewer snapshot worktrees keyed by review run + reviewer id.
 
+use std::collections::HashSet;
+use std::ffi::OsString;
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use agentd_core::CoreError;
-use agentd_core::ports::AgentBackend;
+use agentd_core::ports::{AgentBackend, WorktreeAllocator};
 use agentd_core::types::{AgentHandle, SpawnRequest};
 
 /// The git-worktree operations the pool needs, behind a seam so the
@@ -82,16 +81,76 @@ impl WorktreePool {
         self.provider.create(&name).await
     }
 
-    /// Boot-GC: remove every leftover pool worktree. Correct because nothing
-    /// pool-owned outlives a restart — in-flight runs re-spawn fresh on resume.
+    /// Boot-GC: remove every leftover pool worktree when the caller has no
+    /// durable store context to preserve.
     ///
     /// # Errors
     /// [`CoreError::Backend`] from the provider's `list`/`remove`.
     pub async fn gc_on_boot(&self) -> Result<(), CoreError> {
+        self.gc_on_boot_preserving(std::iter::empty::<PathBuf>())
+            .await
+    }
+
+    /// Boot-GC with durable preservation: remove only pool worktrees whose
+    /// basename is not in `preserve_paths`.
+    ///
+    /// The provider list is already constrained to tight pool-owned names, so a
+    /// basename preserve set is safe and also robust to git reporting canonical
+    /// paths such as `/private/tmp/...` while the store contains `/tmp/...`.
+    ///
+    /// # Errors
+    /// [`CoreError::Backend`] from the provider's `list`/`remove`.
+    pub async fn gc_on_boot_preserving<I>(&self, preserve_paths: I) -> Result<(), CoreError>
+    where
+        I: IntoIterator<Item = PathBuf>,
+    {
+        let preserve_names: HashSet<OsString> = preserve_paths
+            .into_iter()
+            .filter_map(|path| path.file_name().map(|name| name.to_os_string()))
+            .collect();
         for path in self.provider.list().await? {
-            self.provider.remove(&path).await?;
+            let preserve = path
+                .file_name()
+                .is_some_and(|name| preserve_names.contains(name));
+            if !preserve {
+                self.provider.remove(&path).await?;
+            }
         }
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl WorktreeAllocator for WorktreePool {
+    async fn allocate(&self, key: &str) -> Result<PathBuf, CoreError> {
+        let name = pool_name_for_key(key)?;
+        self.provider.create(&name).await
+    }
+
+    async fn allocate_snapshot(&self, key: &str, source: &Path) -> Result<PathBuf, CoreError> {
+        let name = pool_name_for_key(key)?;
+        let path = self.provider.create(&name).await?;
+        if let Err(err) = sync_snapshot(source, &path) {
+            let _ = self.provider.remove(&path).await;
+            return Err(CoreError::Backend(format!(
+                "sync reviewer snapshot {} -> {} failed: {err}",
+                source.display(),
+                path.display()
+            )));
+        }
+        Ok(path)
+    }
+
+    async fn release(&self, key: &str, path: &Path) -> Result<(), CoreError> {
+        let expected = pool_name_for_key(key)?;
+        let actual = path.file_name().and_then(|n| n.to_str());
+        if actual != Some(expected.as_str()) {
+            return Err(CoreError::Invariant(format!(
+                "release path {} does not match pool name {expected}",
+                path.display()
+            )));
+        }
+        self.provider.remove(path).await
     }
 }
 
@@ -203,13 +262,13 @@ impl WorktreeProvider for GitWorktreeProvider {
     }
 }
 
-/// Parse `git worktree list --porcelain` and return ONLY pool worktrees — those
-/// whose dir name is exactly `wt-<digits>-<digits>` (what [`WorktreePool::allocate`]
-/// mints). A TIGHT match feeding boot-GC's `git worktree remove --force`: a
-/// foreign worktree — even one named `wt-feature` — is never returned, so the
-/// `--force` delete can't touch a tree the pool did not create. Matching by
-/// dir-name (not the reported path prefix) is also robust to the canonical/
-/// symlinked paths git reports (e.g. macOS /tmp → /private/tmp).
+/// Parse `git worktree list --porcelain` and return ONLY pool worktrees — either
+/// legacy `wt-<digits>-<digits>` names or task-keyed `wt-task-tr_<ULID>` names.
+/// A TIGHT match feeds boot-GC's `git worktree remove --force`: a foreign
+/// worktree — even one named `wt-feature` or `wt-task-feature` — is never
+/// returned, so the `--force` delete can't touch a tree the pool did not create.
+/// Matching by dir-name (not the reported path prefix) is also robust to the
+/// canonical/symlinked paths git reports (e.g. macOS /tmp → /private/tmp).
 fn pool_worktrees(porcelain: &str) -> Vec<PathBuf> {
     porcelain
         .lines()
@@ -223,9 +282,27 @@ fn pool_worktrees(porcelain: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-/// True only for the exact `wt-<digits>-<digits>` shape the pool mints — NOT a
-/// loose `wt-` prefix (which would match a human's `wt-feature`).
+fn pool_name_for_key(key: &str) -> Result<String, CoreError> {
+    let name = if key.starts_with("review-") {
+        format!("wt-{key}")
+    } else {
+        format!("wt-task-{key}")
+    };
+    if is_task_keyed_pool_name(&name) || is_reviewer_keyed_pool_name(&name) {
+        Ok(name)
+    } else {
+        Err(CoreError::Invariant(format!(
+            "worktree allocator key {key:?} is not a supported pool key"
+        )))
+    }
+}
+
+/// True only for exact pool-owned shapes — NOT loose `wt-` or `wt-task-`
+/// prefixes (which would match a human's worktree names).
 fn is_pool_name(name: &str) -> bool {
+    if is_task_keyed_pool_name(name) || is_reviewer_keyed_pool_name(name) {
+        return true;
+    }
     let Some(rest) = name.strip_prefix("wt-") else {
         return false;
     };
@@ -239,6 +316,117 @@ fn is_pool_name(name: &str) -> bool {
         }
         _ => false,
     }
+}
+
+fn is_task_keyed_pool_name(name: &str) -> bool {
+    let Some(ulid) = name.strip_prefix("wt-task-tr_") else {
+        return false;
+    };
+    ulid.len() == 26
+        && ulid
+            .bytes()
+            .all(|c| c.is_ascii_digit() || c.is_ascii_uppercase())
+}
+
+fn is_reviewer_keyed_pool_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("wt-review-rr_") else {
+        return false;
+    };
+    let Some((ulid, reviewer)) = rest.split_once('-') else {
+        return false;
+    };
+    ulid.len() == 26
+        && ulid
+            .bytes()
+            .all(|c| c.is_ascii_digit() || c.is_ascii_uppercase())
+        && !reviewer.is_empty()
+        && reviewer
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+}
+
+fn sync_snapshot(source: &Path, dest: &Path) -> io::Result<()> {
+    if !source.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("source is not a directory: {}", source.display()),
+        ));
+    }
+    fs::create_dir_all(dest)?;
+    sync_dir_contents(source, dest)
+}
+
+fn sync_dir_contents(source: &Path, dest: &Path) -> io::Result<()> {
+    remove_dest_entries_absent_from_source(source, dest)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == ".git" {
+            continue;
+        }
+        let src = entry.path();
+        let dst = dest.join(&name);
+        copy_entry(&src, &dst)?;
+    }
+    Ok(())
+}
+
+fn remove_dest_entries_absent_from_source(source: &Path, dest: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(dest)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == ".git" {
+            continue;
+        }
+        if !source.join(&name).exists() {
+            remove_path(&entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_entry(source: &Path, dest: &Path) -> io::Result<()> {
+    let meta = fs::symlink_metadata(source)?;
+    if meta.file_type().is_symlink() {
+        replace_with_symlink(source, dest)
+    } else if meta.is_dir() {
+        if dest.exists() && !dest.is_dir() {
+            remove_path(dest)?;
+        }
+        fs::create_dir_all(dest)?;
+        sync_dir_contents(source, dest)
+    } else {
+        if dest.exists() {
+            remove_path(dest)?;
+        }
+        let _ = fs::copy(source, dest)?;
+        Ok(())
+    }
+}
+
+fn remove_path(path: &Path) -> io::Result<()> {
+    let meta = fs::symlink_metadata(path)?;
+    if meta.is_dir() && !meta.file_type().is_symlink() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
+}
+
+#[cfg(unix)]
+fn replace_with_symlink(source: &Path, dest: &Path) -> io::Result<()> {
+    if dest.exists() {
+        remove_path(dest)?;
+    }
+    std::os::unix::fs::symlink(fs::read_link(source)?, dest)
+}
+
+#[cfg(not(unix))]
+fn replace_with_symlink(_source: &Path, _dest: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "snapshotting symlinks is unsupported on this platform",
+    ))
 }
 
 #[cfg(test)]
@@ -260,10 +448,50 @@ mod tests {
     }
 
     #[test]
+    fn pool_worktrees_keeps_task_keyed_names_preserving_foreign() {
+        let porcelain = "worktree /repo\nHEAD aaa\n\n\
+             worktree /repo/.agentd/worktrees/wt-task-tr_0123456789ABCDEFGHJKMNPQRS\nHEAD bbb\ndetached\n\n\
+             worktree /repo/.agentd/worktrees/wt-task-feature\nHEAD ccc\nbranch refs/heads/wt-task-feature\n";
+        assert_eq!(
+            pool_worktrees(porcelain),
+            vec![PathBuf::from(
+                "/repo/.agentd/worktrees/wt-task-tr_0123456789ABCDEFGHJKMNPQRS"
+            )],
+            "only the tight wt-task-tr_<ULID> pool worktree; human wt-task-feature preserved"
+        );
+    }
+
+    #[test]
+    fn pool_worktrees_keeps_reviewer_keyed_names_preserving_foreign() {
+        let porcelain = "worktree /repo\nHEAD aaa\n\n\
+             worktree /repo/.agentd/worktrees/wt-review-rr_0123456789ABCDEFGHJKMNPQRS-claude-sec\nHEAD bbb\ndetached\n\n\
+             worktree /repo/.agentd/worktrees/wt-review-feature\nHEAD ccc\nbranch refs/heads/wt-review-feature\n";
+        assert_eq!(
+            pool_worktrees(porcelain),
+            vec![PathBuf::from(
+                "/repo/.agentd/worktrees/wt-review-rr_0123456789ABCDEFGHJKMNPQRS-claude-sec"
+            )],
+            "only the tight wt-review-rr_<ULID>-<reviewer> pool worktree; human wt-review-feature preserved"
+        );
+    }
+
+    #[test]
     fn is_pool_name_is_tight_not_a_loose_prefix() {
         assert!(is_pool_name("wt-1-0"));
         assert!(is_pool_name("wt-99999-12"));
+        assert!(is_pool_name("wt-task-tr_0123456789ABCDEFGHJKMNPQRS"));
+        assert!(is_pool_name(
+            "wt-review-rr_0123456789ABCDEFGHJKMNPQRS-claude-sec"
+        ));
         assert!(!is_pool_name("wt-feature"), "loose prefix must NOT match");
+        assert!(
+            !is_pool_name("wt-task-feature"),
+            "loose task prefix must NOT match"
+        );
+        assert!(
+            !is_pool_name("wt-review-feature"),
+            "loose review prefix must NOT match"
+        );
         assert!(!is_pool_name("wt-1"), "needs both parts");
         assert!(!is_pool_name("wt-1-0-x"), "no extra parts");
         assert!(!is_pool_name("wt-1-"), "empty second part");

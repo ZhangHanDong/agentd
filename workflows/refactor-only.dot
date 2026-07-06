@@ -9,15 +9,18 @@
 // (`verify_lifecycle`, `aggregate`); the node routing to `done` (`report`)
 // carries the `[label="goal_gate_unmet"]` recovery edge back to a NON-terminal
 // (`implement`). The single `parallel.fan_out` (`review`) auto-pairs with the
-// single `parallel.fan_in` (`aggregate`). cmd= strings are STATIC argv.
+// single `parallel.fan_in` (`aggregate`). cmd= strings are whitespace-split argv:
+// verify checks `${worktree}`, then publish_branch pushes that worktree before
+// open_pr targets `agentd/${task_run_id}`.
 digraph refactor_only {
   "start"            [shape=Mdiamond];
   "pull_context"     [handler="tool", cmd="cat .agentd/run/issue.md", timeout_secs="30"];
   "implement"        [handler="codergen", role="implementer", initial_prompt_includes="issue_id,issue_title,issue_body"];
-  "verify_lifecycle" [handler="tool", cmd="agent-spec lifecycle .agentd/run/frozen.spec.md --code . --min-score 0.7 --format text", timeout_secs="300", goal_gate=true];
+  "verify_lifecycle" [handler="tool", cmd="agent-spec lifecycle .agentd/run/frozen.spec.md --code ${worktree} --min-score 0.7 --format text", timeout_secs="300", goal_gate=true];
   "review"           [handler="parallel.fan_out", reviewers="claude-sec,codex-perf,gemini-readability", bundle="frozen", visibility="blind"];
   "aggregate"        [handler="parallel.fan_in", aggregator="majority_pass", goal_gate=true];
-  "open_pr"          [handler="tool", cmd="gh pr create --fill", timeout_secs="120"];
+  "publish_branch"   [handler="tool", cmd="bash scripts/agentd_publish_worktree.sh ${worktree} ${task_run_id}", timeout_secs="300"];
+  "open_pr"          [handler="tool", cmd="gh pr create --fill --head agentd/${task_run_id}", timeout_secs="120"];
   "report"           [handler="tool", cmd="cat .agentd/run/report.md", timeout_secs="30"];
   "done"             [shape=Msquare];
 
@@ -26,8 +29,9 @@ digraph refactor_only {
   "implement"        -> "verify_lifecycle";
   "verify_lifecycle" -> "review";
   "review"           -> "aggregate";
-  "aggregate"        -> "open_pr";
-  "open_pr"          -> "report";
+  "aggregate"        -> "publish_branch" [condition="outcome=success"];
+  "publish_branch"   -> "open_pr" [condition="outcome=success"];
+  "open_pr"          -> "report" [condition="outcome=success"];
   "report"           -> "done"      [condition="outcome=success"];
   "report"           -> "implement" [label="goal_gate_unmet"];
 }

@@ -9,15 +9,16 @@ The production `RunHost` resolves an agent's `submit_outcome(run_id, node_id)`
 into the `task_run_id` the engine event needs. The store today has only the
 REVERSE lookup (`lookup_park_by_task_run`: task_run_id -> park). P0.9 adds the
 forward read `find_open_task_run(run_id, node_id)` so `open_task` can produce the
-open task run's id + worktree. This is the one non-assembly store addition for
-P0.9; agentd-core stays frozen and no migration is needed (the columns exist).
+open task run's id + worktree. P121 supersedes the original `agent_id` gap by
+using the existing nullable `task_runs.agent_id` column in the same forward read.
+No migration is needed (the columns exist).
 
 ## Decisions
 
-- `task_repo::find_open_task_run(pool, run_id, node_id) -> Option<(TaskRunId, Option<String>)>` returns the OPEN task run for `(run_id, node_id)` — the one with `finished_at IS NULL` — as its id plus the nullable `worktree_path`, or `None` if there is no open task run.
+- `task_repo::find_open_task_run(pool, run_id, node_id) -> Option<(TaskRunId, Option<String>, Option<String>)>` returns the OPEN task run for `(run_id, node_id)` — the one with `finished_at IS NULL` — as its id plus the nullable `worktree_path` and nullable `agent_id`, or `None` if there is no open task run.
 - "Open" matches the park-open invariant used by `lookup_park_by_task_run` (`finished_at IS NULL`); `complete_task_run` closes it, after which the forward read returns `None` (parity with the reverse lookup).
 - If more than one open row somehow exists for a `(run, node)`, the most recently started (`ORDER BY started_at DESC LIMIT 1`) is returned.
-- No schema change: `task_runs` already has `run_id`, `node_id`, `worktree_path`, and `finished_at` (migration `0001_init.sql`).
+- No schema change: `task_runs` already has `run_id`, `node_id`, `agent_id`, `worktree_path`, and `finished_at` (migration `0001_init.sql`).
 
 ## Boundaries
 
@@ -34,7 +35,7 @@ P0.9; agentd-core stays frozen and no migration is needed (the columns exist).
 
 ## Out of Scope
 
-- Populating `agent_id` / `spec_path` / `plan_path` into `TaskAssignment` — those columns do not exist; P0.9 leaves them `None` (a known gap).
+- Populating `spec_path` / `plan_path` into `TaskAssignment`; P121 supersedes the old `agent_id` gap by reading `task_runs.agent_id`.
 
 ## Completion Criteria
 

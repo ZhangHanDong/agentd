@@ -2,7 +2,9 @@
 //! `finished_at IS NULL`; `complete_task_run` closes it so a replayed
 //! `AgentOutcomeSubmitted` resolves to `None` (parity with the fake).
 
-use agentd_core::types::{NodeId, RunId, TaskRunId};
+use std::path::PathBuf;
+
+use agentd_core::types::{AgentId, NodeId, RunId, TaskRunId};
 use sqlx::{Row, SqlitePool};
 
 use crate::error::StoreError;
@@ -31,6 +33,46 @@ pub async fn insert_task_run(
     Ok(TaskRunId::from_string(id))
 }
 
+/// Persist the worktree path allocated to a task run.
+///
+/// # Errors
+/// Returns [`StoreError::NotFound`] if unknown, [`StoreError::Sqlx`] on failure.
+pub async fn set_task_run_worktree(
+    pool: &SqlitePool,
+    task_run_id: &TaskRunId,
+    worktree_path: &str,
+) -> Result<(), StoreError> {
+    let result = sqlx::query("UPDATE task_runs SET worktree_path = ? WHERE id = ?")
+        .bind(worktree_path)
+        .bind(task_run_id.as_str())
+        .execute(pool)
+        .await?;
+    if result.rows_affected() == 0 {
+        return Err(StoreError::NotFound);
+    }
+    Ok(())
+}
+
+/// Persist the agent id that owns a task run.
+///
+/// # Errors
+/// Returns [`StoreError::NotFound`] if unknown, [`StoreError::Sqlx`] on failure.
+pub async fn set_task_run_agent(
+    pool: &SqlitePool,
+    task_run_id: &TaskRunId,
+    agent_id: &AgentId,
+) -> Result<(), StoreError> {
+    let result = sqlx::query("UPDATE task_runs SET agent_id = ? WHERE id = ?")
+        .bind(agent_id.as_str())
+        .bind(task_run_id.as_str())
+        .execute(pool)
+        .await?;
+    if result.rows_affected() == 0 {
+        return Err(StoreError::NotFound);
+    }
+    Ok(())
+}
+
 /// Mark a task run finished so it no longer parks.
 ///
 /// # Errors
@@ -52,11 +94,12 @@ pub async fn complete_task_run(
 }
 
 /// Forward read: the OPEN task run for `(run_id, node_id)` — the one with
-/// `finished_at IS NULL` — as its id plus the nullable `worktree_path`, or
-/// `None` if there is none. This is the direction `lookup_park_by_task_run` does
-/// not cover; the production `RunHost`'s `open_task` resolves an agent's
-/// `submit_outcome(run, node)` into its `task_run_id` through it. If more than
-/// one open row exists, the most recently started is returned.
+/// `finished_at IS NULL` — as its id plus the nullable `worktree_path` and
+/// nullable `agent_id`, or `None` if there is none. This is the direction
+/// `lookup_park_by_task_run` does not cover; the production `RunHost`'s
+/// `open_task` resolves an agent's `submit_outcome(run, node)` into its
+/// `task_run_id` through it. If more than one open row exists, the most recently
+/// started is returned.
 ///
 /// # Errors
 /// Returns [`StoreError::Sqlx`] on a database failure.
@@ -64,9 +107,9 @@ pub async fn find_open_task_run(
     pool: &SqlitePool,
     run_id: &RunId,
     node_id: &NodeId,
-) -> Result<Option<(TaskRunId, Option<String>)>, StoreError> {
+) -> Result<Option<(TaskRunId, Option<String>, Option<String>)>, StoreError> {
     let row = sqlx::query(
-        "SELECT id, worktree_path FROM task_runs \
+        "SELECT id, worktree_path, agent_id FROM task_runs \
          WHERE run_id = ? AND node_id = ? AND finished_at IS NULL \
          ORDER BY started_at DESC LIMIT 1",
     )
@@ -78,6 +121,7 @@ pub async fn find_open_task_run(
         (
             TaskRunId::from_string(r.get::<String, _>("id")),
             r.get::<Option<String>, _>("worktree_path"),
+            r.get::<Option<String>, _>("agent_id"),
         )
     }))
 }
@@ -101,4 +145,30 @@ pub async fn lookup_park_by_task_run(
             NodeId::from_string(r.get::<String, _>("node_id")),
         )
     }))
+}
+
+/// List task-run worktrees still needed by non-finished workflows.
+///
+/// This deliberately keys off the parent run status, not `task_runs.finished_at`:
+/// the codergen task can be complete while downstream verify/review/publish
+/// nodes still need the same implementation tree. Failed runs are included for
+/// debugging/recovery; finished runs are boot-GC cleanup candidates.
+///
+/// # Errors
+/// Returns [`StoreError::Sqlx`] on a database failure.
+pub async fn active_task_worktree_paths(pool: &SqlitePool) -> Result<Vec<PathBuf>, StoreError> {
+    let rows = sqlx::query(
+        "SELECT DISTINCT task_runs.worktree_path AS worktree_path \
+         FROM task_runs \
+         JOIN runs ON runs.id = task_runs.run_id \
+         WHERE task_runs.worktree_path IS NOT NULL \
+           AND runs.status <> 'finished' \
+         ORDER BY task_runs.started_at, task_runs.id",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| PathBuf::from(r.get::<String, _>("worktree_path")))
+        .collect())
 }

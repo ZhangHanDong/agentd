@@ -34,6 +34,7 @@ axum = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+rmcp = { workspace = true }
 
 [dev-dependencies]
 # The in-memory port fakes (FakeBackend/MempalStub/FixedClock/RecordingCommandRunner)

@@ -7,7 +7,7 @@
 //! so `deliver_event` treats an unmatched event as `RunProgress::Ignored`.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::Path;
 
 use crate::CoreError;
 use crate::engine::{Checkpoint, EngineEvent, HandlerStep, RunProgress, goal_gate};
@@ -15,6 +15,7 @@ use crate::graph::edge_select::select_next_edge;
 use crate::graph::{NodeDef, NodeGraph, NodeShape};
 use crate::handler::{HandlerCtx, HandlerRegistry, Ports};
 use crate::ports::RunStatus;
+use crate::ports::WorktreeAllocator;
 use crate::types::{NodeId, Outcome, RunContext, RunId, Status};
 
 /// Hard backstop: a single run may execute at most this many nodes before the
@@ -30,9 +31,9 @@ pub struct Engine<'a> {
     registry: &'a HandlerRegistry,
     ports: Ports<'a>,
     workflow_sha: String,
-    /// The run's worktree, threaded into each `HandlerCtx` (P2 C1a); `None` →
-    /// handlers fall back to `"."`.
-    worktree: Option<PathBuf>,
+    /// Optional per-task_run worktree allocator (P2 C1' R3a). Default `None`
+    /// leaves codergen spawning in `"."`.
+    worktree_allocator: Option<&'a dyn WorktreeAllocator>,
 }
 
 /// Mutable per-run state threaded through the loop and snapshotted into a
@@ -72,16 +73,14 @@ impl<'a> Engine<'a> {
             registry,
             ports,
             workflow_sha: workflow_sha.into(),
-            worktree: None,
+            worktree_allocator: None,
         }
     }
 
-    /// Thread the run's worktree into the handlers (P2 C1a). Builder so the 5
-    /// `new()` call sites stay unchanged; default `None` (handlers fall back to
-    /// `"."`). The daemon resolves a per-run worktree in C1b.
+    /// Thread an optional per-task_run worktree allocator into handlers.
     #[must_use]
-    pub fn with_worktree(mut self, worktree: Option<PathBuf>) -> Self {
-        self.worktree = worktree;
+    pub fn with_worktree_allocator(mut self, allocator: Option<&'a dyn WorktreeAllocator>) -> Self {
+        self.worktree_allocator = allocator;
         self
     }
 
@@ -177,7 +176,7 @@ impl<'a> Engine<'a> {
                 .get(kind)
                 .ok_or_else(|| CoreError::UnknownHandler(format!("{kind:?}")))?;
             let mut ctx = HandlerCtx::new(&run_id, self.graph, node, &state.context, self.ports)
-                .with_worktree(self.worktree.as_deref());
+                .with_worktree_allocator(self.worktree_allocator);
             let step = handler.resume(&mut ctx, event).await?;
             let staged = ctx.staged_updates().clone();
             (step, staged)
@@ -252,6 +251,8 @@ impl<'a> Engine<'a> {
                     .store
                     .update_run_status(run_id, RunStatus::Finished)
                     .await?;
+                self.release_worktree_after_success(run_id, &state.context)
+                    .await;
                 tracing::info!(run_id = %run_id.as_str(), "run finished");
                 Ok(Some(RunProgress::Finished {
                     run_id: run_id.clone(),
@@ -284,7 +285,7 @@ impl<'a> Engine<'a> {
                 let (step, staged) = {
                     let mut ctx =
                         HandlerCtx::new(run_id, self.graph, node, &state.context, self.ports)
-                            .with_worktree(self.worktree.as_deref());
+                            .with_worktree_allocator(self.worktree_allocator);
                     let step = handler.run(&mut ctx).await?;
                     let staged = ctx.staged_updates().clone();
                     (step, staged)
@@ -325,6 +326,36 @@ impl<'a> Engine<'a> {
             run_id: run_id.clone(),
             reason,
         })
+    }
+
+    async fn release_worktree_after_success(&self, run_id: &RunId, context: &RunContext) {
+        let Some(allocator) = self.worktree_allocator else {
+            return;
+        };
+        let Some(task_run_id) = context
+            .0
+            .get("task_run_id")
+            .and_then(serde_json::Value::as_str)
+        else {
+            return;
+        };
+        let Some(worktree) = context
+            .0
+            .get("worktree")
+            .and_then(serde_json::Value::as_str)
+        else {
+            return;
+        };
+        let path = Path::new(worktree);
+        if let Err(err) = allocator.release(task_run_id, path).await {
+            tracing::warn!(
+                run_id = %run_id.as_str(),
+                task_run_id = %task_run_id,
+                worktree = %path.display(),
+                error = %err,
+                "worktree release failed after successful run; boot-GC remains the fallback"
+            );
+        }
     }
 
     /// Record a finished node's outcome, then either re-run it (Retry under

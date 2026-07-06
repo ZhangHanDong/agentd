@@ -27,19 +27,16 @@ impl Handler for ToolHandler {
             let cmd = ctx.node_attr("cmd").ok_or_else(|| {
                 CoreError::Invariant(format!("tool node '{node_id}' missing cmd attribute"))
             })?;
-            // Variables for `${...}` substitution (R2): the run context's string
-            // entries (e.g. `spec_path`/`task_run_id` once staged) plus `worktree`
-            // from the threaded worktree. Substitution runs PER ARGV ELEMENT
-            // (after the whitespace split), so a value with spaces stays one arg.
-            let mut vars: HashMap<String, String> = ctx
+            // Variables for `${...}` substitution (R2): every string value in the
+            // run context, including `worktree` when codergen staged an allocated
+            // task-run path. Substitution runs PER ARGV ELEMENT (after the
+            // whitespace split), so a value with spaces stays one arg.
+            let vars: HashMap<String, String> = ctx
                 .context
                 .0
                 .iter()
                 .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                 .collect();
-            if let Some(wt) = ctx.worktree() {
-                vars.insert("worktree".to_string(), wt.to_string_lossy().into_owned());
-            }
             let mut parts = cmd.split_whitespace();
             let raw_program = parts.next().ok_or_else(|| {
                 CoreError::Invariant(format!("tool node '{node_id}' has empty cmd"))
@@ -58,6 +55,11 @@ impl Handler for ToolHandler {
                 Duration::from_secs,
             );
         let artifact_path = ctx.node_attr("artifact_path").map(ToString::to_string);
+        let static_context_updates = ctx
+            .node_attr("context_updates")
+            .map(|raw| parse_static_context_updates(raw, &ctx.node.id))
+            .transpose()?
+            .unwrap_or_default();
 
         let opts = RunOpts {
             timeout,
@@ -82,6 +84,9 @@ impl Handler for ToolHandler {
                         sha256: sha256_hex(bytes),
                         bytes: bytes.len() as u64,
                     });
+                }
+                for (key, value) in static_context_updates {
+                    ctx.stage(key, serde_json::Value::String(value));
                 }
                 Ok(HandlerStep::Done(outcome))
             }
@@ -125,9 +130,34 @@ fn substitute(s: &str, node_id: &str, vars: &HashMap<String, String>) -> Result<
     Ok(out)
 }
 
+fn parse_static_context_updates(
+    raw: &str,
+    node_id: &str,
+) -> Result<Vec<(String, String)>, CoreError> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let (key, value) = entry.split_once('=').ok_or_else(|| {
+                CoreError::Invariant(format!(
+                    "tool node '{node_id}' context_updates entry '{entry}' must use key=value"
+                ))
+            })?;
+            let key = key.trim();
+            let value = value.trim();
+            if key.is_empty() || value.is_empty() {
+                return Err(CoreError::Invariant(format!(
+                    "tool node '{node_id}' context_updates entry '{entry}' has empty key or value"
+                )));
+            }
+            Ok((key.to_string(), value.to_string()))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::substitute;
+    use super::{parse_static_context_updates, substitute};
     use std::collections::HashMap;
 
     fn vars(pairs: &[(&str, &str)]) -> HashMap<String, String> {
@@ -158,5 +188,26 @@ mod tests {
         let input = "cat .agentd/run/frozen.spec.md";
         let out = substitute(input, "n", &vars(&[("a", "1")])).expect("no-token passes through");
         assert_eq!(out, input, "text without `${{` is byte-identical");
+    }
+
+    #[test]
+    fn static_context_updates_parse_key_value_pairs() {
+        let updates = parse_static_context_updates("a=one, b = two", "n").expect("parse");
+        assert_eq!(
+            updates,
+            vec![
+                ("a".to_string(), "one".to_string()),
+                ("b".to_string(), "two".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn static_context_updates_reject_malformed_entries() {
+        let err = parse_static_context_updates("no_equals", "n").expect_err("malformed");
+        assert!(
+            format!("{err:?}").contains("key=value"),
+            "error explains the expected syntax: {err:?}"
+        );
     }
 }

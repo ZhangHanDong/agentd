@@ -17,4 +17,7 @@ pub enum VerdictValue {
 pub struct ReviewVerdict {
     pub reviewer_id: AgentId,
     pub value: VerdictValue,
+    /// Opaque reviewer findings text. The surface serializes structured MCP
+    /// findings into a deterministic string; core stores and compares it.
+    pub findings: String,
 }

@@ -9,8 +9,9 @@ Turn a parsed `dot::ast::Graph` into a typed, validated `graph::NodeGraph`.
 The validation pass implements design §2.7: it rejects structurally or
 semantically broken workflows up front (missing start/terminal, unknown
 handler, unreachable nodes, an unsatisfiable goal_gate, unknown pre_tools /
-post_action tools, P1-only delphi mode, and unsupported multi-fan_out
-fan-in) and reports ALL violations at once rather than failing on the first.
+post_action tools, malformed Delphi review contracts, and unsupported
+multi-fan_out fan-in) and reports ALL violations at once rather than failing on
+the first.
 
 ## Decisions
 
@@ -22,7 +23,9 @@ fan-in) and reports ALL violations at once rather than failing on the first.
 - pre_tools / post_action are comma-separated token lists; commas inside `(...)` are NOT separators. Each token's tool name is the leading identifier before `(` or whitespace.
 - `retry_target` (edge, bool) and `retry_policy` (node, `max=N,...`) are recognized attributes (D8b/D8c) and never cause a validation error
 - DEVIATION from the plan delta: unknown attributes are NOT a hard error. P0.1 validates only the attributes the checks above need and treats all other attributes as forward-compatible (ignored). Hard-rejecting unknown attributes would break the design's own Appendix C DOT (which uses many attributes outside the §2.2 table) and is not exercised by any scenario.
-- `visibility=delphi` and any `converge_or_*` aggregator are rejected (design §2.5.1 — reserved for P1+)
+- P109 enables `visibility=delphi` only for a well-formed P1.4 contract: `max_rounds >= 2`, exactly one reachable fan_in partner, and `aggregator=converge_or_<fallback>` where the fallback is one of `any_fail`, `majority_pass`, `unanimous_pass`, or `first_blocker`
+- P113 supports `convergence=verdict_stable` and `convergence=findings_diff<N>` for Delphi, where `N` is a finite `0.0..=1.0` threshold
+- A non-Delphi fan_out may keep `max_rounds` unset or `1`; `max_rounds >= 2` requires `visibility=delphi`
 - Multi-fan_out into one fan_in: a `parallel.fan_in` reachable from ≥2 `parallel.fan_out` nodes (none carrying `pair_with`) is rejected in P0.1
 - Exactly one start node: zero starts and more than one start are both rejected (the engine drives from a single entry point)
 - Every edge endpoint must resolve to a declared node: the parser tolerates an implicit edge-referenced id (DOT semantics), but validation rejects it so the engine never steps into a node missing from the graph
@@ -42,7 +45,7 @@ fan-in) and reports ALL violations at once rather than failing on the first.
 ### Forbidden
 
 - Do not fail on the first violation; collect and report all.
-- Do not accept `visibility=delphi` or `converge_or_*` in P0.1.
+- Do not accept malformed Delphi contracts or unknown `converge_or_*` fallbacks.
 - Do not treat `stack.manager_loop` as a known handler in P0.
 
 ## Completion Criteria
@@ -107,11 +110,47 @@ Scenario: retry_target and retry_policy attributes are accepted
   When NodeGraph::from_ast runs
   Then it succeeds
 
-Scenario: delphi visibility is rejected in P0
-  Test: node_graph_rejects_delphi_visibility_in_p0
-  Given a parsed graph whose fan_out node declares visibility=delphi
+Scenario: A well-formed Delphi fan_out/fan_in pair validates
+  Test: node_graph_accepts_delphi_visibility_with_converge_aggregator
+  Given a parsed graph whose fan_out declares visibility=delphi, max_rounds=3, and a paired fan_in aggregator=converge_or_majority_pass
   When NodeGraph::from_ast runs
-  Then it returns an error mentioning delphi
+  Then it succeeds
+
+Scenario: delphi visibility without max_rounds is rejected
+  Test: node_graph_rejects_delphi_visibility_without_max_rounds
+  Given a parsed graph whose fan_out node declares visibility=delphi without max_rounds
+  When NodeGraph::from_ast runs
+  Then it returns an error mentioning max_rounds
+
+Scenario: delphi visibility with a one-shot aggregator is rejected
+  Test: node_graph_rejects_delphi_visibility_with_non_converge_aggregator
+  Given a parsed graph whose Delphi fan_out reaches fan_in aggregator=majority_pass
+  When NodeGraph::from_ast runs
+  Then it returns an error mentioning converge_or
+
+Scenario: Unknown converge fallback is rejected
+  Test: node_graph_rejects_unknown_converge_fallback
+  Given a parsed graph whose fan_in declares aggregator=converge_or_sideways
+  When NodeGraph::from_ast runs
+  Then it returns an error mentioning sideways
+
+Scenario: max_rounds greater than one requires Delphi visibility
+  Test: node_graph_rejects_non_delphi_max_rounds_above_one
+  Given a parsed graph whose fan_out declares visibility=blind and max_rounds=3
+  When NodeGraph::from_ast runs
+  Then it returns an error mentioning visibility=delphi
+
+Scenario: findings_diff convergence is accepted for Delphi
+  Test: node_graph_accepts_delphi_findings_diff_convergence
+  Given a parsed graph whose Delphi fan_out declares convergence=findings_diff<0.1
+  When NodeGraph::from_ast runs
+  Then it returns Ok
+
+Scenario: malformed findings_diff convergence is rejected
+  Test: node_graph_rejects_malformed_delphi_findings_diff_convergence
+  Given a parsed graph whose Delphi fan_out declares convergence=findings_diff<sideways>
+  When NodeGraph::from_ast runs
+  Then it returns an error mentioning findings_diff
 
 Scenario: Multiple fan_out into one fan_in is rejected
   Test: node_graph_rejects_multi_fan_out_into_one_fan_in

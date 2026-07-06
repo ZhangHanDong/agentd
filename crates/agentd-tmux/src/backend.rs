@@ -18,6 +18,11 @@ use agentd_core::types::{
 use crate::config::Config;
 use crate::error::BackendError;
 
+const AGENTD_MCP_STDIO_CMD_ENV: &str = "AGENTD_MCP_STDIO_CMD";
+const AGENTD_CLAUDE_AUTO_TRUST_WORKSPACE_ENV: &str = "AGENTD_CLAUDE_AUTO_TRUST_WORKSPACE";
+const LAUNCHER_GITIGNORE_PATTERN: &str = ".agentd-launcher-*.sh";
+const MCP_CONFIG_GITIGNORE_PATTERN: &str = ".agentd-mcp-*.json";
+
 /// Options for [`TmuxBackend::capture`] (design §4.8).
 #[derive(Debug, Clone, Copy)]
 pub struct CaptureOpts {
@@ -168,14 +173,36 @@ impl TmuxBackend {
         handle: &AgentHandle,
         cli: CliKind,
     ) -> Result<(), BackendError> {
+        self.wait_for_ready_inner(handle, cli, false).await
+    }
+
+    async fn wait_for_ready_inner(
+        &self,
+        handle: &AgentHandle,
+        cli: CliKind,
+        auto_trust_workspace: bool,
+    ) -> Result<(), BackendError> {
         let deadline = Instant::now() + self.cfg.ready_deadline;
         let mut probe = self.cfg.ready_probe_initial;
+        let mut trust_confirmed = false;
         while Instant::now() < deadline {
             let buf = self
                 .capture_pane(handle.address.as_str(), 50, false)
                 .await?;
             if self.cfg.main_prompt_visible(&buf, cli) {
                 return Ok(());
+            }
+            if auto_trust_workspace
+                && !trust_confirmed
+                && cli == CliKind::ClaudeCode
+                && claude_workspace_trust_prompt_visible(&buf)
+            {
+                self.tmux(
+                    &["send-keys", "-t", handle.address.as_str(), "Enter"],
+                    RunOpts::default(),
+                )
+                .await?;
+                trust_confirmed = true;
             }
             tokio::time::sleep(probe).await;
             probe = (probe * 2).min(self.cfg.ready_probe_max);
@@ -399,8 +426,14 @@ impl AgentBackend for TmuxBackend {
         let launcher_path = req
             .worktree
             .join(format!(".agentd-launcher-{}.sh", req.agent_id.as_str()));
-        write_file(&launcher_path, &build_launcher_script(&req)?)?;
-        amend_gitignore(&req.worktree)?;
+        let mcp_config = build_claude_mcp_config(&req)?;
+        let launcher =
+            build_launcher_script(&req, mcp_config.as_ref().map(|config| config.0.as_path()))?;
+        if let Some((path, contents)) = &mcp_config {
+            write_file(path, contents)?;
+        }
+        write_file(&launcher_path, &launcher)?;
+        amend_gitignore(&req.worktree, mcp_config.is_some())?;
 
         // §4.5 step 3: launch — directly, or wrapped in a transient systemd scope.
         let worktree_str = req.worktree.to_string_lossy().into_owned();
@@ -488,7 +521,8 @@ impl AgentBackend for TmuxBackend {
 
         // §4.5 step 5: deliver the initial prompt once the agent is ready.
         if let Some(prompt) = &req.initial_prompt {
-            self.wait_for_ready(&handle, req.cli).await?;
+            self.wait_for_ready_inner(&handle, req.cli, auto_trust_workspace_enabled(&req))
+                .await?;
             self.send_prompt(&handle, prompt).await?;
         }
 
@@ -504,7 +538,10 @@ impl AgentBackend for TmuxBackend {
 /// # Errors
 /// [`BackendError::Invariant`] when an `env_overrides` key is not a shell
 /// identifier (`[A-Za-z_][A-Za-z0-9_]*`).
-fn build_launcher_script(req: &SpawnRequest) -> Result<String, BackendError> {
+fn build_launcher_script(
+    req: &SpawnRequest,
+    mcp_config_path: Option<&Path>,
+) -> Result<String, BackendError> {
     let mut script = String::from("#!/usr/bin/env bash\nset -euo pipefail\n");
     script.push_str("cd ");
     script.push_str(&sh_quote(&req.worktree.to_string_lossy()));
@@ -530,9 +567,60 @@ fn build_launcher_script(req: &SpawnRequest) -> Result<String, BackendError> {
         script.push('\n');
     }
     script.push_str("exec ");
-    script.push_str(cli_command(req.cli));
+    push_cli_exec(&mut script, req.cli, mcp_config_path);
     script.push('\n');
     Ok(script)
+}
+
+fn build_claude_mcp_config(req: &SpawnRequest) -> Result<Option<(PathBuf, String)>, BackendError> {
+    let Some(command) = req.env_overrides.get(AGENTD_MCP_STDIO_CMD_ENV) else {
+        return Ok(None);
+    };
+    if req.cli != CliKind::ClaudeCode {
+        return Ok(None);
+    }
+    if command.trim().is_empty() {
+        return Err(BackendError::Invariant(format!(
+            "{AGENTD_MCP_STDIO_CMD_ENV} cannot be empty"
+        )));
+    }
+
+    let path = req
+        .worktree
+        .join(format!(".agentd-mcp-{}.json", req.agent_id.as_str()));
+    let config = serde_json::json!({
+        "mcpServers": {
+            "agentd": {
+                "type": "stdio",
+                "command": "sh",
+                "args": ["-lc", command],
+            }
+        }
+    });
+    let contents = serde_json::to_string_pretty(&config)
+        .map_err(|e| BackendError::Invariant(format!("failed to encode Claude MCP config: {e}")))?;
+    Ok(Some((path, format!("{contents}\n"))))
+}
+
+fn auto_trust_workspace_enabled(req: &SpawnRequest) -> bool {
+    req.env_overrides
+        .get(AGENTD_CLAUDE_AUTO_TRUST_WORKSPACE_ENV)
+        .is_some_and(|value| env_truthy(value))
+        || std::env::var(AGENTD_CLAUDE_AUTO_TRUST_WORKSPACE_ENV)
+            .is_ok_and(|value| env_truthy(&value))
+}
+
+fn env_truthy(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn claude_workspace_trust_prompt_visible(buffer: &str) -> bool {
+    buffer.contains("Quick safety check")
+        && buffer.contains("Yes, I trust this folder")
+        && buffer.contains("Enter to confirm")
 }
 
 /// True when `key` is a POSIX shell identifier: a non-empty `[A-Za-z_]` head
@@ -546,11 +634,16 @@ fn is_shell_identifier(key: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// The CLI binary launched per [`CliKind`] (v0 defaults; configurable later).
-fn cli_command(cli: CliKind) -> &'static str {
-    match cli {
-        CliKind::ClaudeCode => "claude",
-        CliKind::Codex => "codex",
+/// Push the CLI command line launched per [`CliKind`] (v0 defaults; configurable later).
+fn push_cli_exec(script: &mut String, cli: CliKind, mcp_config_path: Option<&Path>) {
+    match (cli, mcp_config_path) {
+        (CliKind::ClaudeCode, Some(path)) => {
+            script.push_str("claude --mcp-config ");
+            script.push_str(&sh_quote(&path.to_string_lossy()));
+            script.push_str(" --strict-mcp-config");
+        }
+        (CliKind::ClaudeCode, None) => script.push_str("claude"),
+        (CliKind::Codex, _) => script.push_str("codex"),
     }
 }
 
@@ -597,18 +690,22 @@ fn write_file(path: &Path, contents: &str) -> Result<(), BackendError> {
 
 /// Append `.agentd-launcher-*.sh` to the worktree `.gitignore` if not already
 /// present (idempotent). A missing `.gitignore` is created.
-fn amend_gitignore(worktree: &Path) -> Result<(), BackendError> {
-    const PATTERN: &str = ".agentd-launcher-*.sh";
+fn amend_gitignore(worktree: &Path, include_mcp_config: bool) -> Result<(), BackendError> {
     let path = worktree.join(".gitignore");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    if existing.lines().any(|line| line.trim() == PATTERN) {
-        return Ok(());
-    }
     let mut content = existing;
-    if !content.is_empty() && !content.ends_with('\n') {
+    for pattern in [LAUNCHER_GITIGNORE_PATTERN, MCP_CONFIG_GITIGNORE_PATTERN] {
+        if pattern == MCP_CONFIG_GITIGNORE_PATTERN && !include_mcp_config {
+            continue;
+        }
+        if content.lines().any(|line| line.trim() == pattern) {
+            continue;
+        }
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push_str(pattern);
         content.push('\n');
     }
-    content.push_str(PATTERN);
-    content.push('\n');
     write_file(&path, &content)
 }

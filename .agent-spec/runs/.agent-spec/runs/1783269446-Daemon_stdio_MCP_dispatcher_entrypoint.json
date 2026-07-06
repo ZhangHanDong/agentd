@@ -1,0 +1,10 @@
+{
+  "spec_name": "Daemon stdio MCP dispatcher entrypoint",
+  "passing": true,
+  "summary": "7/7 passed, 0 failed, 0 skipped, 0 uncertain",
+  "timestamp": 1783269446,
+  "vcs": {
+    "vcs_type": "git",
+    "change_ref": "4229024"
+  }
+}

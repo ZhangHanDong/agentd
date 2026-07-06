@@ -22,7 +22,7 @@ pub use wait_human::WaitHumanHandler;
 use crate::CoreError;
 use crate::engine::{EngineEvent, HandlerStep};
 use crate::graph::{NodeDef, NodeGraph};
-use crate::ports::{AgentBackend, Clock, CommandRunner, MempalClient, Store};
+use crate::ports::{AgentBackend, Clock, CommandRunner, MempalClient, Store, WorktreeAllocator};
 use crate::types::RunId;
 
 /// A borrow bundle of the five ports. The engine builds one of these per run and
@@ -66,9 +66,9 @@ pub struct HandlerCtx<'a> {
     pub context: &'a crate::types::RunContext,
     pub ports: Ports<'a>,
     staged: serde_json::Map<String, serde_json::Value>,
-    /// The run's worktree, threaded from the engine (P2 C1a). `None` → the spawn
-    /// + tool handlers fall back to `"."` (today's behavior).
-    worktree: Option<&'a std::path::Path>,
+    /// Optional per-task_run allocator (P2 C1' R3a). `None` keeps the mechanism
+    /// inert; codergen falls back to `"."`.
+    worktree_allocator: Option<&'a dyn WorktreeAllocator>,
 }
 
 impl std::fmt::Debug for HandlerCtx<'_> {
@@ -97,22 +97,21 @@ impl<'a> HandlerCtx<'a> {
             context,
             ports,
             staged: serde_json::Map::new(),
-            worktree: None,
+            worktree_allocator: None,
         }
     }
 
-    /// Thread the run's worktree (P2 C1a). Builder so the 22 `new()` call sites
-    /// stay unchanged; default `None`.
+    /// Thread the optional per-task_run worktree allocator (P2 C1' R3a).
     #[must_use]
-    pub fn with_worktree(mut self, worktree: Option<&'a std::path::Path>) -> Self {
-        self.worktree = worktree;
+    pub fn with_worktree_allocator(mut self, allocator: Option<&'a dyn WorktreeAllocator>) -> Self {
+        self.worktree_allocator = allocator;
         self
     }
 
-    /// The run's worktree, or `None` (handlers fall back to `"."`).
+    /// The optional per-task_run worktree allocator.
     #[must_use]
-    pub fn worktree(&self) -> Option<&std::path::Path> {
-        self.worktree
+    pub fn worktree_allocator(&self) -> Option<&dyn WorktreeAllocator> {
+        self.worktree_allocator
     }
 
     /// Stage a context update (the ctx-staged channel — see the type docs).
@@ -156,9 +155,9 @@ pub(crate) fn sha256_hex(data: &[u8]) -> String {
 }
 
 /// Build a `SpawnRequest` for `role` with sensible P0.1 defaults (claude-code
-/// CLI, direct launch). Shared by `codergen` and `fan_out`; `worktree` is the
-/// run's worktree threaded via [`HandlerCtx::worktree`] (P2 C1a — callers pass
-/// `ctx.worktree().unwrap_or(Path::new("."))`, so `None` reproduces today's `.`).
+/// CLI, direct launch). Shared by `codergen` and `fan_out`; callers resolve
+/// `worktree` from the per-task_run allocation or staged run context, falling
+/// back to `"."` when neither exists.
 #[must_use]
 pub(crate) fn spawn_request(
     role: &str,

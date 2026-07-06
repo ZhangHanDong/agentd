@@ -1,0 +1,10 @@
+{
+  "spec_name": "Park-style handlers: wait.human, fan_out, fan_in, codergen",
+  "passing": true,
+  "summary": "20/20 passed, 0 failed, 0 skipped, 0 uncertain",
+  "timestamp": 1783266869,
+  "vcs": {
+    "vcs_type": "git",
+    "change_ref": "4229024"
+  }
+}

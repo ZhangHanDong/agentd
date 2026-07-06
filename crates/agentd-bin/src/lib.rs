@@ -5,13 +5,15 @@
 
 #![warn(clippy::unwrap_used, clippy::panic)]
 
+pub mod agent_mcp_context;
 pub mod cli;
 pub mod clock;
 pub mod daemon;
 pub mod host;
 pub mod mempal;
+pub mod stdio_mcp;
 
-pub use cli::DaemonConfig;
+pub use cli::{AgentdCli, AgentdCommand, CleanupWorktreesArgs, DaemonConfig};
 pub use clock::SystemClock;
 pub use host::ProductionRunHost;
 pub use mempal::OfflineMempal;

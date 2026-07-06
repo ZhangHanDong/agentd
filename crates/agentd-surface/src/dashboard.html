@@ -1,0 +1,489 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>agentd</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f7f8f5;
+        --panel: #ffffff;
+        --ink: #20231f;
+        --muted: #667066;
+        --line: #d9dfd4;
+        --accent: #1f7a5d;
+        --accent-ink: #f5fffb;
+        --warn: #a45a12;
+        --fail: #b42318;
+        --done: #2f6f3e;
+        --shadow: 0 1px 2px rgba(18, 24, 18, 0.08);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: var(--bg);
+        color: var(--ink);
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+        letter-spacing: 0;
+      }
+
+      button,
+      input {
+        font: inherit;
+      }
+
+      .shell {
+        min-height: 100vh;
+        display: grid;
+        grid-template-rows: auto 1fr;
+      }
+
+      header {
+        min-height: 56px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 12px 18px;
+        border-bottom: 1px solid var(--line);
+        background: color-mix(in srgb, var(--panel) 92%, transparent);
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-width: 0;
+      }
+
+      .mark {
+        width: 28px;
+        height: 28px;
+        border-radius: 6px;
+        background: var(--accent);
+        color: var(--accent-ink);
+        display: grid;
+        place-items: center;
+        font-weight: 760;
+        line-height: 1;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 18px;
+        font-weight: 680;
+      }
+
+      .toolbar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .status {
+        color: var(--muted);
+        font-size: 13px;
+        white-space: nowrap;
+      }
+
+      .icon-button {
+        width: 34px;
+        height: 34px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--panel);
+        color: var(--ink);
+        display: grid;
+        place-items: center;
+        cursor: pointer;
+      }
+
+      .icon-button:hover {
+        border-color: var(--accent);
+      }
+
+      main {
+        display: grid;
+        grid-template-columns: minmax(240px, 320px) minmax(0, 1fr) minmax(280px, 420px);
+        min-height: 0;
+      }
+
+      .pane {
+        min-width: 0;
+        min-height: 0;
+        border-right: 1px solid var(--line);
+        background: var(--panel);
+        display: flex;
+        flex-direction: column;
+      }
+
+      .pane:last-child {
+        border-right: 0;
+      }
+
+      .pane-head {
+        height: 48px;
+        padding: 10px 14px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      h2 {
+        margin: 0;
+        font-size: 13px;
+        font-weight: 680;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      .list,
+      .detail,
+      .events {
+        min-height: 0;
+        overflow: auto;
+      }
+
+      .run-row {
+        width: 100%;
+        min-height: 64px;
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 8px 10px;
+        align-items: center;
+        padding: 10px 14px;
+        border: 0;
+        border-bottom: 1px solid var(--line);
+        background: transparent;
+        color: inherit;
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .run-row:hover,
+      .run-row[aria-current="true"] {
+        background: color-mix(in srgb, var(--accent) 10%, transparent);
+      }
+
+      .run-id {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-weight: 650;
+      }
+
+      .node {
+        grid-column: 1 / -1;
+        color: var(--muted);
+        font-size: 12px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .pill {
+        min-width: 72px;
+        height: 24px;
+        display: inline-grid;
+        place-items: center;
+        padding: 0 8px;
+        border-radius: 999px;
+        color: #fff;
+        background: var(--muted);
+        font-size: 12px;
+        font-weight: 650;
+      }
+
+      .pill.finished {
+        background: var(--done);
+      }
+
+      .pill.failed {
+        background: var(--fail);
+      }
+
+      .pill.parked,
+      .pill.running {
+        background: var(--warn);
+      }
+
+      .detail {
+        padding: 14px;
+      }
+
+      .field {
+        display: grid;
+        grid-template-columns: minmax(96px, 132px) minmax(0, 1fr);
+        gap: 10px;
+        padding: 8px 0;
+        border-bottom: 1px solid var(--line);
+        font-size: 14px;
+      }
+
+      .field dt {
+        margin: 0;
+        color: var(--muted);
+      }
+
+      .field dd {
+        margin: 0;
+        min-width: 0;
+        overflow-wrap: anywhere;
+      }
+
+      pre {
+        margin: 14px 0 0;
+        padding: 12px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: #101510;
+        color: #e8f1e8;
+        overflow: auto;
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
+      .event {
+        padding: 10px 14px;
+        border-bottom: 1px solid var(--line);
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 6px 10px;
+        font-size: 13px;
+      }
+
+      .event-kind {
+        font-weight: 680;
+      }
+
+      .event-seq {
+        color: var(--muted);
+      }
+
+      .event-data {
+        grid-column: 1 / -1;
+        color: var(--muted);
+        overflow-wrap: anywhere;
+        white-space: pre-wrap;
+      }
+
+      .empty {
+        padding: 20px 14px;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      @media (max-width: 980px) {
+        main {
+          grid-template-columns: 1fr;
+        }
+
+        .pane {
+          min-height: 320px;
+          border-right: 0;
+          border-bottom: 1px solid var(--line);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell" id="agentd-dashboard">
+      <header>
+        <div class="brand">
+          <div class="mark" aria-hidden="true">a</div>
+          <h1>agentd</h1>
+        </div>
+        <div class="toolbar">
+          <span class="status" id="status">idle</span>
+          <button class="icon-button" id="refresh" type="button" aria-label="Refresh runs" title="Refresh runs">
+            &#8635;
+          </button>
+        </div>
+      </header>
+      <main>
+        <section class="pane" aria-labelledby="runs-heading">
+          <div class="pane-head">
+            <h2 id="runs-heading">Runs</h2>
+          </div>
+          <div class="list" data-region="runs-list" id="runs-list"></div>
+        </section>
+        <section class="pane" aria-labelledby="detail-heading">
+          <div class="pane-head">
+            <h2 id="detail-heading">Detail</h2>
+          </div>
+          <div class="detail" data-region="run-detail" id="run-detail"></div>
+        </section>
+        <section class="pane" aria-labelledby="events-heading">
+          <div class="pane-head">
+            <h2 id="events-heading">Events</h2>
+          </div>
+          <div class="events" data-region="event-log" id="event-log"></div>
+        </section>
+      </main>
+    </div>
+    <script>
+      const runsList = document.getElementById("runs-list");
+      const runDetail = document.getElementById("run-detail");
+      const eventLog = document.getElementById("event-log");
+      const statusEl = document.getElementById("status");
+      const refreshButton = document.getElementById("refresh");
+      let selectedRunId = null;
+      let eventSource = null;
+
+      const setStatus = (value) => {
+        statusEl.textContent = value;
+      };
+
+      const escapeText = (value) => {
+        const span = document.createElement("span");
+        span.textContent = value == null ? "" : String(value);
+        return span.innerHTML;
+      };
+
+      const renderEmpty = (node, text) => {
+        node.innerHTML = `<div class="empty">${escapeText(text)}</div>`;
+      };
+
+      async function loadRuns() {
+        setStatus("loading");
+        try {
+          const response = await fetch("/runs");
+          if (!response.ok) {
+            throw new Error(`GET /runs ${response.status}`);
+          }
+          const runs = await response.json();
+          renderRuns(runs);
+          if (!selectedRunId && runs.length > 0) {
+            selectRun(runs[0].run_id);
+          }
+          setStatus(`${runs.length} runs`);
+        } catch (error) {
+          renderEmpty(runsList, error.message);
+          setStatus("error");
+        }
+      }
+
+      function renderRuns(runs) {
+        if (!Array.isArray(runs) || runs.length === 0) {
+          renderEmpty(runsList, "No runs");
+          return;
+        }
+        runsList.innerHTML = runs
+          .map((run) => {
+            const active = run.run_id === selectedRunId ? "true" : "false";
+            const status = escapeText(run.status || "unknown");
+            const node = run.current_node ? escapeText(run.current_node) : "terminal";
+            return `<button class="run-row" type="button" aria-current="${active}" data-run-id="${escapeText(run.run_id)}">
+              <span class="run-id">${escapeText(run.run_id)}</span>
+              <span class="pill ${status}">${status}</span>
+              <span class="node">${node}</span>
+            </button>`;
+          })
+          .join("");
+      }
+
+      async function selectRun(runId) {
+        selectedRunId = runId;
+        [...runsList.querySelectorAll(".run-row")].forEach((row) => {
+          row.setAttribute("aria-current", row.dataset.runId === runId ? "true" : "false");
+        });
+        await loadRunDetail(runId);
+        tailEvents(runId);
+      }
+
+      async function loadRunDetail(runId) {
+        try {
+          const response = await fetch(`/runs/${encodeURIComponent(runId)}`);
+          if (!response.ok) {
+            throw new Error(`GET /runs/${runId} ${response.status}`);
+          }
+          const detail = await response.json();
+          runDetail.innerHTML = `<dl>
+            <div class="field"><dt>Status</dt><dd>${escapeText(detail.status)}</dd></div>
+            <div class="field"><dt>Current</dt><dd>${escapeText(detail.current_node || "terminal")}</dd></div>
+            <div class="field"><dt>Completed</dt><dd>${escapeText((detail.completed_nodes || []).join(", "))}</dd></div>
+          </dl>
+          <pre>${escapeText(JSON.stringify(detail.context || {}, null, 2))}</pre>`;
+        } catch (error) {
+          renderEmpty(runDetail, error.message);
+        }
+      }
+
+      function tailEvents(runId) {
+        if (eventSource) {
+          eventSource.close();
+        }
+        eventLog.innerHTML = "";
+        eventSource = new EventSource(`/runs/${encodeURIComponent(runId)}/events`);
+        eventSource.onmessage = (event) => appendEvent("message", event.lastEventId, event.data);
+        eventSource.addEventListener("run_parked", (event) => appendRunEvent("run_parked", event.lastEventId, event.data));
+        eventSource.addEventListener("run_finished", (event) => appendRunEvent("run_finished", event.lastEventId, event.data));
+        eventSource.addEventListener("run_failed", (event) => appendRunEvent("run_failed", event.lastEventId, event.data));
+        eventSource.addEventListener("node.parked", (event) => appendEvent("node.parked", event.lastEventId, event.data));
+        eventSource.addEventListener("state_resync", (event) => appendRunEvent("state_resync", event.lastEventId, event.data));
+        eventSource.onerror = () => {
+          setStatus("events closed");
+        };
+      }
+
+      async function refreshSelectedRunState() {
+        if (!selectedRunId) {
+          return;
+        }
+        await Promise.all([loadRunDetail(selectedRunId), loadRuns()]);
+      }
+
+      async function refreshDashboard() {
+        if (selectedRunId) {
+          await refreshSelectedRunState();
+          return;
+        }
+        await loadRuns();
+      }
+
+      function appendRunEvent(kind, seq, data) {
+        appendEvent(kind, seq, data);
+        void refreshSelectedRunState();
+      }
+
+      function formatEventData(data) {
+        try {
+          const parsed = JSON.parse(data);
+          return escapeText(JSON.stringify(parsed, null, 2));
+        } catch {
+          return escapeText(data);
+        }
+      }
+
+      function appendEvent(kind, seq, data) {
+        const row = document.createElement("div");
+        row.className = "event";
+        row.innerHTML = `<span class="event-kind">${escapeText(kind)}</span>
+          <span class="event-seq">#${escapeText(seq || "-")}</span>
+          <span class="event-data">${formatEventData(data)}</span>`;
+        eventLog.prepend(row);
+      }
+
+      runsList.addEventListener("click", (event) => {
+        const row = event.target.closest(".run-row");
+        if (row) {
+          selectRun(row.dataset.runId);
+        }
+      });
+
+      refreshButton.addEventListener("click", () => refreshDashboard());
+      loadRuns();
+    </script>
+  </body>
+</html>

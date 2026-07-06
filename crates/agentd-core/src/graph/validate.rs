@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeSet, VecDeque};
 
-use crate::graph::node_graph::{HandlerKind, NodeGraph, NodeShape};
+use crate::graph::node_graph::{HandlerKind, NodeDef, NodeGraph, NodeShape};
 
 /// Closed set of tool names legal in `pre_tools` / `post_action` (design §4.12).
 const KNOWN_TOOLS: &[&str] = &[
@@ -25,12 +25,21 @@ const KNOWN_TOOLS: &[&str] = &[
     "github.status_push",
 ];
 
+const KNOWN_VISIBILITIES: &[&str] = &["blind", "after_submit", "chain", "delphi"];
+const BASE_AGGREGATORS: &[&str] = &[
+    "any_fail",
+    "majority_pass",
+    "unanimous_pass",
+    "first_blocker",
+];
+
 /// Run every validation check, accumulating violations.
 pub fn run(g: &NodeGraph, violations: &mut Vec<String>) {
     check_node_ids(g, violations);
     check_edge_endpoints(g, violations);
     check_start_terminal(g, violations);
     check_tools(g, violations);
+    check_aggregators(g, violations);
     check_delphi(g, violations);
     check_reachability(g, violations);
     check_goal_gate_paths(g, violations);
@@ -87,8 +96,7 @@ fn check_start_terminal(g: &NodeGraph, violations: &mut Vec<String>) {
     }
 }
 
-/// Validate `pre_tools` / `post_action` token lists against the known-tool set,
-/// and reject P1-only `converge_or_*` aggregators.
+/// Validate `pre_tools` / `post_action` token lists against the known-tool set.
 fn check_tools(g: &NodeGraph, violations: &mut Vec<String>) {
     for n in &g.nodes {
         for attr in ["pre_tools", "post_action"] {
@@ -104,26 +112,152 @@ fn check_tools(g: &NodeGraph, violations: &mut Vec<String>) {
                 }
             }
         }
-        if let Some(agg) = n.attr("aggregator") {
-            if agg.starts_with("converge_or_") {
+    }
+}
+
+fn check_aggregators(g: &NodeGraph, violations: &mut Vec<String>) {
+    for n in &g.nodes {
+        if n.handler != Some(HandlerKind::ParallelFanIn) {
+            continue;
+        }
+        let Some(agg) = n.attr("aggregator") else {
+            continue;
+        };
+        if let Some(fallback) = agg.strip_prefix("converge_or_") {
+            if !BASE_AGGREGATORS.contains(&fallback) {
                 violations.push(format!(
-                    "node '{}': aggregator '{agg}' (converge_or_*) is reserved for P1 (design §2.5.1)",
+                    "node '{}': aggregator '{agg}' uses unknown converge fallback '{fallback}'",
+                    n.id
+                ));
+                continue;
+            }
+            if !has_upstream_delphi_fan_out(g, n) {
+                violations.push(format!(
+                    "node '{}': aggregator '{agg}' requires a paired fan_out with visibility=delphi",
                     n.id
                 ));
             }
+        } else if !BASE_AGGREGATORS.contains(&agg) {
+            violations.push(format!("node '{}': unknown aggregator '{agg}'", n.id));
         }
     }
 }
 
 fn check_delphi(g: &NodeGraph, violations: &mut Vec<String>) {
     for n in &g.nodes {
-        if n.attr("visibility") == Some("delphi") {
+        if n.handler != Some(HandlerKind::ParallelFanOut) {
+            continue;
+        }
+        let visibility = n.attr("visibility").unwrap_or("blind");
+        if !KNOWN_VISIBILITIES.contains(&visibility) {
             violations.push(format!(
-                "node '{}': visibility=delphi is reserved for P1 (design §2.5.1)",
+                "node '{}': unknown visibility '{visibility}'",
+                n.id
+            ));
+            continue;
+        }
+
+        let max_rounds = parse_max_rounds(n, violations);
+        if visibility == "delphi" {
+            let convergence = n.attr("convergence").unwrap_or("verdict_stable");
+            if !is_supported_delphi_convergence(convergence) {
+                violations.push(format!(
+                    "node '{}': convergence='{convergence}' is not supported for Delphi (expected verdict_stable or findings_diff<N> with 0.0 <= N <= 1.0)",
+                    n.id
+                ));
+            }
+            if !matches!(max_rounds, Some(rounds) if rounds >= 2) {
+                violations.push(format!(
+                    "node '{}': visibility=delphi requires max_rounds >= 2",
+                    n.id
+                ));
+            }
+            let fan_ins = downstream_fan_ins(g, n);
+            match fan_ins.as_slice() {
+                [] => violations.push(format!(
+                    "node '{}': visibility=delphi requires a reachable parallel.fan_in partner",
+                    n.id
+                )),
+                [fan_in] => {
+                    let agg = fan_in.attr("aggregator").unwrap_or("any_fail");
+                    if !is_supported_converge_aggregator(agg) {
+                        violations.push(format!(
+                            "node '{}': visibility=delphi requires paired fan_in '{}' to use aggregator=converge_or_<fallback> (got '{agg}')",
+                            n.id, fan_in.id
+                        ));
+                    }
+                }
+                _ => violations.push(format!(
+                    "node '{}': visibility=delphi reaches {} fan_in nodes; this slice requires exactly one reachable parallel.fan_in partner",
+                    n.id,
+                    fan_ins.len()
+                )),
+            }
+        } else if max_rounds.is_some_and(|rounds| rounds > 1) {
+            violations.push(format!(
+                "node '{}': max_rounds > 1 requires visibility=delphi",
                 n.id
             ));
         }
     }
+}
+
+fn is_supported_delphi_convergence(convergence: &str) -> bool {
+    convergence == "verdict_stable" || parse_findings_diff_threshold(convergence).is_some()
+}
+
+fn parse_findings_diff_threshold(convergence: &str) -> Option<f64> {
+    let inner = convergence
+        .strip_prefix("findings_diff<")?
+        .strip_suffix('>')?;
+    let threshold = inner.parse::<f64>().ok()?;
+    threshold
+        .is_finite()
+        .then_some(threshold)
+        .filter(|n| (0.0..=1.0).contains(n))
+}
+
+fn parse_max_rounds(n: &NodeDef, violations: &mut Vec<String>) -> Option<u32> {
+    let raw = n.attr("max_rounds")?;
+    match raw.parse::<u32>() {
+        Ok(0) => {
+            violations.push(format!("node '{}': max_rounds must be >= 1", n.id));
+            None
+        }
+        Ok(rounds) => Some(rounds),
+        Err(_) => {
+            violations.push(format!(
+                "node '{}': max_rounds must be an integer >= 1 (got '{raw}')",
+                n.id
+            ));
+            None
+        }
+    }
+}
+
+fn downstream_fan_ins<'g>(g: &'g NodeGraph, n: &NodeDef) -> Vec<&'g NodeDef> {
+    let reachable = forward_reachable(g, std::slice::from_ref(&n.id));
+    g.nodes
+        .iter()
+        .filter(|candidate| {
+            candidate.handler == Some(HandlerKind::ParallelFanIn)
+                && reachable.contains(candidate.id.as_str())
+        })
+        .collect()
+}
+
+fn has_upstream_delphi_fan_out(g: &NodeGraph, n: &NodeDef) -> bool {
+    let upstream = backward_reachable(g, &n.id);
+    g.nodes.iter().any(|candidate| {
+        candidate.handler == Some(HandlerKind::ParallelFanOut)
+            && candidate.attr("visibility") == Some("delphi")
+            && upstream.contains(candidate.id.as_str())
+    })
+}
+
+fn is_supported_converge_aggregator(agg: &str) -> bool {
+    agg.strip_prefix("converge_or_")
+        .is_some_and(|fallback| BASE_AGGREGATORS.contains(&fallback))
 }
 
 fn check_reachability(g: &NodeGraph, violations: &mut Vec<String>) {

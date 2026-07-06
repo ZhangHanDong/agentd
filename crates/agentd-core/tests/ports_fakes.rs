@@ -144,12 +144,13 @@ async fn in_memory_store_review_verdict_is_idempotent_per_reviewer() {
     let store = InMemoryStore::new();
     let run = RunId::from_string("r");
     let rr = store
-        .insert_review_run(&run, &NodeId::parsed("review"), 2, "sha")
+        .insert_review_run(&run, &NodeId::parsed("review"), 2, 1, "sha")
         .await
         .expect("insert review run");
     let vote = |who: &str| ReviewVerdict {
         reviewer_id: AgentId::parsed(who),
         value: VerdictValue::Pass,
+        findings: String::new(),
     };
     store
         .insert_review_verdict(&rr, vote("a"))

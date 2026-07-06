@@ -12,8 +12,7 @@ use crate::ports::{CommandError, CommandOutput, CommandRunner, RunOpts};
 pub struct RecordedCall {
     pub program: String,
     pub args: Vec<String>,
-    /// The working directory the call requested (`RunOpts.cwd`) — lets a test
-    /// assert a `tool` node ran in the threaded worktree (P2 C1a).
+    /// The working directory the call requested (`RunOpts.cwd`).
     pub cwd: Option<PathBuf>,
 }
 

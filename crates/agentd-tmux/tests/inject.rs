@@ -163,6 +163,16 @@ async fn wait_for_ready_returns_ok_when_visible() {
 }
 
 #[tokio::test]
+async fn wait_for_ready_accepts_claude_auto_mode_prompt() {
+    let rec = Arc::new(RecordingCommandRunner::new());
+    rec.push_output(ok("Welcome back\nauto mode on\n", 0));
+    backend(&rec, zero_delay_cfg())
+        .wait_for_ready(&handle("agentd-x:0.0"), CliKind::ClaudeCode)
+        .await
+        .expect("current Claude prompt is ready");
+}
+
+#[tokio::test]
 async fn wait_for_ready_loops_until_visible() {
     let rec = Arc::new(RecordingCommandRunner::new());
     rec.push_output(ok("still booting\n", 0)); // capture 1: no ready pattern
@@ -172,6 +182,71 @@ async fn wait_for_ready_loops_until_visible() {
         .await
         .expect("ready on the second poll");
     assert_eq!(rec.calls().len(), 2, "re-polled until the prompt appeared");
+}
+
+#[tokio::test]
+async fn spawn_auto_trusts_claude_workspace_when_env_opted_in() {
+    let rec = Arc::new(RecordingCommandRunner::new());
+    rec.push_output(ok("", 1)); // has-session: none
+    rec.push_output(ok("", 0)); // new-session
+    rec.push_output(ok("%1 5\n", 0)); // display-message
+    rec.push_output(ok(
+        "Quick safety check\nYes, I trust this folder\nEnter to confirm\n",
+        0,
+    )); // trust prompt capture
+    rec.push_output(ok("", 0)); // trust send-keys Enter
+    rec.push_output(ok("Welcome back\n⏵⏵ auto mode on\n", 0)); // ready capture
+    rec.push_output(ok("", 0)); // set-buffer
+    rec.push_output(ok("", 0)); // paste-buffer
+    rec.push_output(ok("", 0)); // send-keys Enter for prompt
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut env_overrides = HashMap::new();
+    env_overrides.insert(
+        "AGENTD_CLAUDE_AUTO_TRUST_WORKSPACE".to_string(),
+        "1".to_string(),
+    );
+    let request = SpawnRequest {
+        agent_id: AgentId::parsed("claude-impl-a"),
+        mxid: None,
+        cli: CliKind::ClaudeCode,
+        worktree: dir.path().to_path_buf(),
+        initial_prompt: Some("go".to_string()),
+        env_overrides,
+        launch_strategy: LaunchStrategy::Direct,
+    };
+    backend(&rec, zero_delay_cfg())
+        .spawn(request)
+        .await
+        .expect("spawn confirms trust then injects");
+
+    let calls = rec.calls();
+    let subs: Vec<&str> = calls.iter().map(|c| c.args[0].as_str()).collect();
+    assert_eq!(
+        subs,
+        [
+            "has-session",
+            "new-session",
+            "display-message",
+            "capture-pane",
+            "send-keys",
+            "capture-pane",
+            "set-buffer",
+            "paste-buffer",
+            "send-keys",
+        ],
+        "trust Enter must happen before prompt paste"
+    );
+    assert_eq!(
+        calls[4].args,
+        vec![
+            "send-keys".to_string(),
+            "-t".to_string(),
+            "agentd-claude-impl-a:0.0".to_string(),
+            "Enter".to_string(),
+        ],
+        "workspace trust confirmation uses one bare Enter"
+    );
 }
 
 #[tokio::test]

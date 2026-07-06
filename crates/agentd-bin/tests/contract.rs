@@ -3,21 +3,128 @@
 //! `draft.dot` E2E + emit assertions land in 9a-T3; this skeleton checks
 //! construction + a read.
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
-use agentd_bin::{ProductionRunHost, SystemClock};
+use agentd_bin::{
+    ProductionRunHost, SystemClock,
+    daemon::{cleanup_failed_worktrees, gc_worktrees_on_boot},
+};
+use agentd_core::CoreError;
 use agentd_core::engine::RunProgress;
-use agentd_core::ports::RunStatus;
+use agentd_core::ports::{
+    AgentBackend, CommandError, CommandOutput, CommandRunner, RunOpts, RunStatus, WorktreeAllocator,
+};
 use agentd_core::test_support::{FakeBackend, MempalStub, RecordingCommandRunner};
-use agentd_core::types::RunId;
-use agentd_store::{SqliteStore, review_repo, run_repo};
+use agentd_core::types::{AgentHandle, NodeId, RunId, SpawnRequest};
+use agentd_store::{SqliteStore, review_repo, run_repo, task_repo};
 use agentd_surface::host::RunHost;
 use agentd_surface::mcp_server::dispatch;
+use agentd_tmux::{WorktreePool, WorktreeProvider};
 use serde_json::json;
 
 fn workflows_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workflows")
+}
+
+#[derive(Clone, Debug)]
+struct SharedBackend(Arc<FakeBackend>);
+
+#[async_trait::async_trait]
+impl AgentBackend for SharedBackend {
+    async fn spawn(&self, req: SpawnRequest) -> Result<AgentHandle, CoreError> {
+        self.0.spawn(req).await
+    }
+}
+
+#[derive(Clone, Debug)]
+struct SharedRunner(Arc<RecordingCommandRunner>);
+
+#[async_trait::async_trait]
+impl CommandRunner for SharedRunner {
+    async fn run(
+        &self,
+        program: &str,
+        args: &[String],
+        opts: RunOpts,
+    ) -> Result<CommandOutput, CommandError> {
+        self.0.run(program, args, opts).await
+    }
+}
+
+#[derive(Debug)]
+struct StaticAllocator {
+    path: PathBuf,
+}
+
+impl StaticAllocator {
+    fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+}
+
+#[async_trait::async_trait]
+impl WorktreeAllocator for StaticAllocator {
+    async fn allocate(&self, _key: &str) -> Result<PathBuf, CoreError> {
+        Ok(self.path.clone())
+    }
+
+    async fn release(&self, _key: &str, _path: &std::path::Path) -> Result<(), CoreError> {
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct FailingAllocator;
+
+#[async_trait::async_trait]
+impl WorktreeAllocator for FailingAllocator {
+    async fn allocate(&self, _key: &str) -> Result<PathBuf, CoreError> {
+        Err(CoreError::Backend("injected allocator failure".into()))
+    }
+
+    async fn release(&self, _key: &str, _path: &std::path::Path) -> Result<(), CoreError> {
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct FakeWorktreeProvider {
+    paths: Mutex<Vec<PathBuf>>,
+}
+
+impl FakeWorktreeProvider {
+    fn new(paths: Vec<PathBuf>) -> Self {
+        Self {
+            paths: Mutex::new(paths),
+        }
+    }
+
+    async fn paths(&self) -> Vec<PathBuf> {
+        self.paths.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl WorktreeProvider for FakeWorktreeProvider {
+    async fn create(&self, _name: &str) -> Result<PathBuf, CoreError> {
+        Err(CoreError::Backend("unused fake create".into()))
+    }
+
+    async fn remove(&self, path: &Path) -> Result<(), CoreError> {
+        self.paths.lock().expect("lock").retain(|p| p != path);
+        Ok(())
+    }
+
+    async fn list(&self) -> Result<Vec<PathBuf>, CoreError> {
+        Ok(self.paths.lock().expect("lock").clone())
+    }
+}
+
+struct ObservedHost {
+    host: ProductionRunHost,
+    runner: Arc<RecordingCommandRunner>,
+    _dir: tempfile::TempDir,
 }
 
 async fn production_host() -> (ProductionRunHost, tempfile::TempDir) {
@@ -32,8 +139,34 @@ async fn production_host() -> (ProductionRunHost, tempfile::TempDir) {
         Box::new(MempalStub::new()),
         Box::new(SystemClock),
         workflows_dir(),
-    );
+    )
+    .with_worktree_allocator(Some(Box::new(StaticAllocator::new("/tmp/agentd-task-wt"))));
     (host, dir)
+}
+
+async fn production_host_with_allocator(
+    allocator: Option<Box<dyn WorktreeAllocator>>,
+) -> ObservedHost {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteStore::connect(&dir.path().join("agentd.db"))
+        .await
+        .expect("connect");
+    let backend = Arc::new(FakeBackend::new());
+    let runner = Arc::new(RecordingCommandRunner::new());
+    let host = ProductionRunHost::new(
+        store,
+        Box::new(SharedBackend(backend.clone())),
+        Box::new(SharedRunner(runner.clone())),
+        Box::new(MempalStub::new()),
+        Box::new(SystemClock),
+        workflows_dir(),
+    )
+    .with_worktree_allocator(allocator);
+    ObservedHost {
+        host,
+        runner,
+        _dir: dir,
+    }
 }
 
 #[tokio::test]
@@ -128,6 +261,24 @@ async fn production_runhost_replayed_submit_is_rejected_without_new_event() {
     );
 }
 
+#[tokio::test]
+async fn production_runhost_non_review_park_payload_stays_node_only() {
+    let (host, _dir) = production_host().await;
+    let run = RunId::from_string("draft-payload");
+
+    start_draft(&host, &run).await;
+
+    let events = host.events_from(&run, 0).await.expect("events");
+    let parked = events
+        .iter()
+        .find(|e| e.kind == "run_parked")
+        .expect("draft emits a park event");
+    assert_eq!(
+        parked.payload, r#"{"node":"propose_spec"}"#,
+        "non-review parks keep the existing node-only payload"
+    );
+}
+
 /// The scriptable reviewer: submit a pass verdict through the `submit_review`
 /// tool (which also exercises the production host's `review_counts`).
 async fn agent_submit_review(
@@ -202,6 +353,477 @@ async fn production_runhost_drives_execute_dot_to_done() {
     assert!(
         kinds.iter().filter(|k| **k == "run_parked").count() >= 2,
         "multi-park (implement + review): {kinds:?}"
+    );
+}
+
+#[tokio::test]
+async fn production_runhost_review_park_payload_includes_default_round() {
+    let (host, _dir) = production_host().await;
+    let run = RunId::from_string("review-payload");
+    run_repo::record_run(host.store().pool(), &run, "execute.dot", "sha")
+        .await
+        .expect("record");
+
+    host.start_run(&run).await.expect("start");
+    agent_submit_success(&host, "review-payload", "implement")
+        .await
+        .expect("submit implement");
+
+    let events = host.events_from(&run, 0).await.expect("events");
+    let review_park = events
+        .iter()
+        .find(|e| e.kind == "run_parked" && e.payload.contains(r#""review""#))
+        .expect("review park event");
+    assert_eq!(
+        review_park.payload, r#"{"node":"review","round":1}"#,
+        "review parks carry the default Delphi round"
+    );
+}
+
+#[tokio::test]
+async fn production_runhost_execute_uses_injected_worktree_allocator() {
+    let observed =
+        production_host_with_allocator(Some(Box::new(StaticAllocator::new("/tmp/agentd-task-wt"))))
+            .await;
+    let host = &observed.host;
+    let run = RunId::from_string("e-wt");
+    run_repo::record_run(host.store().pool(), &run, "execute.dot", "sha")
+        .await
+        .expect("record");
+
+    let parked = host.start_run(&run).await.expect("start");
+    assert!(
+        matches!(parked, RunProgress::Parked { .. }),
+        "execute.dot parks at implement, got {parked:?}"
+    );
+    let assignment = host
+        .open_task(&run, &NodeId::parsed("implement"))
+        .await
+        .expect("open task")
+        .expect("implement task is open");
+    assert_eq!(
+        assignment.worktree.as_deref(),
+        Some("/tmp/agentd-task-wt"),
+        "task assignment exposes the allocated worktree"
+    );
+
+    agent_submit_success(host, "e-wt", "implement")
+        .await
+        .expect("submit implement");
+
+    let calls = observed.runner.calls();
+    let lifecycle = calls
+        .iter()
+        .find(|c| c.program == "agent-spec" && c.args.first().is_some_and(|a| a == "lifecycle"))
+        .expect("verify_lifecycle command recorded");
+    let code_pos = lifecycle
+        .args
+        .iter()
+        .position(|a| a == "--code")
+        .expect("verify_lifecycle has --code");
+    assert_eq!(
+        lifecycle.args.get(code_pos + 1).map(String::as_str),
+        Some("/tmp/agentd-task-wt"),
+        "verify_lifecycle checks the allocated implementation worktree"
+    );
+}
+
+#[tokio::test]
+async fn production_open_task_returns_assigned_agent_id() {
+    let observed =
+        production_host_with_allocator(Some(Box::new(StaticAllocator::new("/tmp/agentd-task-wt"))))
+            .await;
+    let host = &observed.host;
+    let run = RunId::from_string("e-owner");
+    run_repo::record_run(host.store().pool(), &run, "execute.dot", "sha")
+        .await
+        .expect("record");
+
+    host.start_run(&run).await.expect("start");
+
+    let assignment = host
+        .open_task(&run, &NodeId::parsed("implement"))
+        .await
+        .expect("open task")
+        .expect("implement task is open");
+    assert_eq!(
+        assignment.agent_id, "implementer",
+        "production open_task returns the codergen role as task owner"
+    );
+}
+
+#[tokio::test]
+async fn production_assign_task_accepts_owner_and_rejects_other_agent() {
+    let observed =
+        production_host_with_allocator(Some(Box::new(StaticAllocator::new("/tmp/agentd-task-wt"))))
+            .await;
+    let host = &observed.host;
+    let run = RunId::from_string("e-assign-task");
+    run_repo::record_run(host.store().pool(), &run, "execute.dot", "sha")
+        .await
+        .expect("record");
+
+    host.start_run(&run).await.expect("start");
+
+    let owner = dispatch(
+        host,
+        "assign_task",
+        json!({
+            "run_id": "e-assign-task",
+            "node_id": "implement",
+            "agent_id": "implementer"
+        }),
+    )
+    .await
+    .expect("owner is assigned");
+    assert_eq!(owner["worktree"], "/tmp/agentd-task-wt");
+
+    let other = dispatch(
+        host,
+        "assign_task",
+        json!({
+            "run_id": "e-assign-task",
+            "node_id": "implement",
+            "agent_id": "someone-else"
+        }),
+    )
+    .await
+    .expect_err("different agent is rejected");
+    assert_eq!(other.code(), "not_assigned");
+}
+
+#[tokio::test]
+async fn production_runhost_execute_publishes_worktree_branch_before_pr() {
+    let observed =
+        production_host_with_allocator(Some(Box::new(StaticAllocator::new("/tmp/agentd-task-wt"))))
+            .await;
+    let host = &observed.host;
+    let run = RunId::from_string("e-pr");
+    run_repo::record_run(host.store().pool(), &run, "execute.dot", "sha")
+        .await
+        .expect("record");
+
+    let parked = host.start_run(&run).await.expect("start");
+    assert!(
+        matches!(parked, RunProgress::Parked { .. }),
+        "execute.dot parks at implement, got {parked:?}"
+    );
+    let assignment = host
+        .open_task(&run, &NodeId::parsed("implement"))
+        .await
+        .expect("open task")
+        .expect("implement task is open");
+    let task_run_id_arg = assignment.task_run_id.as_str().to_string();
+    let task_branch = format!("agentd/{task_run_id_arg}");
+
+    agent_submit_success(host, "e-pr", "implement")
+        .await
+        .expect("submit implement");
+    let review_run_id = review_repo::find_open_review_run(host.store().pool(), &run)
+        .await
+        .expect("find review run")
+        .expect("an open review run");
+    for reviewer in ["claude-sec", "codex-perf", "gemini-readability"] {
+        agent_submit_review(host, review_run_id.as_str(), reviewer)
+            .await
+            .expect("submit_review");
+    }
+
+    let snap = host
+        .run_snapshot(&run)
+        .await
+        .expect("snapshot")
+        .expect("run exists");
+    assert_eq!(snap.status, "finished", "execute.dot reached done");
+
+    let calls = observed.runner.calls();
+    let publish_idx = calls
+        .iter()
+        .position(|c| {
+            c.program == "bash"
+                && c.args
+                    .first()
+                    .is_some_and(|a| a == "scripts/agentd_publish_worktree.sh")
+        })
+        .expect("publish_branch recorded a script call");
+    assert_eq!(
+        calls[publish_idx].args,
+        vec![
+            "scripts/agentd_publish_worktree.sh".to_string(),
+            "/tmp/agentd-task-wt".to_string(),
+            task_run_id_arg,
+        ]
+    );
+
+    let gh_idx = calls
+        .iter()
+        .position(|c| c.program == "gh" && c.args.first().is_some_and(|a| a == "pr"))
+        .expect("open_pr recorded a gh call");
+    assert!(
+        publish_idx < gh_idx,
+        "publish_branch must run before open_pr: {calls:?}"
+    );
+    assert_eq!(
+        calls[gh_idx].args,
+        vec![
+            "pr".to_string(),
+            "create".to_string(),
+            "--fill".to_string(),
+            "--head".to_string(),
+            task_branch,
+        ]
+    );
+}
+
+#[tokio::test]
+async fn production_runhost_allocator_failure_stops_execute_before_verify() {
+    let observed = production_host_with_allocator(Some(Box::new(FailingAllocator))).await;
+    let host = &observed.host;
+    let run = RunId::from_string("e-wt-fail");
+    run_repo::record_run(host.store().pool(), &run, "execute.dot", "sha")
+        .await
+        .expect("record");
+
+    let err = host.start_run(&run).await.expect_err("allocator failure");
+    assert!(
+        format!("{err:?}").contains("injected allocator failure"),
+        "allocator failure is surfaced, got {err:?}"
+    );
+    assert!(
+        observed.runner.calls().iter().all(|c| {
+            !(c.program == "agent-spec" && c.args.first().is_some_and(|a| a == "lifecycle"))
+        }),
+        "verify_lifecycle must not run after allocator failure"
+    );
+}
+
+#[tokio::test]
+async fn build_production_host_preserves_active_worktrees_during_boot_gc() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteStore::connect(&dir.path().join("agentd.db"))
+        .await
+        .expect("connect");
+    let run = RunId::from_string("gc-running");
+    run_repo::record_run(store.pool(), &run, "execute.dot", "sha")
+        .await
+        .expect("record run");
+    let task_run = task_repo::insert_task_run(store.pool(), &run, &NodeId::parsed("implement"))
+        .await
+        .expect("insert task");
+    task_repo::set_task_run_worktree(
+        store.pool(),
+        &task_run,
+        "/tmp/agentd/worktrees/wt-task-tr_0123456789ABCDEFGHJKMNPQRS",
+    )
+    .await
+    .expect("set task worktree");
+
+    let active =
+        PathBuf::from("/private/tmp/agentd/worktrees/wt-task-tr_0123456789ABCDEFGHJKMNPQRS");
+    let stale =
+        PathBuf::from("/private/tmp/agentd/worktrees/wt-task-tr_11111111111111111111111111");
+    let provider = Arc::new(FakeWorktreeProvider::new(vec![
+        active.clone(),
+        stale.clone(),
+    ]));
+    let pool = WorktreePool::new(provider.clone());
+
+    gc_worktrees_on_boot(&store, &pool).await.expect("boot gc");
+
+    assert_eq!(
+        provider.paths().await,
+        vec![active],
+        "daemon boot-GC preserves store-active worktrees and removes unreferenced leftovers"
+    );
+}
+
+async fn seed_cleanup_runs(
+    store: &SqliteStore,
+) -> (PathBuf, PathBuf, PathBuf, RunId, RunId, RunId) {
+    let running = RunId::from_string("cleanup-running");
+    run_repo::record_run(store.pool(), &running, "execute.dot", "sha")
+        .await
+        .expect("record running");
+    let running_task =
+        task_repo::insert_task_run(store.pool(), &running, &NodeId::parsed("implement"))
+            .await
+            .expect("running task");
+    let running_path = PathBuf::from(format!(
+        "/tmp/agentd/worktrees/wt-task-{}",
+        running_task.as_str()
+    ));
+    task_repo::set_task_run_worktree(store.pool(), &running_task, &running_path.to_string_lossy())
+        .await
+        .expect("running worktree");
+
+    let failed = RunId::from_string("cleanup-failed");
+    run_repo::record_run(store.pool(), &failed, "execute.dot", "sha")
+        .await
+        .expect("record failed");
+    let failed_task =
+        task_repo::insert_task_run(store.pool(), &failed, &NodeId::parsed("implement"))
+            .await
+            .expect("failed task");
+    let failed_task_path = PathBuf::from(format!(
+        "/tmp/agentd/worktrees/wt-task-{}",
+        failed_task.as_str()
+    ));
+    task_repo::set_task_run_worktree(
+        store.pool(),
+        &failed_task,
+        &failed_task_path.to_string_lossy(),
+    )
+    .await
+    .expect("failed task worktree");
+    let failed_review = review_repo::insert_review_run(
+        store.pool(),
+        &failed,
+        &NodeId::parsed("review"),
+        1,
+        1,
+        "csha",
+    )
+    .await
+    .expect("failed review");
+    let reviewer = agentd_core::types::AgentId::parsed("debug");
+    let failed_review_path = PathBuf::from(format!(
+        "/tmp/agentd/worktrees/wt-review-{}-{}",
+        failed_review.as_str(),
+        reviewer.as_str()
+    ));
+    review_repo::set_review_worktree(
+        store.pool(),
+        &failed_review,
+        &reviewer,
+        &failed_review_path.to_string_lossy(),
+    )
+    .await
+    .expect("failed review worktree");
+    run_repo::update_run_status(store.pool(), &failed, RunStatus::Failed)
+        .await
+        .expect("mark failed");
+
+    let finished = RunId::from_string("cleanup-finished");
+    run_repo::record_run(store.pool(), &finished, "execute.dot", "sha")
+        .await
+        .expect("record finished");
+    let finished_task =
+        task_repo::insert_task_run(store.pool(), &finished, &NodeId::parsed("implement"))
+            .await
+            .expect("finished task");
+    let finished_path = PathBuf::from(format!(
+        "/tmp/agentd/worktrees/wt-task-{}",
+        finished_task.as_str()
+    ));
+    task_repo::set_task_run_worktree(
+        store.pool(),
+        &finished_task,
+        &finished_path.to_string_lossy(),
+    )
+    .await
+    .expect("finished worktree");
+    run_repo::update_run_status(store.pool(), &finished, RunStatus::Finished)
+        .await
+        .expect("mark finished");
+
+    (
+        failed_task_path,
+        failed_review_path,
+        running_path,
+        failed,
+        running,
+        finished,
+    )
+}
+
+#[tokio::test]
+async fn cleanup_failed_worktrees_dry_run_lists_without_releasing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteStore::connect(&dir.path().join("agentd.db"))
+        .await
+        .expect("connect");
+    let (failed_task_path, failed_review_path, running_path, _failed, _running, _finished) =
+        seed_cleanup_runs(&store).await;
+    let provider = Arc::new(FakeWorktreeProvider::new(vec![
+        failed_task_path.clone(),
+        failed_review_path.clone(),
+        running_path.clone(),
+    ]));
+    let pool = WorktreePool::new(provider.clone());
+
+    let plan = cleanup_failed_worktrees(&store, &pool, false)
+        .await
+        .expect("dry-run cleanup");
+
+    assert_eq!(
+        plan.candidates.len(),
+        2,
+        "dry-run reports failed candidates"
+    );
+    assert_eq!(plan.released, 0, "dry-run releases nothing");
+    assert_eq!(
+        provider.paths().await,
+        vec![
+            failed_task_path.clone(),
+            failed_review_path.clone(),
+            running_path.clone()
+        ],
+        "dry-run does not remove provider worktrees"
+    );
+    let active_paths: std::collections::HashSet<PathBuf> = store
+        .active_worktree_paths()
+        .await
+        .expect("active paths")
+        .into_iter()
+        .collect();
+    assert!(
+        active_paths.contains(&failed_task_path) && active_paths.contains(&failed_review_path),
+        "dry-run does not clear active failed-run store refs"
+    );
+}
+
+#[tokio::test]
+async fn cleanup_failed_worktrees_execute_removes_failed_worktrees_and_clears_refs() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteStore::connect(&dir.path().join("agentd.db"))
+        .await
+        .expect("connect");
+    let (failed_task_path, failed_review_path, running_path, _failed, _running, _finished) =
+        seed_cleanup_runs(&store).await;
+    let provider = Arc::new(FakeWorktreeProvider::new(vec![
+        failed_task_path.clone(),
+        failed_review_path.clone(),
+        running_path.clone(),
+    ]));
+    let pool = WorktreePool::new(provider.clone());
+
+    let plan = cleanup_failed_worktrees(&store, &pool, true)
+        .await
+        .expect("execute cleanup");
+
+    assert_eq!(plan.candidates.len(), 2, "execute saw failed candidates");
+    assert_eq!(
+        plan.released, 2,
+        "execute released both failed-run worktrees"
+    );
+    assert_eq!(
+        provider.paths().await,
+        vec![running_path.clone()],
+        "execute leaves unrelated running worktree alone"
+    );
+    let active_paths: std::collections::HashSet<PathBuf> = store
+        .active_worktree_paths()
+        .await
+        .expect("active paths")
+        .into_iter()
+        .collect();
+    assert!(
+        !active_paths.contains(&failed_task_path) && !active_paths.contains(&failed_review_path),
+        "execute clears failed-run store refs"
+    );
+    assert!(
+        active_paths.contains(&running_path),
+        "execute does not clear running store refs"
     );
 }
 
@@ -325,7 +947,7 @@ async fn production_runhost_dedupes_same_node_reparks() {
     let events = host.events_from(&run, 0).await.expect("events");
     let review_parks = events
         .iter()
-        .filter(|e| e.kind == "run_parked" && e.payload == r#"{"node":"review"}"#)
+        .filter(|e| e.kind == "run_parked" && e.payload == r#"{"node":"review","round":1}"#)
         .count();
     assert_eq!(
         review_parks,

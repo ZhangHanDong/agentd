@@ -20,7 +20,7 @@ impl Default for ReadyPatterns {
         // The claude-code / codex TUIs both render this hint on the idle prompt.
         // These are defaults, not law — operators override per §4.7.
         Self {
-            claude_code: vec!["? for shortcuts".to_string()],
+            claude_code: vec!["? for shortcuts".to_string(), "auto mode on".to_string()],
             codex: vec!["? for shortcuts".to_string()],
         }
     }

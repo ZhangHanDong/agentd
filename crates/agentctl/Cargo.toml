@@ -23,6 +23,7 @@ clap = { workspace = true }
 agentd-core = { path = "../agentd-core" }
 
 [dev-dependencies]
+async-trait = "0.1"
 tempfile = { workspace = true }
 tokio = { workspace = true }
 # test-support exposes the in-memory port fakes so the workflow walk-tests drive

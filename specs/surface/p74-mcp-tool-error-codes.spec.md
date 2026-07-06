@@ -13,7 +13,7 @@ against a `FakeRunHost` — no real engine.
 
 ## Decisions
 
-- `submit_review { review_run_id, reviewer_id, verdict, findings }` → `deliver(ReviewVerdictSubmitted { review_run_id, reviewer_id, verdict })`. Wire verdict maps `pass→Pass`, `concern→Fail`, `blocker→Block`. `findings` are accepted but opaque in v0 (the daemon persists them later). Output `{ accepted, fan_in_pending }`; `fan_in_pending = expected − got` from `review_counts` (saturating).
+- `submit_review { review_run_id, reviewer_id, verdict, findings }` → `deliver(ReviewVerdictSubmitted { review_run_id, reviewer_id, verdict, findings })`. Wire verdict maps `pass→Pass`, `concern→Fail`, `blocker→Block`. `findings` remains a JSON array at the MCP surface and is serialized into deterministic JSON text for the engine/store. Output `{ accepted, fan_in_pending }`; `fan_in_pending = expected − got` from `review_counts` (saturating).
 - A `submit_review` whose `deliver` returns `RunProgress::Ignored` (the review run already closed / re-submitted past aggregation) → `SurfaceError::AlreadySubmitted`.
 - `assign_task { run_id, node_id, agent_id }` → `open_task(run, node)`; a miss, OR a task whose `agent_id` differs from the requester → `SurfaceError::NotAssigned`. Output `{ task_run_id, worktree?, spec_path?, plan_path?, context_pack? }`.
 
@@ -32,7 +32,7 @@ against a `FakeRunHost` — no real engine.
 
 ## Out of Scope
 
-- `check_inbox` + the rmcp server wiring (Task 3); HTTP+SSE (7b); findings persistence (daemon, P0.9).
+- `check_inbox` + the rmcp server wiring (Task 3); HTTP+SSE (7b).
 
 ## Completion Criteria
 
@@ -41,6 +41,12 @@ Scenario: submit_review records the verdict and reports remaining reviewers
   Given a RunHost scripting a Parked progress and review counts expected 3, got 1
   When submit_review runs with verdict "pass"
   Then it returns accepted true and fan_in_pending 2, and the host received a ReviewVerdictSubmitted
+
+Scenario: submit_review forwards findings to the engine event
+  Test: submit_review_forwards_findings_to_engine_event
+  Given a RunHost scripting a Parked progress and a structured findings array
+  When submit_review runs
+  Then the host receives a ReviewVerdictSubmitted with serialized findings
 
 Scenario: a re-submitted or closed review is already_submitted
   Test: submit_review_on_closed_review_is_already_submitted

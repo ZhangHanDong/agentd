@@ -17,8 +17,9 @@ The four differ by how much process each imposes:
 - **spike** — exploratory throwaway; goal is learning, so NO gate, NO review, NO
   PR. `start → explore (agent) → report → done`.
 - **docs-only** — a docs change; no code lifecycle gate, no adversarial review,
-  so LINEAR like draft.dot. `start → write_docs (agent) → open_pr → report →
-  done`. (No lint node — a docs change produces no spec draft to lint.)
+  so LINEAR like draft.dot. `start → write_docs (agent) → publish_branch →
+  open_pr → report → done`. (No lint node — a docs change produces no spec draft
+  to lint.)
 - **bugfix-rapid** — a fast fix; KEEPS the `verify_lifecycle` gate but SKIPS the
   fan-out review. One `goal_gate` ⇒ a `goal_gate_unmet` recovery edge.
 - **refactor-only** — behavior-preserving; no upstream spec drafting, but KEEPS
@@ -37,9 +38,12 @@ The four differ by how much process each imposes:
   does, by reaching `done` rather than going Stuck).
 - Non-gated workflows (spike, docs-only) route to the terminal unconditionally
   once their tool nodes succeed (linear, like draft.dot — no recovery edge).
-- `cmd=` strings are STATIC whitespace-split argv over the standalone
-  `.agentd/run/*` convention (the frozen tool handler does no `${...}`/cwd/env);
-  `open_pr` uses the operator's ambient `gh` auth (standalone, D6).
+- `cmd=` strings are whitespace-split argv over the standalone `.agentd/run/*`
+  convention. As of P102, the shipped PR workflows (`docs-only`,
+  `bugfix-rapid`, `refactor-only`) publish the allocated `${worktree}` via
+  `scripts/agentd_publish_worktree.sh ${worktree} ${task_run_id}` before
+  `open_pr`, and `open_pr` targets `--head agentd/${task_run_id}`. `gh` auth
+  still comes from the operator's ambient environment (standalone, D6).
 - Each is proven by a walk-test on the REAL `Engine` over in-memory fakes
   (mirroring p80/p81): the agent park(s) submit success, tool nodes succeed, and
   the run reaches `Finished`.
@@ -94,7 +98,7 @@ Scenario: docs-only.dot validates
 Scenario: docs-only.dot walks to done
   Test: docs_only_dot_walks_to_done
   Given the docs-only.dot graph on the real Engine with in-memory fake ports
-  When the write_docs agent submits success and the lint/open_pr/report tools succeed
+  When the write_docs agent submits success and the publish/open_pr/report tools succeed
   Then the run reaches Finished
 
 Scenario: bugfix-rapid.dot validates
@@ -112,7 +116,7 @@ Scenario: bugfix-rapid.dot has a goal_gate_unmet recovery edge to a non-terminal
 Scenario: bugfix-rapid.dot walks to done with the gate satisfied
   Test: bugfix_rapid_dot_walks_to_done
   Given the bugfix-rapid.dot graph on the real Engine with in-memory fake ports
-  When implement succeeds and verify_lifecycle/open_pr/report succeed so the goal_gate is met
+  When implement succeeds and verify_lifecycle/publish/open_pr/report succeed so the goal_gate is met
   Then the run reaches Finished
 
 Scenario: refactor-only.dot validates

@@ -163,6 +163,14 @@ CREATE TABLE review_verdicts (
     PRIMARY KEY (review_run_id, reviewer_id)  -- idempotent per reviewer
 );
 
+CREATE TABLE review_worktrees (
+    review_run_id   TEXT NOT NULL REFERENCES review_runs(id),
+    reviewer_id     TEXT NOT NULL,
+    worktree_path   TEXT NOT NULL,
+    released_at     INTEGER,
+    PRIMARY KEY (review_run_id, reviewer_id)
+);
+
 -- ── human_waits ──
 CREATE TABLE human_waits (
     id              TEXT PRIMARY KEY,

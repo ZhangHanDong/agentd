@@ -6,12 +6,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agentd_core::CoreError;
-use agentd_store::SqliteStore;
+use agentd_core::ports::WorktreeAllocator;
+use agentd_store::{FailedWorktreeCleanupCandidate, SqliteStore};
 use agentd_surface::host::RunHost;
 use agentd_surface::http::{AppState, router};
-use agentd_tmux::{Config, TmuxBackend, TokioCommandRunner};
+use agentd_tmux::{Config, GitWorktreeProvider, TmuxBackend, TokioCommandRunner, WorktreePool};
 use axum::Router;
 
+use crate::agent_mcp_context::{McpStdioContextBackend, mcp_stdio_command_from_current_process};
 use crate::cli::DaemonConfig;
 use crate::clock::SystemClock;
 use crate::host::ProductionRunHost;
@@ -26,24 +28,23 @@ pub fn build_router(host: Arc<dyn RunHost>) -> Router {
 /// `TmuxBackend`, the offline mempal, and the system clock. Spawning real agents
 /// is a runtime (deployment) concern; constructing the host does not touch tmux.
 ///
-/// NOTE (§7.3 P1.3): the worktree pool (`agentd_tmux::PooledBackend` +
-/// `GitWorktreeProvider`) is built + unit-tested but NOT wired here yet —
-/// activation is DEFERRED. Under D1 the downstream `tool` nodes
-/// (`verify_lifecycle`'s `goal_gate`, `open_pr`) run in the daemon cwd, not the
-/// agent's worktree (the frozen tool handler leaves `RunOpts.cwd = None`), so
-/// pooling now would isolate the agent into a worktree the gate + PR never see —
-/// trading a collision for stranded work. Wiring waits on a worktree→pipeline
-/// bridge, which needs the same P2 core change as the per-`task_run` cleanup.
-///
 /// # Errors
 /// [`CoreError`] if the store cannot be opened/migrated.
 pub async fn build_production_host(config: &DaemonConfig) -> Result<ProductionRunHost, CoreError> {
     let store = SqliteStore::connect(&config.db_path).await?;
+    std::fs::create_dir_all(&config.worktree_base)?;
+    let worktree_pool = WorktreePool::new(Arc::new(GitWorktreeProvider::new(
+        config.repo_dir.clone(),
+        config.worktree_base.clone(),
+    )));
+    gc_worktrees_on_boot(&store, &worktree_pool).await?;
     let backend = TmuxBackend::new(
         Arc::new(TokioCommandRunner::new()),
         PathBuf::from("tmux"),
         Config::default(),
     );
+    let mcp_stdio_command = mcp_stdio_command_from_current_process(config)?;
+    let backend = McpStdioContextBackend::new(Box::new(backend), mcp_stdio_command);
     Ok(ProductionRunHost::new(
         store,
         Box::new(backend),
@@ -51,7 +52,73 @@ pub async fn build_production_host(config: &DaemonConfig) -> Result<ProductionRu
         Box::new(OfflineMempal),
         Box::new(SystemClock),
         config.workflows_dir.clone(),
-    ))
+    )
+    .with_worktree_allocator(Some(Box::new(worktree_pool))))
+}
+
+/// Run daemon boot-GC over the worktree pool while preserving worktrees that
+/// the durable store still references for non-finished runs.
+///
+/// # Errors
+/// [`CoreError`] if the store query or worktree provider operation fails.
+pub async fn gc_worktrees_on_boot(
+    store: &SqliteStore,
+    worktree_pool: &WorktreePool,
+) -> Result<(), CoreError> {
+    let preserve_paths = store.active_worktree_paths().await?;
+    worktree_pool.gc_on_boot_preserving(preserve_paths).await
+}
+
+/// Result of a failed-run worktree cleanup pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeCleanupPlan {
+    /// Candidates found before any release attempt.
+    pub candidates: Vec<FailedWorktreeCleanupCandidate>,
+    /// Number of candidates actually released.
+    pub released: usize,
+    /// Whether this pass executed releases or only reported candidates.
+    pub execute: bool,
+}
+
+/// Open the configured store/pool and run failed-run worktree cleanup.
+///
+/// # Errors
+/// [`CoreError`] if the store, provider, or release operation fails.
+pub async fn cleanup_failed_worktrees_from_config(
+    config: &DaemonConfig,
+    execute: bool,
+) -> Result<WorktreeCleanupPlan, CoreError> {
+    let store = SqliteStore::connect(&config.db_path).await?;
+    let worktree_pool = WorktreePool::new(Arc::new(GitWorktreeProvider::new(
+        config.repo_dir.clone(),
+        config.worktree_base.clone(),
+    )));
+    cleanup_failed_worktrees(&store, &worktree_pool, execute).await
+}
+
+/// List or release worktrees attached to failed runs only.
+///
+/// # Errors
+/// [`CoreError`] if the store query or release operation fails.
+pub async fn cleanup_failed_worktrees(
+    store: &SqliteStore,
+    worktree_pool: &WorktreePool,
+    execute: bool,
+) -> Result<WorktreeCleanupPlan, CoreError> {
+    let candidates = store.failed_worktree_cleanup_candidates().await?;
+    let mut released = 0;
+    if execute {
+        for candidate in &candidates {
+            WorktreeAllocator::release(worktree_pool, &candidate.key, &candidate.path).await?;
+            store.mark_failed_worktree_released(candidate).await?;
+            released += 1;
+        }
+    }
+    Ok(WorktreeCleanupPlan {
+        candidates,
+        released,
+        execute,
+    })
 }
 
 /// The clear "a daemon already owns this port" message (P1 startup guard). One

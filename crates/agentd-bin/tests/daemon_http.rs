@@ -176,6 +176,19 @@ async fn daemon_router_healthz_ok() {
 }
 
 #[tokio::test]
+async fn daemon_router_serves_dashboard_shell() {
+    let (app, _dir) = empty_router().await;
+    let (status, body) = get(app, "/dashboard").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(body.contains(r#"id="agentd-dashboard""#), "{body}");
+    assert!(body.contains(r#"fetch("/runs")"#), "{body}");
+    assert!(
+        body.contains(r#"addEventListener("run_parked""#),
+        "dashboard must listen to production run_parked events: {body}"
+    );
+}
+
+#[tokio::test]
 async fn daemon_router_serves_run_snapshot() {
     let (app, _dir) = router_with_started_run().await;
     let (status, body) = get(app, "/runs/r1").await;

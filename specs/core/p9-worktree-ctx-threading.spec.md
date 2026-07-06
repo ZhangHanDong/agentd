@@ -1,46 +1,36 @@
 spec: task
-name: "Worktree threading through HandlerCtx/Engine — the plumbing half (P2 C1a)"
+name: "Worktree threading through HandlerCtx/Engine — historical C1a, superseded"
 tags: [core, engine, handler, p2, worktree]
 ---
 
 ## Intent
 
-Thread an optional per-run worktree from the engine down to the spawn + tool
-handlers, so a later step (C1b) can isolate each run in its own worktree without
-re-touching this plumbing. This is the FIRST edit to `agentd-core` (D1 is lifted
-for P2; the 84 core tests + the integration suites are the regression net that
-replaces the freeze).
+Historical note: P9 originally threaded an optional per-run worktree from
+`Engine` into `HandlerCtx`. That C1a API is now superseded by the task-run worktree path:
+codergen allocates per `task_run_id`, stages `context["worktree"]`,
+and downstream tool/fan_out handlers read the staged context value.
 
-C1a is the PLUMBING HALF and is INERT BY DESIGN: the worktree is `Option`,
-defaults to `None`, and the daemon passes `None` for now — so behavior is
-unchanged and every existing test stays green untouched. C1b (allocation +
-daemon wiring + reviewer-cwd semantics) makes it live; see "Sequel" below. A green
-C1a means "the pipe carries water," NOT "C1 done."
+The current invariant is intentionally narrower and easier to reason about:
+there is no Engine-level or HandlerCtx-level worktree field. Without an injected
+`WorktreeAllocator`, codergen still spawns in `"."`; with one, the allocated
+task-run path reaches `SpawnRequest.worktree` and the run context.
 
 ## Decisions
 
-- ADDITIVE builders, no call-site churn (HandlerCtx::new has 22 sites, Engine::new
-  has 5): both keep their `new()` signatures with the worktree defaulting `None`,
-  and gain a `with_worktree(...)` builder. Existing callers are unchanged.
-  - `HandlerCtx` gains `worktree: Option<&'a Path>` + `with_worktree(self,
-    Option<&'a Path>) -> Self` + a `worktree()` accessor.
-  - `Engine` gains `worktree: Option<PathBuf>` + `with_worktree(self,
-    Option<PathBuf>) -> Self`; at BOTH `HandlerCtx::new` sites it threads
-    `self.worktree.as_deref()` via `with_worktree`.
+- P103 removes the old additive `with_worktree` builders, the Engine field, and
+  the HandlerCtx accessor. The task-run worktree path is the only live worktree
+  channel inside core.
 - `spawn_request` gains a `worktree: &Path` parameter and sets `req.worktree` to
-  it (replacing the hardcoded `"."`). `codergen` and `fan_out` pass
-  `ctx.worktree().unwrap_or(Path::new("."))` — so `None` reproduces today's `"."`.
-- The worktree threads to the AGENT spawn ONLY. Tool nodes do NOT take it as cwd
-  — REVERTED in the design-faithful redirect: tool nodes run in the daemon cwd
-  (where the `.agentd/run/` runtime-state convention lives), and a code tool
-  receives the worktree as an explicit `--code $worktree` ARG via `${...}`
-  substitution (R2). Threading the worktree to tool cwd (the original C1a) broke
-  `cat .agentd/run/...` tools — those paths are untracked, so a `git worktree`
-  does not contain them.
+  it (replacing the hardcoded `"."`). `codergen` passes the allocated task-run
+  path, or `"."` when no allocator is injected. `fan_out` uses the staged
+  `context["worktree"]` as the implementation source, or `"."` when absent.
+- Tool nodes do NOT take the worktree as cwd. They run in the daemon cwd and a
+  code tool receives the worktree as an explicit `--code ${worktree}` argument
+  via context-variable substitution.
 - Test support: `RecordedCall` gains `cwd: Option<PathBuf>` captured from
-  `RunOpts.cwd` (kept additively; useful once substitution-driven cwd lands).
-- The daemon's `ProductionRunHost::engine(graph, sha)` passes NO worktree (stays
-  `None`) in C1a — allocation is C1b. C1a changes no runtime behavior.
+  `RunOpts.cwd`.
+- The daemon injects a `WorktreeAllocator` for active workflows; allocation is
+  keyed by `task_run_id`, not by the outer workflow run.
 
 ## Boundaries
 
@@ -56,35 +46,26 @@ C1a means "the pipe carries water," NOT "C1 done."
 - Do not change the BEHAVIOR of any existing test — they must stay green WITHOUT
   edits (the additive-builder guarantee). A diff to an existing test's
   expectations means the change was not behavior-preserving.
-- Do not allocate, persist, or release a worktree (C1b). Do not make the daemon
-  pass a real worktree (C1b).
+- Do not reintroduce Engine-level or HandlerCtx-level worktree threading.
 
 ## Out of Scope
 
-- C1b — allocation + persistence + release of the per-run worktree, and the
-  daemon actually passing it (`engine()` threading the run context to resolve the
-  worktree). REQUIRED GUARD (record now so C1b can't silently degrade to `"."`):
-  C1b MUST add an e2e test that a real `start_run` through `ProductionRunHost`
-  records a `SpawnRequest` whose worktree is the ALLOCATED path, not `"."`. The
-  `engine(&graph, &sha)` call (which takes no `run_id` today) is the exact
-  chokepoint where the `.with_worktree(...)` wiring would be silently omitted —
-  make that a tested chokepoint in C1b.
-- Reviewer-cwd semantics: whether `fan_out`'s reviewers should run in the live
-  writer worktree is OPEN (they pin a `bundle="frozen"` snapshot, and N concurrent
-  readers sharing one tree needs thought). C1a only PASSES the worktree through
-  `fan_out` mechanically (`None`→`"."`); the semantic decision is C1b.
-- Per-run worktree lifecycle / restart handling (C1b / P1.3 re-activation).
+- Independent reviewer worktrees are handled by P104; they snapshot from the
+  implementer's staged task-run worktree instead of reintroducing Engine-level
+  worktree threading.
+- Restart reuse remains out of scope; startup GC can reclaim leftover pool
+  worktrees.
 
 ## Completion Criteria
 
-Scenario: a provided worktree reaches the spawned agent
-  Test: engine_threads_worktree_to_spawn_request
-  Given an Engine built with_worktree(Some(W)) over the in-memory fakes and a graph with a codergen node
-  When the run executes to the codergen park
-  Then the recorded SpawnRequest's worktree is W
+Scenario: Engine and HandlerCtx expose no per-run worktree threading API
+  Test: core_has_no_engine_or_handlerctx_worktree_threading
+  Given the core engine and handler source files
+  When the P103 regression test scans them
+  Then no Engine-level worktree field, with_worktree builder, HandlerCtx accessor, or ctx.worktree fallback remains
 
 Scenario: no worktree preserves the current "." default
-  Test: engine_without_worktree_spawns_in_dot
-  Given an Engine built WITHOUT with_worktree (the default None) and a graph with a codergen node
+  Test: codergen_without_allocator_spawns_in_dot
+  Given an Engine built without a WorktreeAllocator and a graph with a codergen node
   When the run executes to the codergen park
   Then the recorded SpawnRequest's worktree is "." (behavior unchanged)

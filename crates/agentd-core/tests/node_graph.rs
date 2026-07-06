@@ -114,18 +114,107 @@ fn node_graph_accepts_retry_target_and_retry_policy_attrs() {
 }
 
 #[test]
-fn node_graph_rejects_delphi_visibility_in_p0() {
+fn node_graph_accepts_delphi_visibility_with_converge_aggregator() {
+    let src = r#"digraph m {
+        "start" [shape=Mdiamond];
+        "review" [handler=parallel.fan_out, reviewers="claude-sec,codex-perf", visibility=delphi, max_rounds=3];
+        "agg" [handler=parallel.fan_in, aggregator=converge_or_majority_pass];
+        "end" [shape=Msquare];
+        "start" -> "review";
+        "review" -> "agg";
+        "agg" -> "end" [condition="outcome=success"];
+        "agg" -> "review" [condition="outcome=fail"];
+    }"#;
+    build(src).expect("well-formed Delphi fan_out/fan_in pair should validate");
+}
+
+#[test]
+fn node_graph_rejects_delphi_visibility_without_max_rounds() {
     let src = r#"digraph m {
         "start" [shape=Mdiamond];
         "review" [handler=parallel.fan_out, visibility=delphi];
-        "agg" [handler=parallel.fan_in];
+        "agg" [handler=parallel.fan_in, aggregator=converge_or_majority_pass];
         "end" [shape=Msquare];
         "start" -> "review";
         "review" -> "agg";
         "agg" -> "end";
     }"#;
     let msg = err_msg(src);
-    assert!(msg.contains("delphi"), "msg: {msg}");
+    assert!(msg.contains("max_rounds"), "msg: {msg}");
+}
+
+#[test]
+fn node_graph_rejects_delphi_visibility_with_non_converge_aggregator() {
+    let src = r#"digraph m {
+        "start" [shape=Mdiamond];
+        "review" [handler=parallel.fan_out, visibility=delphi, max_rounds=3];
+        "agg" [handler=parallel.fan_in, aggregator=majority_pass];
+        "end" [shape=Msquare];
+        "start" -> "review";
+        "review" -> "agg";
+        "agg" -> "end";
+    }"#;
+    let msg = err_msg(src);
+    assert!(msg.contains("converge_or"), "msg: {msg}");
+}
+
+#[test]
+fn node_graph_rejects_unknown_converge_fallback() {
+    let src = r#"digraph m {
+        "start" [shape=Mdiamond];
+        "review" [handler=parallel.fan_out, visibility=delphi, max_rounds=3];
+        "agg" [handler=parallel.fan_in, aggregator=converge_or_sideways];
+        "end" [shape=Msquare];
+        "start" -> "review";
+        "review" -> "agg";
+        "agg" -> "end";
+    }"#;
+    let msg = err_msg(src);
+    assert!(msg.contains("sideways"), "msg: {msg}");
+}
+
+#[test]
+fn node_graph_rejects_non_delphi_max_rounds_above_one() {
+    let src = r#"digraph m {
+        "start" [shape=Mdiamond];
+        "review" [handler=parallel.fan_out, visibility=blind, max_rounds=3];
+        "agg" [handler=parallel.fan_in, aggregator=majority_pass];
+        "end" [shape=Msquare];
+        "start" -> "review";
+        "review" -> "agg";
+        "agg" -> "end";
+    }"#;
+    let msg = err_msg(src);
+    assert!(msg.contains("visibility=delphi"), "msg: {msg}");
+}
+
+#[test]
+fn node_graph_accepts_delphi_findings_diff_convergence() {
+    let src = r#"digraph m {
+        "start" [shape=Mdiamond];
+        "review" [handler=parallel.fan_out, visibility=delphi, max_rounds=3, convergence="findings_diff<0.1>"];
+        "agg" [handler=parallel.fan_in, aggregator=converge_or_majority_pass];
+        "end" [shape=Msquare];
+        "start" -> "review";
+        "review" -> "agg";
+        "agg" -> "end";
+    }"#;
+    build(src).expect("findings_diff convergence should validate");
+}
+
+#[test]
+fn node_graph_rejects_malformed_delphi_findings_diff_convergence() {
+    let src = r#"digraph m {
+        "start" [shape=Mdiamond];
+        "review" [handler=parallel.fan_out, visibility=delphi, max_rounds=3, convergence="findings_diff<sideways>"];
+        "agg" [handler=parallel.fan_in, aggregator=converge_or_majority_pass];
+        "end" [shape=Msquare];
+        "start" -> "review";
+        "review" -> "agg";
+        "agg" -> "end";
+    }"#;
+    let msg = err_msg(src);
+    assert!(msg.contains("findings_diff"), "msg: {msg}");
 }
 
 #[test]

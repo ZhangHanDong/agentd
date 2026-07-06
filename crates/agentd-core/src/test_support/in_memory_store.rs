@@ -13,12 +13,13 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use crate::CoreError;
 use crate::engine::Checkpoint;
 use crate::ports::store::{RunStatus, Store};
-use crate::types::{NodeId, Outcome, ReviewRunId, ReviewVerdict, RunId, TaskRunId};
+use crate::types::{AgentId, NodeId, Outcome, ReviewRunId, ReviewVerdict, RunId, TaskRunId};
 
 #[derive(Debug)]
 struct RunRow {
@@ -41,6 +42,7 @@ struct ReviewRunRow {
     run_id: String,
     node_id: String,
     expected: usize,
+    round: u32,
     context_sha: String,
 }
 
@@ -48,6 +50,8 @@ struct ReviewRunRow {
 struct TaskRunRow {
     run_id: String,
     node_id: String,
+    agent_id: Option<AgentId>,
+    worktree_path: Option<PathBuf>,
     finished: bool,
 }
 
@@ -59,6 +63,7 @@ struct Inner {
     human_waits: HashMap<String, HumanWaitRow>,
     review_runs: HashMap<String, ReviewRunRow>,
     verdicts: HashMap<String, Vec<ReviewVerdict>>,
+    review_worktrees: HashMap<(String, String), PathBuf>,
     task_runs: HashMap<String, TaskRunRow>,
     checkpoints: HashMap<String, Checkpoint>,
 }
@@ -90,6 +95,24 @@ impl InMemoryStore {
     #[must_use]
     pub fn run_status(&self, run_id: &RunId) -> Option<RunStatus> {
         self.lock().runs.get(run_id.as_str()).map(|r| r.status)
+    }
+
+    /// Test-only read of a task_run's persisted worktree path.
+    #[must_use]
+    pub fn task_worktree(&self, task_run_id: &TaskRunId) -> Option<PathBuf> {
+        self.lock()
+            .task_runs
+            .get(task_run_id.as_str())
+            .and_then(|r| r.worktree_path.clone())
+    }
+
+    /// Test-only read of a task_run's persisted agent id.
+    #[must_use]
+    pub fn task_agent(&self, task_run_id: &TaskRunId) -> Option<AgentId> {
+        self.lock()
+            .task_runs
+            .get(task_run_id.as_str())
+            .and_then(|r| r.agent_id.clone())
     }
 }
 
@@ -225,6 +248,7 @@ impl Store for InMemoryStore {
         run_id: &RunId,
         node_id: &NodeId,
         expected: usize,
+        round: u32,
         context_sha: &str,
     ) -> Result<ReviewRunId, CoreError> {
         let mut inner = self.lock();
@@ -235,6 +259,7 @@ impl Store for InMemoryStore {
                 run_id: run_id.as_str().to_string(),
                 node_id: node_id.as_str().to_string(),
                 expected,
+                round,
                 context_sha: context_sha.to_string(),
             },
         );
@@ -301,6 +326,14 @@ impl Store for InMemoryStore {
             .map(|r| r.expected))
     }
 
+    async fn review_round(&self, review_run_id: &ReviewRunId) -> Result<Option<u32>, CoreError> {
+        Ok(self
+            .lock()
+            .review_runs
+            .get(review_run_id.as_str())
+            .map(|r| r.round))
+    }
+
     async fn list_verdicts(
         &self,
         review_run_id: &ReviewRunId,
@@ -311,6 +344,34 @@ impl Store for InMemoryStore {
             .get(review_run_id.as_str())
             .cloned()
             .unwrap_or_default())
+    }
+
+    async fn set_review_worktree(
+        &self,
+        review_run_id: &ReviewRunId,
+        reviewer_id: &AgentId,
+        path: &Path,
+    ) -> Result<(), CoreError> {
+        let mut inner = self.lock();
+        let id = review_run_id.as_str().to_string();
+        if !inner.review_runs.contains_key(&id) {
+            return Err(CoreError::Store(format!("unknown review run {id}")));
+        }
+        inner
+            .review_worktrees
+            .insert((id, reviewer_id.as_str().to_string()), path.to_path_buf());
+        Ok(())
+    }
+
+    async fn take_review_worktree(
+        &self,
+        review_run_id: &ReviewRunId,
+        reviewer_id: &AgentId,
+    ) -> Result<Option<PathBuf>, CoreError> {
+        Ok(self.lock().review_worktrees.remove(&(
+            review_run_id.as_str().to_string(),
+            reviewer_id.as_str().to_string(),
+        )))
     }
 
     async fn insert_task_run(
@@ -325,10 +386,44 @@ impl Store for InMemoryStore {
             TaskRunRow {
                 run_id: run_id.as_str().to_string(),
                 node_id: node_id.as_str().to_string(),
+                agent_id: None,
+                worktree_path: None,
                 finished: false,
             },
         );
         Ok(TaskRunId::from_string(id))
+    }
+
+    async fn set_task_run_agent(
+        &self,
+        task_run_id: &TaskRunId,
+        agent_id: &AgentId,
+    ) -> Result<(), CoreError> {
+        let mut inner = self.lock();
+        let row = inner
+            .task_runs
+            .get_mut(task_run_id.as_str())
+            .ok_or_else(|| {
+                CoreError::Store(format!("unknown task run {}", task_run_id.as_str()))
+            })?;
+        row.agent_id = Some(agent_id.clone());
+        Ok(())
+    }
+
+    async fn set_task_run_worktree(
+        &self,
+        task_run_id: &TaskRunId,
+        path: &Path,
+    ) -> Result<(), CoreError> {
+        let mut inner = self.lock();
+        let row = inner
+            .task_runs
+            .get_mut(task_run_id.as_str())
+            .ok_or_else(|| {
+                CoreError::Store(format!("unknown task run {}", task_run_id.as_str()))
+            })?;
+        row.worktree_path = Some(path.to_path_buf());
+        Ok(())
     }
 
     async fn complete_task_run(&self, task_run_id: &TaskRunId) -> Result<(), CoreError> {

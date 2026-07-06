@@ -25,6 +25,7 @@ pub enum ParkReason {
     ReviewVerdicts {
         review_run_id: ReviewRunId,
         expected: usize,
+        round: u32,
     },
     AgentOutcome {
         task_run_id: TaskRunId,
@@ -45,6 +46,7 @@ pub enum EngineEvent {
         review_run_id: ReviewRunId,
         reviewer_id: AgentId,
         verdict: VerdictValue,
+        findings: String,
     },
     AgentOutcomeSubmitted {
         task_run_id: TaskRunId,

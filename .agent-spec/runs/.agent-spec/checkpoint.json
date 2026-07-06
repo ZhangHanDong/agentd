@@ -1,0 +1,31 @@
+{
+  "spec_name": "Real Claude stdio smoke harness",
+  "timestamp": 1783377897,
+  "vcs_ref": "4229024",
+  "scenarios": {
+    "[boundaries] explicit change set respects declared paths": {
+      "verdict": "pass",
+      "vcs_ref": "4229024"
+    },
+    "default dry-run prints the real smoke plan without side effects": {
+      "verdict": "pass",
+      "vcs_ref": "4229024"
+    },
+    "preflight reports missing required tools": {
+      "verdict": "pass",
+      "vcs_ref": "4229024"
+    },
+    "preflight accepts fake local prerequisites without starting daemon": {
+      "verdict": "pass",
+      "vcs_ref": "4229024"
+    },
+    "real execution plan writes named evidence artifacts": {
+      "verdict": "pass",
+      "vcs_ref": "4229024"
+    },
+    "execute mode requires explicit opt-in": {
+      "verdict": "pass",
+      "vcs_ref": "4229024"
+    }
+  }
+}

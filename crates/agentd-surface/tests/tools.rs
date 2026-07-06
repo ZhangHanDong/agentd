@@ -3,7 +3,7 @@
 //! `specs/surface/p70-mcp-tool-schemas.spec.md` and `p72-submit-outcome-idempotency.spec.md`.
 //! Everything runs against a `FakeRunHost` — no real engine, MCP client, or socket.
 
-use agentd_core::types::{NodeId, ReviewRunId, RunId, TaskRunId};
+use agentd_core::types::{NodeId, ReviewRunId, RunId, TaskRunId, VerdictValue};
 use agentd_core::{EngineEvent, ParkReason, RunProgress};
 
 use agentd_surface::host::{RunSnapshot, TaskAssignment};
@@ -165,6 +165,7 @@ async fn submit_review_records_and_reports_pending() {
         reason: ParkReason::ReviewVerdicts {
             review_run_id: ReviewRunId::from_string("rv1"),
             expected: 3,
+            round: 1,
         },
     });
     host.set_review_counts("rv1", (3, 1));
@@ -186,6 +187,55 @@ async fn submit_review_records_and_reports_pending() {
     match &host.delivered()[0] {
         EngineEvent::ReviewVerdictSubmitted { review_run_id, .. } => {
             assert_eq!(review_run_id.as_str(), "rv1");
+        }
+        other => panic!("expected ReviewVerdictSubmitted, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn submit_review_forwards_findings_to_engine_event() {
+    let host = FakeRunHost::new();
+    host.push_progress(RunProgress::Parked {
+        run_id: RunId::from_string("r1"),
+        node_id: NodeId::parsed("review"),
+        reason: ParkReason::ReviewVerdicts {
+            review_run_id: ReviewRunId::from_string("rv1"),
+            expected: 1,
+            round: 1,
+        },
+    });
+    host.set_review_counts("rv1", (1, 1));
+
+    let out = submit_review(
+        &host,
+        SubmitReviewInput {
+            review_run_id: "rv1".to_string(),
+            reviewer_id: "claude-sec".to_string(),
+            verdict: "concern".to_string(),
+            findings: vec![serde_json::json!({
+                "path": "src/lib.rs",
+                "body": "tighten error handling"
+            })],
+        },
+    )
+    .await
+    .expect("submit_review ok");
+    assert!(out.accepted);
+
+    match &host.delivered()[0] {
+        EngineEvent::ReviewVerdictSubmitted {
+            review_run_id,
+            reviewer_id,
+            verdict,
+            findings,
+        } => {
+            assert_eq!(review_run_id.as_str(), "rv1");
+            assert_eq!(reviewer_id.as_str(), "claude-sec");
+            assert_eq!(*verdict, VerdictValue::Fail);
+            assert_eq!(
+                findings,
+                r#"[{"body":"tighten error handling","path":"src/lib.rs"}]"#
+            );
         }
         other => panic!("expected ReviewVerdictSubmitted, got {other:?}"),
     }
