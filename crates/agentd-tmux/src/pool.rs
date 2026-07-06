@@ -233,6 +233,10 @@ impl WorktreeProvider for GitWorktreeProvider {
                 String::from_utf8_lossy(&out.stderr).trim()
             )));
         }
+        if let Err(err) = validate_git_worktree_root(&path).await {
+            let _ = self.remove(&path).await;
+            return Err(err);
+        }
         Ok(path)
     }
 
@@ -345,6 +349,57 @@ fn is_reviewer_keyed_pool_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
 }
 
+async fn validate_git_worktree_root(path: &Path) -> Result<(), CoreError> {
+    if !path.join(".git").exists() {
+        return Err(CoreError::Backend(format!(
+            "not a git worktree root (missing .git metadata): {}",
+            path.display()
+        )));
+    }
+
+    let out = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .await
+        .map_err(|e| CoreError::Backend(format!("git rev-parse failed to spawn: {e}")))?;
+    if !out.status.success() {
+        return Err(CoreError::Backend(format!(
+            "not a git worktree root (git rev-parse failed): {}",
+            path.display()
+        )));
+    }
+
+    let git_root = String::from_utf8_lossy(&out.stdout);
+    let git_root = git_root.trim();
+    if git_root.is_empty() {
+        return Err(CoreError::Backend(format!(
+            "not a git worktree root (empty git top-level): {}",
+            path.display()
+        )));
+    }
+
+    let expected = fs::canonicalize(path).map_err(|e| {
+        CoreError::Backend(format!(
+            "canonicalize worktree {} failed: {e}",
+            path.display()
+        ))
+    })?;
+    let actual = fs::canonicalize(git_root).map_err(|e| {
+        CoreError::Backend(format!("canonicalize git top-level {git_root} failed: {e}"))
+    })?;
+    if actual != expected {
+        return Err(CoreError::Backend(format!(
+            "not a git worktree root: {} resolves to git top-level {}",
+            path.display(),
+            actual.display()
+        )));
+    }
+
+    Ok(())
+}
+
 fn sync_snapshot(source: &Path, dest: &Path) -> io::Result<()> {
     if !source.is_dir() {
         return Err(io::Error::new(
@@ -431,8 +486,99 @@ fn replace_with_symlink(_source: &Path, _dest: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_pool_name, pool_worktrees};
+    use super::{
+        GitWorktreeProvider, WorktreeProvider, is_pool_name, pool_worktrees,
+        validate_git_worktree_root,
+    };
     use std::path::PathBuf;
+    use std::process::Command;
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let output = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .unwrap_or_else(|err| panic!("git {}: {err}", args.join(" ")));
+        assert!(
+            output.status.success(),
+            "git {} failed\nstdout:\n{}\nstderr:\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn seed_repo(path: &std::path::Path) {
+        std::fs::create_dir_all(path).expect("create repo");
+        git(path, &["init"]);
+        git(path, &["config", "user.email", "agentd@example.invalid"]);
+        git(path, &["config", "user.name", "agentd test"]);
+        std::fs::write(path.join("README.md"), "seed\n").expect("seed readme");
+        git(path, &["add", "README.md"]);
+        git(path, &["commit", "-m", "seed"]);
+    }
+
+    fn git_stdout(dir: &std::path::Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .unwrap_or_else(|err| panic!("git {}: {err}", args.join(" ")));
+        assert!(
+            output.status.success(),
+            "git {} failed\nstdout:\n{}\nstderr:\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("git stdout utf8")
+    }
+
+    #[tokio::test]
+    async fn git_worktree_root_validation_rejects_parent_repo_climb() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        seed_repo(&repo);
+        let fake_worktree = repo
+            .join(".agentd")
+            .join("worktrees")
+            .join("wt-task-tr_0123456789ABCDEFGHJKMNPQRS");
+        std::fs::create_dir_all(&fake_worktree).expect("fake worktree");
+
+        let err = validate_git_worktree_root(&fake_worktree)
+            .await
+            .expect_err("fake nested directory must be rejected");
+
+        assert!(
+            err.to_string().contains("not a git worktree root"),
+            "error explains validation failure: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn git_provider_create_returns_valid_worktree_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        let base = tmp.path().join("worktrees");
+        seed_repo(&repo);
+        let provider = GitWorktreeProvider::new(&repo, &base);
+
+        let worktree = provider
+            .create("wt-task-tr_0123456789ABCDEFGHJKMNPQRS")
+            .await
+            .expect("create git worktree");
+
+        assert!(
+            worktree.join(".git").exists(),
+            "linked worktree has git metadata"
+        );
+        let top = PathBuf::from(git_stdout(&worktree, &["rev-parse", "--show-toplevel"]).trim());
+        assert_eq!(
+            std::fs::canonicalize(&worktree).expect("canonical worktree"),
+            std::fs::canonicalize(&top).expect("canonical git top"),
+            "git top-level is the returned worktree path"
+        );
+    }
 
     #[test]
     fn pool_worktrees_keeps_only_pool_dirs_preserving_foreign() {

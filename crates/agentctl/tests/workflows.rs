@@ -269,7 +269,7 @@ fn execute_dot_publishes_worktree_before_pr() {
     let open_pr = g.node("open_pr").expect("open_pr node exists");
     assert_eq!(
         open_pr.attr("cmd"),
-        Some("gh pr create --fill --head agentd/${task_run_id}")
+        Some("bash scripts/agentd_open_pr.sh ${task_run_id}")
     );
 
     for (from, to) in [
@@ -355,7 +355,6 @@ async fn execute_dot_walks_to_done() {
         ParkReason::AgentOutcome { task_run_id } => task_run_id.clone(),
         other => panic!("expected AgentOutcome park at implement, got {other:?}"),
     };
-    let task_branch = format!("agentd/{}", task_run_id.as_str());
     let task_run_id_arg = task_run_id.as_str().to_string();
 
     // implement success -> verify_lifecycle (tool) -> review (fan_out) parks for 3 verdicts.
@@ -421,18 +420,20 @@ async fn execute_dot_walks_to_done() {
         ]
     );
 
-    let gh = calls
+    let open_pr = calls
         .iter()
-        .find(|c| c.program == "gh")
-        .expect("open_pr recorded a `gh` call");
+        .find(|c| {
+            c.program == "bash"
+                && c.args
+                    .first()
+                    .is_some_and(|a| a == "scripts/agentd_open_pr.sh")
+        })
+        .expect("open_pr recorded a script call");
     assert_eq!(
-        gh.args,
+        open_pr.args,
         vec![
-            "pr".to_string(),
-            "create".to_string(),
-            "--fill".to_string(),
-            "--head".to_string(),
-            task_branch,
+            "scripts/agentd_open_pr.sh".to_string(),
+            task_run_id.as_str().to_string(),
         ]
     );
 }
@@ -496,9 +497,10 @@ async fn execute_dot_publish_failure_stops_before_open_pr() {
         "publish_branch should have run before failing"
     );
     assert!(
-        calls
-            .iter()
-            .all(|c| !(c.program == "gh" && c.args.first().is_some_and(|a| a == "pr"))),
+        calls.iter().all(|c| !(c.program == "bash"
+            && c.args
+                .first()
+                .is_some_and(|a| a == "scripts/agentd_open_pr.sh"))),
         "open_pr must not run after publish_branch failure: {calls:?}"
     );
 }
@@ -555,9 +557,10 @@ async fn execute_dot_open_pr_failure_stops_before_report_acceptance() {
 
     let calls = h.runner.calls();
     assert!(
-        calls
-            .iter()
-            .any(|c| c.program == "gh" && c.args.first().is_some_and(|a| a == "pr")),
+        calls.iter().any(|c| c.program == "bash"
+            && c.args
+                .first()
+                .is_some_and(|a| a == "scripts/agentd_open_pr.sh")),
         "open_pr should have run before failing"
     );
     assert!(
@@ -860,8 +863,8 @@ fn assert_publish_branch_before_pr(file: &str, report_node: &str) {
         .unwrap_or_else(|| panic!("{file}: open_pr node exists"));
     assert_eq!(
         open_pr.attr("cmd"),
-        Some("gh pr create --fill --head agentd/${task_run_id}"),
-        "{file}: open_pr must target the task branch explicitly"
+        Some("bash scripts/agentd_open_pr.sh ${task_run_id}"),
+        "{file}: open_pr must use the P130 helper"
     );
 
     for (from, to) in [("publish_branch", "open_pr"), ("open_pr", report_node)] {
@@ -897,7 +900,6 @@ fn assert_recorded_task_branch_publication(
     task_run_id: &TaskRunId,
     calls: &[agentd_core::test_support::RecordedCall],
 ) {
-    let task_branch = format!("agentd/{}", task_run_id.as_str());
     let publish_idx = calls
         .iter()
         .position(|c| {
@@ -917,24 +919,26 @@ fn assert_recorded_task_branch_publication(
         "{file}: publish_branch receives worktree and task_run_id"
     );
 
-    let gh_idx = calls
+    let open_pr_idx = calls
         .iter()
-        .position(|c| c.program == "gh" && c.args.first().is_some_and(|a| a == "pr"))
-        .unwrap_or_else(|| panic!("{file}: open_pr recorded a gh call"));
+        .position(|c| {
+            c.program == "bash"
+                && c.args
+                    .first()
+                    .is_some_and(|a| a == "scripts/agentd_open_pr.sh")
+        })
+        .unwrap_or_else(|| panic!("{file}: open_pr recorded a script call"));
     assert!(
-        publish_idx < gh_idx,
+        publish_idx < open_pr_idx,
         "{file}: publish_branch must run before open_pr: {calls:?}"
     );
     assert_eq!(
-        calls[gh_idx].args,
+        calls[open_pr_idx].args,
         vec![
-            "pr".to_string(),
-            "create".to_string(),
-            "--fill".to_string(),
-            "--head".to_string(),
-            task_branch,
+            "scripts/agentd_open_pr.sh".to_string(),
+            task_run_id.as_str().to_string(),
         ],
-        "{file}: open_pr targets the task branch"
+        "{file}: open_pr receives task_run_id"
     );
 }
 
@@ -1038,9 +1042,10 @@ async fn docs_only_dot_publish_failure_stops_before_open_pr() {
     );
     let calls = h.runner.calls();
     assert!(
-        calls
-            .iter()
-            .all(|c| !(c.program == "gh" && c.args.first().is_some_and(|a| a == "pr"))),
+        calls.iter().all(|c| !(c.program == "bash"
+            && c.args
+                .first()
+                .is_some_and(|a| a == "scripts/agentd_open_pr.sh"))),
         "open_pr must not run after publish_branch failure: {calls:?}"
     );
 }

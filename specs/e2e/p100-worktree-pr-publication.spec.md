@@ -27,8 +27,8 @@ boundary.
 - `scripts/agentd_publish_worktree.sh` validates the `task_run_id`, switches the
   allocated worktree to `agentd/${task_run_id}`, stages all changes, commits only
   when staged changes exist, and pushes `HEAD:agentd/${task_run_id}`.
-- `open_pr` invokes `gh pr create --fill --head agentd/${task_run_id}` so PR
-  creation targets the published task branch explicitly.
+- `open_pr` invokes `bash scripts/agentd_open_pr.sh ${task_run_id}` so PR
+  creation targets the published task branch through the preflight helper.
 - The `aggregate -> publish_branch`, `publish_branch -> open_pr`, and
   `open_pr -> report_acceptance` edges are success-conditioned. A failed publish
   or failed PR creation must not fall through to the acceptance report.
@@ -53,7 +53,7 @@ boundary.
 
 ## Out of Scope
 
-- Choosing base branch or PR title/body policy beyond `gh pr create --fill`.
+- Choosing base branch or PR title/body policy beyond the open PR helper.
 - Auth/token provisioning for `gh`.
 - Release or cleanup of the allocated worktree after the PR is opened is handled
   by P101.
@@ -69,7 +69,7 @@ Scenario: execute.dot declares the publication bridge before open_pr
   When it is parsed and validated
   Then the aggregate-to-publish, publish-to-open_pr, and open_pr-to-report edges are success-conditioned
   And the publish_branch command is "bash scripts/agentd_publish_worktree.sh ${worktree} ${task_run_id}"
-  And the open_pr command contains "--head agentd/${task_run_id}"
+  And the open_pr command is "bash scripts/agentd_open_pr.sh ${task_run_id}"
 
 Scenario: execute.dot walks through publish then opens the task branch PR
   Test: execute_dot_walks_to_done
@@ -79,7 +79,7 @@ Scenario: execute.dot walks through publish then opens the task branch PR
   When implement succeeds, reviewers pass, and all tool nodes succeed
   Then the run reaches Finished
   And the publish command receives "/tmp/agentd-task-wt" and the actual task_run_id
-  And open_pr shells "gh pr create --fill --head agentd/${task_run_id}"
+  And open_pr shells "bash scripts/agentd_open_pr.sh ${task_run_id}"
 
 Scenario: publish failure stops before open_pr
   Test: execute_dot_publish_failure_stops_before_open_pr
@@ -87,7 +87,7 @@ Scenario: publish failure stops before open_pr
   Test Double: FakeBackend + RecordingCommandRunner + InMemoryStore + fake WorktreeAllocator
   Given execute.dot on the real Engine and a publish_branch tool result with exit status 1
   When implement succeeds and reviewers pass
-  Then the run fails without recording a `gh pr create` command
+  Then the run fails without recording the open PR helper command
 
 Scenario: open_pr failure stops before report_acceptance
   Test: execute_dot_open_pr_failure_stops_before_report_acceptance
@@ -104,4 +104,4 @@ Scenario: ProductionRunHost publishes before opening PR
   Given a ProductionRunHost with a fake WorktreeAllocator returning "/tmp/agentd-task-wt"
   When an execute.dot run completes through passing reviewers
   Then the runner records publish_branch before open_pr
-  And open_pr targets "agentd/${task_run_id}"
+  And open_pr receives `${task_run_id}`

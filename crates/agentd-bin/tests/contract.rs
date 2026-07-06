@@ -514,8 +514,6 @@ async fn production_runhost_execute_publishes_worktree_branch_before_pr() {
         .expect("open task")
         .expect("implement task is open");
     let task_run_id_arg = assignment.task_run_id.as_str().to_string();
-    let task_branch = format!("agentd/{task_run_id_arg}");
-
     agent_submit_success(host, "e-pr", "implement")
         .await
         .expect("submit implement");
@@ -551,27 +549,26 @@ async fn production_runhost_execute_publishes_worktree_branch_before_pr() {
         vec![
             "scripts/agentd_publish_worktree.sh".to_string(),
             "/tmp/agentd-task-wt".to_string(),
-            task_run_id_arg,
+            task_run_id_arg.clone(),
         ]
     );
 
-    let gh_idx = calls
+    let open_pr_idx = calls
         .iter()
-        .position(|c| c.program == "gh" && c.args.first().is_some_and(|a| a == "pr"))
-        .expect("open_pr recorded a gh call");
+        .position(|c| {
+            c.program == "bash"
+                && c.args
+                    .first()
+                    .is_some_and(|a| a == "scripts/agentd_open_pr.sh")
+        })
+        .expect("open_pr recorded a script call");
     assert!(
-        publish_idx < gh_idx,
+        publish_idx < open_pr_idx,
         "publish_branch must run before open_pr: {calls:?}"
     );
     assert_eq!(
-        calls[gh_idx].args,
-        vec![
-            "pr".to_string(),
-            "create".to_string(),
-            "--fill".to_string(),
-            "--head".to_string(),
-            task_branch,
-        ]
+        calls[open_pr_idx].args,
+        vec!["scripts/agentd_open_pr.sh".to_string(), task_run_id_arg,]
     );
 }
 

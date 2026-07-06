@@ -19,6 +19,23 @@ if ! printf '%s' "$task_run_id" | grep -Eq '^tr_[0-9A-HJKMNP-TV-Z]{26}$'; then
   exit 64
 fi
 
+if [ ! -e "$worktree/.git" ]; then
+  echo "not a git worktree root (missing .git metadata): $worktree" >&2
+  exit 66
+fi
+
+if ! git_top=$(git -C "$worktree" rev-parse --show-toplevel 2>/dev/null); then
+  echo "not a git worktree root (git rev-parse failed): $worktree" >&2
+  exit 66
+fi
+
+worktree_root=$(cd "$worktree" && pwd -P)
+git_root=$(cd "$git_top" && pwd -P)
+if [ "$git_root" != "$worktree_root" ]; then
+  echo "not a git worktree root: $worktree resolves to git top-level $git_root" >&2
+  exit 66
+fi
+
 branch="agentd/$task_run_id"
 
 git -C "$worktree" switch -C "$branch" >&2

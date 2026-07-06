@@ -11,7 +11,7 @@
 // (`implement`). The single `parallel.fan_out` (`review`) auto-pairs with the
 // single `parallel.fan_in` (`aggregate`). cmd= strings are whitespace-split argv:
 // verify checks `${worktree}`, then publish_branch pushes that worktree before
-// open_pr targets `agentd/${task_run_id}`.
+// open_pr runs the PR helper for `agentd/${task_run_id}`.
 digraph refactor_only {
   "start"            [shape=Mdiamond];
   "pull_context"     [handler="tool", cmd="cat .agentd/run/issue.md", timeout_secs="30"];
@@ -20,7 +20,7 @@ digraph refactor_only {
   "review"           [handler="parallel.fan_out", reviewers="claude-sec,codex-perf,gemini-readability", bundle="frozen", visibility="blind"];
   "aggregate"        [handler="parallel.fan_in", aggregator="majority_pass", goal_gate=true];
   "publish_branch"   [handler="tool", cmd="bash scripts/agentd_publish_worktree.sh ${worktree} ${task_run_id}", timeout_secs="300"];
-  "open_pr"          [handler="tool", cmd="gh pr create --fill --head agentd/${task_run_id}", timeout_secs="120"];
+  "open_pr"          [handler="tool", cmd="bash scripts/agentd_open_pr.sh ${task_run_id}", timeout_secs="120"];
   "report"           [handler="tool", cmd="cat .agentd/run/report.md", timeout_secs="30"];
   "done"             [shape=Msquare];
 

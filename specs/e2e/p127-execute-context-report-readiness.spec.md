@@ -20,8 +20,8 @@ minimal local runtime-state plumbing needed for a real end-to-end run.
   `pull_frozen_spec` succeeds.
 - `execute.dot` writes the plan through `scripts/agentd_write_plan.sh` and then
   stages `plan_path=.agentd/run/plan.md` after `draft_plan` succeeds.
-- Keep `open_pr` as `gh pr create --fill --head agentd/${task_run_id}` and keep
-  the existing publish-before-PR order.
+- Keep the existing publish-before-PR order; `open_pr` remains a single argv-safe
+  tool command and PR-specific preflight lives in the open PR helper.
 - `scripts/agentd_publish_worktree.sh` writes `.agentd/run/report.md` in the
   daemon cwd after the task branch is pushed, so `report_acceptance` does not
   fail on a missing local report file.
@@ -41,8 +41,7 @@ minimal local runtime-state plumbing needed for a real end-to-end run.
 
 ### Forbidden
 
-- Do not change the `gh pr create --fill --head agentd/${task_run_id}` command
-  shape in this slice.
+- Do not change the publish-before-PR topology in this slice.
 - Do not add schema columns for `spec_path`, `plan_path`, report path, or PR URL.
 - Do not make `tool` nodes run in the allocated worktree cwd.
 

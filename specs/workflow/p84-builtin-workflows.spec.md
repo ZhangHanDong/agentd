@@ -42,8 +42,9 @@ The four differ by how much process each imposes:
   convention. As of P102, the shipped PR workflows (`docs-only`,
   `bugfix-rapid`, `refactor-only`) publish the allocated `${worktree}` via
   `scripts/agentd_publish_worktree.sh ${worktree} ${task_run_id}` before
-  `open_pr`, and `open_pr` targets `--head agentd/${task_run_id}`. `gh` auth
-  still comes from the operator's ambient environment (standalone, D6).
+  `open_pr`, and `open_pr` shells
+  `scripts/agentd_open_pr.sh ${task_run_id}`. `gh` auth still comes from the
+  operator's ambient environment (standalone, D6).
 - Each is proven by a walk-test on the REAL `Engine` over in-memory fakes
   (mirroring p80/p81): the agent park(s) submit success, tool nodes succeed, and
   the run reaches `Finished`.

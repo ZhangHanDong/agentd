@@ -12,7 +12,7 @@ shared instance whose `deliver` is called CONCURRENTLY, with no per-run guard. T
 shipped N-reviewer review sends N concurrent `submit_review → deliver`: all N
 resolve the same review park (`lookup_park_by_review_run` gated `count < expected`)
 before any `insert_review_verdict`, then all see `collected == expected` and all
-return `Done` → N concurrent `run_loop`s advance one run → double `gh pr create` /
+return `Done` → N concurrent `run_loop`s advance one run → double open_pr helper /
 double-finish / (via `goal_gate_unmet → implement`) multiple writer task_runs.
 
 This is LATENT today — the rmcp/MCP wire that lets agent processes reach `deliver`

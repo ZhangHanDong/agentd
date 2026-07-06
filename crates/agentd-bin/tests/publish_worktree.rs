@@ -79,3 +79,60 @@ fn publish_worktree_writes_local_acceptance_report() {
         "report names the branch: {report}"
     );
 }
+
+#[test]
+fn publish_worktree_rejects_parent_repo_subdirectory_without_git_metadata() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let fake_worktree = repo
+        .join(".agentd")
+        .join("worktrees")
+        .join("wt-task-tr_0123456789ABCDEFGHJKMNPQRS");
+    let task_run_id = "tr_0123456789ABCDEFGHJKMNPQRS";
+
+    fs::create_dir(&repo).expect("create repo");
+    git(&repo, &["init"]);
+    git(&repo, &["config", "user.email", "agentd@example.invalid"]);
+    git(&repo, &["config", "user.name", "agentd test"]);
+    fs::write(repo.join("README.md"), "seed\n").expect("seed readme");
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "-m", "seed"]);
+
+    fs::create_dir_all(&fake_worktree).expect("create fake worktree");
+    fs::write(
+        fake_worktree.join("agentd-change.txt"),
+        "must not stage parent repo\n",
+    )
+    .expect("write fake task change");
+
+    let script = repo_root().join("scripts/agentd_publish_worktree.sh");
+    let output = Command::new("bash")
+        .current_dir(temp.path())
+        .arg(script)
+        .arg(&fake_worktree)
+        .arg(task_run_id)
+        .output()
+        .expect("run agentd_publish_worktree");
+
+    assert!(
+        !output.status.success(),
+        "fake nested worktree must be rejected\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not a git worktree root"),
+        "stderr explains the root validation failure: {stderr}"
+    );
+
+    let mut cached = Command::new("git");
+    cached
+        .current_dir(&repo)
+        .args(["diff", "--cached", "--quiet"]);
+    let cached = cached.output().expect("git diff --cached --quiet");
+    assert!(
+        cached.status.success(),
+        "publish rejection must happen before staging parent repo changes"
+    );
+}

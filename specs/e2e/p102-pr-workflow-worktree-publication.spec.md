@@ -19,7 +19,7 @@ non-PR workflows alone.
   `publish_branch` tool node before `open_pr`.
 - `publish_branch` uses the same argv-safe helper as execute:
   `bash scripts/agentd_publish_worktree.sh ${worktree} ${task_run_id}`.
-- Each migrated `open_pr` uses `gh pr create --fill --head agentd/${task_run_id}`.
+- Each migrated `open_pr` uses `bash scripts/agentd_open_pr.sh ${task_run_id}`.
 - `bugfix-rapid.dot` and `refactor-only.dot` verify the allocated worktree with
   `agent-spec lifecycle ... --code ${worktree} ...`.
 - The migrated publication edges are success-conditioned:
@@ -60,7 +60,7 @@ Scenario: docs-only publishes its allocated worktree before opening PR
   Given workflows/docs-only.dot
   When it is parsed and validated
   Then publish_branch runs "bash scripts/agentd_publish_worktree.sh ${worktree} ${task_run_id}"
-  And open_pr targets "agentd/${task_run_id}"
+  And open_pr uses "bash scripts/agentd_open_pr.sh ${task_run_id}"
   And write_docs-to-publish, publish-to-open_pr, and open_pr-to-report edges are success-conditioned
 
 Scenario: bugfix-rapid verifies and publishes the allocated worktree
@@ -71,7 +71,7 @@ Scenario: bugfix-rapid verifies and publishes the allocated worktree
   When it is parsed and validated
   Then verify_lifecycle uses "--code ${worktree}"
   And publish_branch runs "bash scripts/agentd_publish_worktree.sh ${worktree} ${task_run_id}"
-  And open_pr targets "agentd/${task_run_id}"
+  And open_pr uses "bash scripts/agentd_open_pr.sh ${task_run_id}"
 
 Scenario: refactor-only verifies and publishes the allocated worktree
   Test: refactor_only_dot_uses_worktree_and_publishes_before_pr
@@ -81,7 +81,7 @@ Scenario: refactor-only verifies and publishes the allocated worktree
   When it is parsed and validated
   Then verify_lifecycle uses "--code ${worktree}"
   And publish_branch runs "bash scripts/agentd_publish_worktree.sh ${worktree} ${task_run_id}"
-  And open_pr targets "agentd/${task_run_id}"
+  And open_pr uses "bash scripts/agentd_open_pr.sh ${task_run_id}"
 
 Scenario: docs-only publish failure stops before open_pr
   Test: docs_only_dot_publish_failure_stops_before_open_pr
@@ -89,7 +89,7 @@ Scenario: docs-only publish failure stops before open_pr
   Test Double: FakeBackend + RecordingCommandRunner + InMemoryStore + fake WorktreeAllocator
   Given docs-only.dot on the real Engine and a publish_branch tool result with exit status 1
   When write_docs succeeds
-  Then the run fails without recording a `gh pr create` command
+  Then the run fails without recording the open PR helper command
 
 Scenario: migrated PR workflows walk to done with task branch publication
   Test: migrated_pr_workflows_walk_to_done_with_task_branch_publication
@@ -97,4 +97,4 @@ Scenario: migrated PR workflows walk to done with task branch publication
   Test Double: FakeBackend + RecordingCommandRunner + InMemoryStore + fake WorktreeAllocator
   Given docs-only.dot, bugfix-rapid.dot, and refactor-only.dot on the real Engine
   When their agent parks are completed and their gates or reviewers pass
-  Then each run reaches Finished after recording publish_branch and `gh pr create --fill --head agentd/${task_run_id}`
+  Then each run reaches Finished after recording publish_branch and `bash scripts/agentd_open_pr.sh ${task_run_id}`

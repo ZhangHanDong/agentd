@@ -17,15 +17,16 @@ later scenarios.
 
 ## Decisions
 
-- `execute.dot`: `start` → `pull_frozen_spec`(tool) → `draft_plan`(tool, shells `agent-spec plan` — NOT a planner agent) → `implement`(codergen, role=implementer) → `verify_lifecycle`(tool, goal_gate=true) → `review`(parallel.fan_out, reviewers=3, bundle=frozen, visibility=blind) → `aggregate`(parallel.fan_in, aggregator=majority_pass, goal_gate=true) → `publish_branch`(tool, publishes `${worktree}` to `agentd/${task_run_id}`) → `open_pr`(tool, `gh pr create`) → `report_acceptance`(tool) → `done`(Msquare).
+- `execute.dot`: `start` → `pull_frozen_spec`(tool) → `draft_plan`(tool, shells `agent-spec plan` — NOT a planner agent) → `implement`(codergen, role=implementer) → `verify_lifecycle`(tool, goal_gate=true) → `review`(parallel.fan_out, reviewers=3, bundle=frozen, visibility=blind) → `aggregate`(parallel.fan_in, aggregator=majority_pass, goal_gate=true) → `publish_branch`(tool, publishes `${worktree}` to `agentd/${task_run_id}`) → `open_pr`(tool, `agentd_open_pr`) → `report_acceptance`(tool) → `done`(Msquare).
 - The terminal-routing node `report_acceptance` has two outgoing edges: `report_acceptance -> done [condition="outcome=success"]` and the recovery edge `report_acceptance -> implement [label="goal_gate_unmet"]` to a non-terminal (so an unmet gate recovers instead of going Stuck).
 - Exactly one `parallel.fan_out` feeds the one `parallel.fan_in` (P0.1 supports a single unpaired fan_out per fan_in).
 - execute.dot's shipped `cmd=` use whitespace-split argv; `verify_lifecycle`
   receives the implementer's allocated worktree via `${worktree}` as of P2
   R3b1, while `.agentd/run/*` runtime-state paths stay daemon-cwd paths.
   `publish_branch` receives `${worktree}` and `${task_run_id}` as explicit argv
-  values, then `open_pr` targets `--head agentd/${task_run_id}`. `gh` auth still
-  comes from the operator's ambient environment (standalone, D6).
+  values, then `open_pr` receives `${task_run_id}` and lets
+  `scripts/agentd_open_pr.sh` target the published branch. `gh` auth still comes
+  from the operator's ambient environment (standalone, D6).
 
 ## Boundaries
 
@@ -74,7 +75,7 @@ Scenario: execute.dot walks to done with all gates satisfied
   Test: execute_dot_walks_to_done
   Given the execute.dot graph on the real Engine with in-memory fake ports
   When implement succeeds, the three reviewers pass, and the tool nodes succeed
-  Then the run reaches Finished and open_pr shelled "gh pr create --fill --head agentd/${task_run_id}" as program and argv
+  Then the run reaches Finished and open_pr shelled "bash scripts/agentd_open_pr.sh ${task_run_id}" as program and argv
 
 Scenario: an unmet goal_gate routes to the recovery edge instead of going Stuck
   Test: execute_dot_goal_gate_unmet_routes_to_recovery_not_stuck

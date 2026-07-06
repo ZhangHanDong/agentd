@@ -96,7 +96,7 @@ worktree stages identically.
 - REVIEWER worktrees: P104 resolves this by keying reviewer snapshots as
   `review-${review_run_id}-${reviewer_id}` and snapshotting from the implementer
   worktree.
-- `open_pr` from the worktree: `gh pr create` needs the implementer's work on a
+- `open_pr` from the worktree: the PR helper needs the implementer's work on a
   pushed branch; P100 handles this by publishing W to `agentd/${task_run_id}`.
 - RESTART: a persisted `worktree_path` points to a worktree P1.3 boot-GC would
   delete on restart; reuse-if-exists vs reallocate vs spare-in-flight is R3b. (Do

@@ -13,7 +13,7 @@ digraph docs_only {
   "start"      [shape=Mdiamond];
   "write_docs" [handler="codergen", role="implementer", initial_prompt_includes="issue_id,issue_title,issue_body"];
   "publish_branch" [handler="tool", cmd="bash scripts/agentd_publish_worktree.sh ${worktree} ${task_run_id}", timeout_secs="300"];
-  "open_pr"    [handler="tool", cmd="gh pr create --fill --head agentd/${task_run_id}", timeout_secs="120"];
+  "open_pr"    [handler="tool", cmd="bash scripts/agentd_open_pr.sh ${task_run_id}", timeout_secs="120"];
   "report"     [handler="tool", cmd="cat .agentd/run/report.md", timeout_secs="30"];
   "done"       [shape=Msquare];
 
