@@ -48,6 +48,13 @@ fn workflow_change_resume_line(checklist: &str) -> &str {
         .expect("workflow-change resume checklist line")
 }
 
+fn sigkill_drill_line(checklist: &str) -> &str {
+    checklist
+        .lines()
+        .find(|line| line.contains("agentd_real_sigkill_smoke.sh"))
+        .expect("real SIGKILL harness checklist line")
+}
+
 #[test]
 fn deployment_checklist_marks_p121_agent_id_gap_resolved() {
     let checklist = read_repo_file("docs/p0.9-deployment-checklist.md");
@@ -170,5 +177,22 @@ fn deployment_checklist_marks_p140_workflow_change_gate_wired() {
     assert!(
         !line.contains("Wire `--accept-workflow-change` into the resume path"),
         "workflow-change line still describes the flag as future wiring: {line}"
+    );
+}
+
+#[test]
+fn deployment_checklist_mentions_real_sigkill_harness() {
+    let checklist = read_repo_file("docs/p0.9-deployment-checklist.md");
+    let p141 = read_repo_file("specs/e2e/p141-real-sigkill-human-answer-harness.spec.md");
+    let line = sigkill_drill_line(&checklist);
+
+    assert!(
+        p141.contains("agentd_real_sigkill_smoke.sh")
+            && p141.contains("AGENTD_REAL_SIGKILL_SMOKE=1"),
+        "P141 spec should document the guarded real SIGKILL harness"
+    );
+    assert!(
+        line.contains("AGENTD_REAL_SIGKILL_SMOKE=1") && line.contains("--execute"),
+        "SIGKILL checklist line should name the guarded execute opt-in: {line}"
     );
 }

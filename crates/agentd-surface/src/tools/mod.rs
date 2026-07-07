@@ -5,5 +5,6 @@
 pub mod assign_task;
 pub mod check_inbox;
 pub mod query_run;
+pub mod submit_human_answer;
 pub mod submit_outcome;
 pub mod submit_review;
