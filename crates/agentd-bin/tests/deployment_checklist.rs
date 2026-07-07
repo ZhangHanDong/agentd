@@ -41,6 +41,13 @@ fn sse_sanitization_gap_line(checklist: &str) -> &str {
         .expect("SSE field sanitization known-gap line")
 }
 
+fn workflow_change_resume_line(checklist: &str) -> &str {
+    checklist
+        .lines()
+        .find(|line| line.contains("--accept-workflow-change"))
+        .expect("workflow-change resume checklist line")
+}
+
 #[test]
 fn deployment_checklist_marks_p121_agent_id_gap_resolved() {
     let checklist = read_repo_file("docs/p0.9-deployment-checklist.md");
@@ -143,5 +150,25 @@ fn deployment_checklist_marks_p139_sse_sanitization_resolved() {
     assert!(
         !line.contains("sanitize at the SSE boundary"),
         "SSE line still describes boundary sanitization as future work: {line}"
+    );
+}
+
+#[test]
+fn deployment_checklist_marks_p140_workflow_change_gate_wired() {
+    let checklist = read_repo_file("docs/p0.9-deployment-checklist.md");
+    let p140 = read_repo_file("specs/e2e/p140-resume-workflow-change-gate.spec.md");
+    let line = workflow_change_resume_line(&checklist);
+
+    assert!(
+        p140.contains("resume_guard") && p140.contains("--accept-workflow-change"),
+        "P140 spec should document the production workflow-change resume gate"
+    );
+    assert!(
+        line.contains("P140") && line.contains("operator"),
+        "workflow-change checklist line should name P140 as the wired operator gate: {line}"
+    );
+    assert!(
+        !line.contains("Wire `--accept-workflow-change` into the resume path"),
+        "workflow-change line still describes the flag as future wiring: {line}"
     );
 }

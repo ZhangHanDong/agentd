@@ -53,6 +53,7 @@ pub async fn build_production_host(config: &DaemonConfig) -> Result<ProductionRu
         Box::new(SystemClock),
         config.workflows_dir.clone(),
     )
+    .with_accept_workflow_change(config.accept_workflow_change)
     .with_worktree_allocator(Some(Box::new(worktree_pool))))
 }
 
