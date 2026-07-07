@@ -17,6 +17,7 @@ use agentd_core::ports::{
     AgentBackend, Clock, CommandRunner, MempalClient, Store, WorktreeAllocator,
 };
 use agentd_core::types::{NodeId, ReviewRunId, RunContext, RunId};
+use agentd_specify::{AgentdEventRef, OfflineSpecify, SpecifyClient, report_agentd_event};
 use agentd_store::{SqliteStore, event_repo, review_repo, run_repo, task_repo};
 use agentd_surface::host::{
     EventRecord, LiveEvent, RunHost, RunSnapshot, RunSummary, TaskAssignment,
@@ -59,6 +60,7 @@ pub struct ProductionRunHost {
     mempal: Box<dyn MempalClient>,
     clock: Box<dyn Clock>,
     worktree_allocator: Option<Box<dyn WorktreeAllocator>>,
+    specify: Arc<dyn SpecifyClient>,
     accept_workflow_change: bool,
     registry: HandlerRegistry,
     workflows_dir: PathBuf,
@@ -95,6 +97,7 @@ impl ProductionRunHost {
             mempal,
             clock,
             worktree_allocator: None,
+            specify: Arc::new(OfflineSpecify::new()),
             accept_workflow_change: false,
             registry: HandlerRegistry::with_builtins(),
             workflows_dir: workflows_dir.into(),
@@ -116,6 +119,13 @@ impl ProductionRunHost {
         allocator: Option<Box<dyn WorktreeAllocator>>,
     ) -> Self {
         self.worktree_allocator = allocator;
+        self
+    }
+
+    /// Inject the optional Specify semantic-event reporter.
+    #[must_use]
+    pub fn with_specify_client(mut self, specify: Arc<dyn SpecifyClient>) -> Self {
+        self.specify = specify;
         self
     }
 
@@ -238,6 +248,7 @@ impl ProductionRunHost {
         }
         // DUAL-WRITE: persist (durable/audit) then broadcast (the live SSE tail).
         let seq = event_repo::append(self.store.pool(), run_id, kind, &payload).await?;
+        let payload_for_report = payload.clone();
         // Lossy + non-blocking: an absent/slow subscriber never blocks the engine.
         let _ = self.live_tx.send(LiveEvent {
             run_id: run_id.as_str().to_string(),
@@ -247,6 +258,26 @@ impl ProductionRunHost {
                 payload,
             },
         });
+        if let Err(err) = report_agentd_event(
+            self.specify.as_ref(),
+            run_id.as_str(),
+            AgentdEventRef {
+                run_id: run_id.as_str(),
+                seq,
+                kind,
+                payload: &payload_for_report,
+            },
+        )
+        .await
+        {
+            tracing::debug!(
+                error = %err,
+                run_id = run_id.as_str(),
+                seq,
+                kind,
+                "optional Specify event reporting failed"
+            );
+        }
         Ok(())
     }
 
@@ -465,14 +496,83 @@ mod tests {
     use crate::SystemClock;
     use agentd_core::engine::{ParkReason, RunProgress};
     use agentd_core::test_support::{FakeBackend, MempalStub, RecordingCommandRunner};
-    use agentd_core::types::{NodeId, ReviewRunId, RunId};
+    use agentd_core::types::{NodeId, ReviewRunId, RunId, TaskRunId};
+    use agentd_specify::{
+        AcceptanceReport, DraftReceipt, DraftSpec, FrozenSpec, IssueContext, SemanticEvent,
+        SpecifyClient, SpecifyError,
+    };
     use agentd_store::{SqliteStore, run_repo};
     use agentd_surface::host::RunHost;
     use std::path::PathBuf;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex as StdMutex};
 
     fn workflows_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workflows")
+    }
+
+    #[derive(Debug, Clone)]
+    struct RuntimeSpecifyClient {
+        events: Arc<StdMutex<Vec<SemanticEvent>>>,
+        fail_report: bool,
+    }
+
+    impl RuntimeSpecifyClient {
+        fn recording() -> Self {
+            Self {
+                events: Arc::new(StdMutex::new(Vec::new())),
+                fail_report: false,
+            }
+        }
+
+        fn failing() -> Self {
+            Self {
+                events: Arc::new(StdMutex::new(Vec::new())),
+                fail_report: true,
+            }
+        }
+
+        fn events(&self) -> Vec<SemanticEvent> {
+            self.events.lock().expect("events lock").clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SpecifyClient for RuntimeSpecifyClient {
+        async fn pull_issue_context(&self, _issue_id: &str) -> Result<IssueContext, SpecifyError> {
+            Err(SpecifyError::MissingScriptedResponse {
+                operation: "pull_issue_context",
+            })
+        }
+
+        async fn push_draft(&self, _draft: DraftSpec) -> Result<DraftReceipt, SpecifyError> {
+            Err(SpecifyError::MissingScriptedResponse {
+                operation: "push_draft",
+            })
+        }
+
+        async fn pull_frozen_spec(
+            &self,
+            _spec_id: &str,
+            _version: &str,
+        ) -> Result<FrozenSpec, SpecifyError> {
+            Err(SpecifyError::MissingScriptedResponse {
+                operation: "pull_frozen_spec",
+            })
+        }
+
+        async fn report_event(&self, event: SemanticEvent) -> Result<(), SpecifyError> {
+            if self.fail_report {
+                return Err(SpecifyError::Transport("runtime report failed".to_string()));
+            }
+            self.events.lock().expect("events lock").push(event);
+            Ok(())
+        }
+
+        async fn report_acceptance(&self, _report: AcceptanceReport) -> Result<(), SpecifyError> {
+            Err(SpecifyError::MissingScriptedResponse {
+                operation: "report_acceptance",
+            })
+        }
     }
 
     async fn host_for_emit_tests() -> (ProductionRunHost, tempfile::TempDir) {
@@ -572,5 +672,179 @@ mod tests {
             ],
             "different review rounds survive payload-based dedup"
         );
+    }
+
+    #[tokio::test]
+    async fn production_runhost_reports_appended_events_to_specify_client() {
+        let (host, _dir) = host_for_emit_tests().await;
+        let specify = RuntimeSpecifyClient::recording();
+        let host = host.with_specify_client(Arc::new(specify.clone()));
+        let run = RunId::from_string("specify-report");
+        run_repo::record_run(host.store().pool(), &run, "execute.dot", "sha")
+            .await
+            .expect("record");
+
+        host.emit(
+            &run,
+            &RunProgress::Parked {
+                run_id: run.clone(),
+                node_id: NodeId::parsed("implement"),
+                reason: ParkReason::AgentOutcome {
+                    task_run_id: TaskRunId::from_string("tr-specify-report"),
+                },
+            },
+        )
+        .await
+        .expect("emit");
+
+        let durable = host.events_from(&run, 0).await.expect("events");
+        assert_eq!(durable.len(), 1);
+        assert_eq!(durable[0].kind, "run_parked");
+        assert_eq!(durable[0].payload, r#"{"node":"implement"}"#);
+
+        let reported = specify.events();
+        assert_eq!(reported.len(), 1);
+        assert_eq!(reported[0].workflow_id, "specify-report");
+        assert_eq!(reported[0].kind, "agent.blocked");
+        assert_eq!(
+            reported[0].payload,
+            serde_json::json!({
+                "run_id": "specify-report",
+                "seq": durable[0].seq,
+                "agentd_event_kind": "run_parked",
+                "payload": { "node": "implement" }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn production_runhost_does_not_report_deduped_reparks() {
+        let (host, _dir) = host_for_emit_tests().await;
+        let specify = RuntimeSpecifyClient::recording();
+        let host = host.with_specify_client(Arc::new(specify.clone()));
+        let run = RunId::from_string("specify-dedup");
+        run_repo::record_run(host.store().pool(), &run, "execute.dot", "sha")
+            .await
+            .expect("record");
+
+        for _ in 0..2 {
+            host.emit(
+                &run,
+                &RunProgress::Parked {
+                    run_id: run.clone(),
+                    node_id: NodeId::parsed("implement"),
+                    reason: ParkReason::AgentOutcome {
+                        task_run_id: TaskRunId::from_string("tr-specify-dedup"),
+                    },
+                },
+            )
+            .await
+            .expect("emit");
+        }
+
+        let durable = host.events_from(&run, 0).await.expect("events");
+        assert_eq!(durable.len(), 1, "second same-node re-park is suppressed");
+        assert_eq!(
+            specify.events().len(),
+            1,
+            "suppressed re-park is not semantically reported"
+        );
+    }
+
+    #[tokio::test]
+    async fn production_runhost_ignores_specify_report_errors_after_durable_emit() {
+        let (host, _dir) = host_for_emit_tests().await;
+        let specify = RuntimeSpecifyClient::failing();
+        let host = host.with_specify_client(Arc::new(specify));
+        let run = RunId::from_string("specify-fail");
+        run_repo::record_run(host.store().pool(), &run, "execute.dot", "sha")
+            .await
+            .expect("record");
+        let mut live = host.subscribe_events();
+
+        host.emit(
+            &run,
+            &RunProgress::Finished {
+                run_id: run.clone(),
+            },
+        )
+        .await
+        .expect("emit ignores optional report error");
+
+        let durable = host.events_from(&run, 0).await.expect("events");
+        assert_eq!(durable.len(), 1);
+        assert_eq!(durable[0].kind, "run_finished");
+
+        let received = live.recv().await.expect("live event");
+        assert_eq!(received.run_id, "specify-fail");
+        assert_eq!(received.event.kind, "run_finished");
+    }
+
+    #[tokio::test]
+    async fn production_runhost_default_specify_reporting_preserves_standalone_mode() {
+        let (host, _dir) = host_for_emit_tests().await;
+        let run = RunId::from_string("specify-default");
+        run_repo::record_run(host.store().pool(), &run, "execute.dot", "sha")
+            .await
+            .expect("record");
+
+        host.emit(
+            &run,
+            &RunProgress::Failed {
+                run_id: run.clone(),
+                reason: "boom".to_string(),
+            },
+        )
+        .await
+        .expect("default offline specify reporter is no-op");
+
+        let durable = host.events_from(&run, 0).await.expect("events");
+        assert_eq!(durable.len(), 1);
+        assert_eq!(durable[0].kind, "run_failed");
+        assert_eq!(durable[0].payload, r#"{"reason":"boom"}"#);
+    }
+
+    #[test]
+    fn runtime_specify_reporting_keeps_boundary() {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let workspace = manifest_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root");
+        let bin_manifest =
+            std::fs::read_to_string(manifest_dir.join("Cargo.toml")).expect("bin manifest");
+        let core_manifest = std::fs::read_to_string(
+            workspace
+                .join("crates")
+                .join("agentd-core")
+                .join("Cargo.toml"),
+        )
+        .expect("core manifest");
+        let surface_manifest = std::fs::read_to_string(
+            workspace
+                .join("crates")
+                .join("agentd-surface")
+                .join("Cargo.toml"),
+        )
+        .expect("surface manifest");
+
+        assert!(
+            bin_manifest.contains("agentd-specify"),
+            "agentd-bin owns the runtime Specify dependency"
+        );
+        assert!(
+            !core_manifest.contains("agentd-specify"),
+            "agentd-core stays free of runtime Specify wiring"
+        );
+        assert!(
+            !surface_manifest.contains("agentd-specify"),
+            "agentd-surface stays free of runtime Specify wiring"
+        );
+        for forbidden in ["reqwest", "tokio-tungstenite", "url"] {
+            assert!(
+                !bin_manifest.contains(forbidden),
+                "P145 does not add network dependency {forbidden}"
+            );
+        }
     }
 }
