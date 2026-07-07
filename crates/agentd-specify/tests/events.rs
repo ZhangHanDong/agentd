@@ -257,7 +257,7 @@ fn semantic_mapping_keeps_runtime_wiring_out_of_specify_crate() {
 #[test]
 fn event_reporting_helper_keeps_runtime_wiring_out() {
     let manifest = read_repo_file("crates/agentd-specify/Cargo.toml");
-    let bin_host = read_repo_file("crates/agentd-bin/src/host.rs");
+    let source = read_repo_file("crates/agentd-specify/src/events.rs");
 
     for forbidden in [
         "agentd-surface",
@@ -271,7 +271,7 @@ fn event_reporting_helper_keeps_runtime_wiring_out() {
         );
     }
     assert!(
-        !bin_host.contains("report_agentd_event"),
-        "runtime wiring is out of scope for P144: {bin_host}"
+        !source.contains("EventRecord"),
+        "helper source must stay decoupled from agentd-surface EventRecord: {source}"
     );
 }
