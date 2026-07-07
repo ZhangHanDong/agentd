@@ -90,6 +90,19 @@ impl<'a> Engine<'a> {
     /// Returns [`CoreError`] on a store/handler failure or an engine invariant
     /// violation (missing start node, unknown handler, step ceiling exceeded).
     pub async fn execute(&self, run_id: &RunId) -> Result<RunProgress, CoreError> {
+        self.execute_with_context(run_id, RunContext::new()).await
+    }
+
+    /// Run `run_id` from the graph's start node with a seeded initial context.
+    ///
+    /// # Errors
+    /// Returns [`CoreError`] on a store/handler failure or an engine invariant
+    /// violation (missing start node, unknown handler, step ceiling exceeded).
+    pub async fn execute_with_context(
+        &self,
+        run_id: &RunId,
+        initial_context: RunContext,
+    ) -> Result<RunProgress, CoreError> {
         let start = self
             .graph
             .starts()
@@ -103,7 +116,7 @@ impl<'a> Engine<'a> {
         tracing::info!(run_id = %run_id.as_str(), "run started");
         let state = RunState {
             current: NodeId::parsed(start.id.as_str()),
-            context: RunContext::new(),
+            context: initial_context,
             attempts: HashMap::new(),
             completed: Vec::new(),
         };

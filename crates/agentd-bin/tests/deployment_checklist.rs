@@ -20,6 +20,13 @@ fn task_assignment_gap_line(checklist: &str) -> &str {
         .expect("TaskAssignment known-gap line")
 }
 
+fn initial_context_gap_line(checklist: &str) -> &str {
+    checklist
+        .lines()
+        .find(|line| line.contains("**Initial run context**"))
+        .expect("Initial run context known-gap line")
+}
+
 #[test]
 fn deployment_checklist_marks_p121_agent_id_gap_resolved() {
     let checklist = read_repo_file("docs/p0.9-deployment-checklist.md");
@@ -61,5 +68,25 @@ fn deployment_checklist_marks_p136_task_assignment_metadata_resolved() {
     assert!(
         !line.contains("remaining gaps are `spec_path`/`plan_path`"),
         "TaskAssignment gap line still lists spec_path/plan_path as remaining: {line}"
+    );
+}
+
+#[test]
+fn deployment_checklist_marks_p137_initial_context_resolved() {
+    let checklist = read_repo_file("docs/p0.9-deployment-checklist.md");
+    let p137 = read_repo_file("specs/e2e/p137-initial-run-context-seeding.spec.md");
+    let line = initial_context_gap_line(&checklist);
+
+    assert!(
+        p137.contains("ProductionRunHost::start_workflow") && p137.contains("RunContext"),
+        "P137 spec should document the production initial-context bridge"
+    );
+    assert!(
+        line.contains("P137") && line.contains("seed"),
+        "Initial run context gap line should name P137 seeding resolution: {line}"
+    );
+    assert!(
+        !line.contains("accepts but does not seed `context`"),
+        "Initial run context line still says production discards context: {line}"
     );
 }
