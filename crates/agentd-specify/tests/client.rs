@@ -22,6 +22,15 @@ fn read_repo_file(path: &str) -> String {
     })
 }
 
+fn assert_contains_all(haystack: &str, needles: &[&str], label: &str) {
+    for needle in needles {
+        assert!(
+            haystack.contains(needle),
+            "{label} should contain {needle:?}:\n{haystack}"
+        );
+    }
+}
+
 fn issue_context() -> IssueContext {
     IssueContext {
         issue_id: "ACME-742".to_string(),
@@ -206,4 +215,84 @@ fn readme_lists_agentd_specify_optional_adapter() {
         readme.contains("optional Specify client") || readme.contains("optional Specify adapter"),
         "{readme}"
     );
+}
+
+#[test]
+fn p1_roadmap_records_specify_track_b_as_built_through_p145() {
+    let roadmap = read_repo_file("docs/plans/2026-06-05-agentd-p1-roadmap.md");
+    for spec in [
+        "specs/specify/p142-offline-specify-seam.spec.md",
+        "specs/specify/p143-semantic-event-mapping.spec.md",
+        "specs/specify/p144-specify-event-reporting.spec.md",
+        "specs/specify/p145-runtime-specify-event-reporting.spec.md",
+    ] {
+        let content = read_repo_file(spec);
+        assert!(
+            content.contains("spec: task"),
+            "{spec} should remain an agent-spec task"
+        );
+    }
+
+    assert_contains_all(
+        &roadmap,
+        &[
+            "P142",
+            "P143",
+            "P144",
+            "P145",
+            "OfflineSpecify",
+            "semantic-event mapping",
+            "report_agentd_event",
+            "runtime `ProductionRunHost` hook",
+        ],
+        "P1 roadmap",
+    );
+}
+
+#[test]
+fn p1_roadmap_keeps_real_transport_gated_on_external_contract() {
+    let roadmap = read_repo_file("docs/plans/2026-06-05-agentd-p1-roadmap.md");
+
+    assert_contains_all(
+        &roadmap,
+        &[
+            "real HTTP/WS transport",
+            "auth",
+            "endpoint config",
+            "canonical external workflow ids",
+            "concrete Specify API contract",
+        ],
+        "P1 roadmap Track B gate",
+    );
+    assert!(
+        !roadmap.contains("scope it to \"trait + `OfflineSpecify` seam +\nmock contract test\""),
+        "roadmap should not describe Track B as only the pre-P142 mock seam:\n{roadmap}"
+    );
+}
+
+#[test]
+fn specify_boundary_doc_reflects_current_optional_seam() {
+    let boundary = read_repo_file("docs/specs/2026-05-29-agentd-specify-boundary.md");
+    let manifest = read_repo_file("crates/agentd-specify/Cargo.toml");
+
+    assert_contains_all(
+        &boundary,
+        &[
+            "OfflineSpecify",
+            "semantic event mapping",
+            "runtime reporting",
+            "real HTTP/WS transport",
+        ],
+        "Specify boundary doc",
+    );
+    assert!(
+        !boundary.contains("thin reqwest wrapper, ~1 crate, P1"),
+        "boundary doc should not present a reqwest wrapper as the current state:\n{boundary}"
+    );
+    for forbidden in ["reqwest", "tokio-tungstenite", "url"] {
+        assert!(
+            !manifest.contains(forbidden),
+            "P146 must not add network transport dependency {forbidden}: {manifest}"
+        );
+    }
 }
