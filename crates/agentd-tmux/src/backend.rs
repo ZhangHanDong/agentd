@@ -402,6 +402,62 @@ impl TmuxBackend {
             .await?;
         Ok(probe.status == 0)
     }
+
+    async fn launch_session(
+        &self,
+        req: &SpawnRequest,
+        session: &str,
+        worktree: &str,
+        launcher: &str,
+    ) -> Result<CommandOutput, BackendError> {
+        match &req.launch_strategy {
+            LaunchStrategy::Direct => {
+                self.tmux(
+                    &[
+                        "new-session",
+                        "-d",
+                        "-s",
+                        session,
+                        "-c",
+                        worktree,
+                        "bash",
+                        launcher,
+                    ],
+                    RunOpts::default(),
+                )
+                .await
+            }
+            LaunchStrategy::Systemd { scope_name } => {
+                let unit = format!("--unit={scope_name}");
+                let tmux_bin = self.tmux_bin.to_string_lossy().into_owned();
+                let argv: Vec<String> = [
+                    "--user",
+                    "--scope",
+                    unit.as_str(),
+                    "--collect",
+                    "--quiet",
+                    tmux_bin.as_str(),
+                    "new-session",
+                    "-d",
+                    "-s",
+                    session,
+                    "-c",
+                    worktree,
+                    "bash",
+                    launcher,
+                ]
+                .iter()
+                .map(|arg| (*arg).to_string())
+                .collect();
+                self.runner
+                    .run("systemd-run", &argv, RunOpts::default())
+                    .await
+                    .map_err(|err| {
+                        BackendError::Recoverable(format!("systemd-run failed to launch: {err}"))
+                    })
+            }
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -438,53 +494,9 @@ impl AgentBackend for TmuxBackend {
         // §4.5 step 3: launch — directly, or wrapped in a transient systemd scope.
         let worktree_str = req.worktree.to_string_lossy().into_owned();
         let launcher_str = launcher_path.to_string_lossy().into_owned();
-        let launch_out = match &req.launch_strategy {
-            LaunchStrategy::Direct => {
-                self.tmux(
-                    &[
-                        "new-session",
-                        "-d",
-                        "-s",
-                        session.as_str(),
-                        "-c",
-                        worktree_str.as_str(),
-                        "bash",
-                        launcher_str.as_str(),
-                    ],
-                    RunOpts::default(),
-                )
-                .await?
-            }
-            LaunchStrategy::Systemd { scope_name } => {
-                let unit = format!("--unit={scope_name}");
-                let tmux_bin_str = self.tmux_bin.to_string_lossy().into_owned();
-                let argv: Vec<String> = [
-                    "--user",
-                    "--scope",
-                    unit.as_str(),
-                    "--collect",
-                    "--quiet",
-                    tmux_bin_str.as_str(),
-                    "new-session",
-                    "-d",
-                    "-s",
-                    session.as_str(),
-                    "-c",
-                    worktree_str.as_str(),
-                    "bash",
-                    launcher_str.as_str(),
-                ]
-                .iter()
-                .map(|a| (*a).to_string())
-                .collect();
-                self.runner
-                    .run("systemd-run", &argv, RunOpts::default())
-                    .await
-                    .map_err(|e| {
-                        BackendError::Recoverable(format!("systemd-run failed to launch: {e}"))
-                    })?
-            }
-        };
+        let launch_out = self
+            .launch_session(&req, &session, &worktree_str, &launcher_str)
+            .await?;
         if launch_out.status != 0 {
             return Err(BackendError::Recoverable(format!(
                 "tmux new-session failed (status {}): {}",

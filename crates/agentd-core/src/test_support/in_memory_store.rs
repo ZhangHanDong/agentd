@@ -97,7 +97,7 @@ impl InMemoryStore {
         self.lock().runs.get(run_id.as_str()).map(|r| r.status)
     }
 
-    /// Test-only read of a task_run's persisted worktree path.
+    /// Test-only read of a `task_run`'s persisted worktree path.
     #[must_use]
     pub fn task_worktree(&self, task_run_id: &TaskRunId) -> Option<PathBuf> {
         self.lock()
@@ -106,7 +106,7 @@ impl InMemoryStore {
             .and_then(|r| r.worktree_path.clone())
     }
 
-    /// Test-only read of a task_run's persisted agent id.
+    /// Test-only read of a `task_run`'s persisted agent id.
     #[must_use]
     pub fn task_agent(&self, task_run_id: &TaskRunId) -> Option<AgentId> {
         self.lock()

@@ -657,7 +657,7 @@ async fn fan_out_without_allocator_uses_staged_worktree() {
     assert!(
         spawned
             .iter()
-            .all(|req| req.worktree == PathBuf::from("/tmp/agentd-task-wt")),
+            .all(|req| req.worktree == Path::new("/tmp/agentd-task-wt")),
         "without allocator, fan_out keeps the staged-worktree fallback: {spawned:?}"
     );
 }
@@ -689,7 +689,7 @@ async fn fan_out_reviewer_snapshot_failure_does_not_fall_back_to_shared_worktree
         deps.backend
             .spawned()
             .iter()
-            .all(|req| { req.worktree != PathBuf::from("/tmp/agentd-task-wt") }),
+            .all(|req| { req.worktree != Path::new("/tmp/agentd-task-wt") }),
         "failed snapshot allocation must not fall back to the shared implementer worktree"
     );
 }

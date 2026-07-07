@@ -106,7 +106,7 @@ impl WorktreePool {
     {
         let preserve_names: HashSet<OsString> = preserve_paths
             .into_iter()
-            .filter_map(|path| path.file_name().map(|name| name.to_os_string()))
+            .filter_map(|path| path.file_name().map(std::ffi::OsStr::to_os_string))
             .collect();
         for path in self.provider.list().await? {
             let preserve = path
@@ -420,8 +420,8 @@ fn sync_dir_contents(source: &Path, dest: &Path) -> io::Result<()> {
             continue;
         }
         let src = entry.path();
-        let dst = dest.join(&name);
-        copy_entry(&src, &dst)?;
+        let target = dest.join(&name);
+        copy_entry(&src, &target)?;
     }
     Ok(())
 }
@@ -498,7 +498,7 @@ mod tests {
             .current_dir(dir)
             .args(args)
             .output()
-            .unwrap_or_else(|err| panic!("git {}: {err}", args.join(" ")));
+            .expect("run git command");
         assert!(
             output.status.success(),
             "git {} failed\nstdout:\n{}\nstderr:\n{}",
@@ -523,7 +523,7 @@ mod tests {
             .current_dir(dir)
             .args(args)
             .output()
-            .unwrap_or_else(|err| panic!("git {}: {err}", args.join(" ")));
+            .expect("run git command");
         assert!(
             output.status.success(),
             "git {} failed\nstdout:\n{}\nstderr:\n{}",

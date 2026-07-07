@@ -167,9 +167,9 @@ async fn dashboard_shell_uses_existing_read_only_endpoints() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_string(resp).await;
     assert!(body.contains(r#"fetch("/runs")"#), "{body}");
-    assert!(body.contains(r#"fetch(`/runs/${"#), "{body}");
-    assert!(body.contains(r#"new EventSource(`/runs/${"#), "{body}");
-    assert!(body.contains(r#"/events"#), "{body}");
+    assert!(body.contains(r"fetch(`/runs/${"), "{body}");
+    assert!(body.contains(r"new EventSource(`/runs/${"), "{body}");
+    assert!(body.contains(r"/events"), "{body}");
     assert!(!body.contains("POST /runs"), "{body}");
     assert!(!body.contains(r#"method: "POST""#), "{body}");
     assert!(!body.contains("tools/call"), "{body}");
@@ -252,9 +252,9 @@ async fn dashboard_shell_live_state_refresh_remains_read_only() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_string(resp).await;
     assert!(body.contains(r#"fetch("/runs")"#), "{body}");
-    assert!(body.contains(r#"fetch(`/runs/${"#), "{body}");
-    assert!(body.contains(r#"new EventSource(`/runs/${"#), "{body}");
-    assert!(body.contains(r#"/events"#), "{body}");
+    assert!(body.contains(r"fetch(`/runs/${"), "{body}");
+    assert!(body.contains(r"new EventSource(`/runs/${"), "{body}");
+    assert!(body.contains(r"/events"), "{body}");
     assert!(!body.contains("POST /runs"), "{body}");
     assert!(!body.contains(r#"method: "POST""#), "{body}");
     assert!(!body.contains("tools/call"), "{body}");
@@ -350,9 +350,9 @@ async fn dashboard_shell_refresh_button_remains_read_only_and_keeps_event_tail()
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_string(resp).await;
     assert!(body.contains(r#"fetch("/runs")"#), "{body}");
-    assert!(body.contains(r#"fetch(`/runs/${"#), "{body}");
-    assert!(body.contains(r#"new EventSource(`/runs/${"#), "{body}");
-    assert!(body.contains(r#"/events"#), "{body}");
+    assert!(body.contains(r"fetch(`/runs/${"), "{body}");
+    assert!(body.contains(r"new EventSource(`/runs/${"), "{body}");
+    assert!(body.contains(r"/events"), "{body}");
     assert!(
         !body.contains(r#"refreshButton.addEventListener("click", () => tailEvents"#),
         "refresh button must not recreate the event tail: {body}"

@@ -119,9 +119,10 @@ fn append_runtime_path_context(prompt: &mut String) {
     if !prompt.is_empty() && !prompt.ends_with('\n') {
         prompt.push('\n');
     }
-    let cwd = std::env::current_dir()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|_| "<unknown>".to_string());
+    let cwd = std::env::current_dir().map_or_else(
+        |_| "<unknown>".to_string(),
+        |path| path.display().to_string(),
+    );
     let _ = writeln!(prompt, "agentd_daemon_cwd: {cwd}");
     let _ = writeln!(
         prompt,

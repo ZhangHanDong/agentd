@@ -62,8 +62,9 @@ impl WorktreeProvider for FakeProvider {
             .unwrap_or_else(|| Path::new("/wt"))
             .join(name);
         if self.root.is_some() {
-            std::fs::create_dir_all(&p)
-                .map_err(|e| CoreError::Backend(format!("create fake worktree {p:?}: {e}")))?;
+            std::fs::create_dir_all(&p).map_err(|e| {
+                CoreError::Backend(format!("create fake worktree {}: {e}", p.display()))
+            })?;
         }
         self.created.lock().expect("lock").push(p.clone());
         Ok(p)

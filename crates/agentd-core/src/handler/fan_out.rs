@@ -76,25 +76,25 @@ impl Handler for FanOutHandler {
         }
 
         for reviewer in &reviewer_worktrees {
-            let prompt = review_prompt(
+            let prompt = review_prompt(&ReviewPromptInput {
                 ctx,
-                &review_run_id,
-                &reviewer.agent_id,
+                review_run_id: &review_run_id,
+                reviewer_id: &reviewer.agent_id,
                 round,
-                &context_sha,
-                stance_queries
+                context_sha: &context_sha,
+                stance_query: stance_queries
                     .as_ref()
                     .and_then(|queries| queries.get(&reviewer.role))
                     .map(String::as_str),
-                prompt_profiles
+                prompt_profile: prompt_profiles
                     .as_ref()
                     .and_then(|profiles| profiles.get(&reviewer.role))
                     .map(String::as_str),
-                stance_packs
+                stance_hits: stance_packs
                     .get(&reviewer.role)
                     .map_or(&[][..], Vec::as_slice),
-                &reviewer.worktree,
-            );
+                review_worktree: &reviewer.worktree,
+            });
             ctx.ports
                 .backend
                 .spawn(spawn_request(
@@ -192,8 +192,7 @@ fn review_worktree<'a>(ctx: &'a HandlerCtx<'_>) -> &'a Path {
         .0
         .get("worktree")
         .and_then(serde_json::Value::as_str)
-        .map(Path::new)
-        .unwrap_or_else(|| Path::new("."))
+        .map_or_else(|| Path::new("."), Path::new)
 }
 
 fn delphi_round(ctx: &HandlerCtx<'_>) -> u32 {
@@ -208,17 +207,30 @@ fn delphi_round(ctx: &HandlerCtx<'_>) -> u32 {
         .unwrap_or(1)
 }
 
-fn review_prompt(
-    ctx: &HandlerCtx<'_>,
-    review_run_id: &ReviewRunId,
-    reviewer_id: &AgentId,
+struct ReviewPromptInput<'a, 'ctx> {
+    ctx: &'a HandlerCtx<'ctx>,
+    review_run_id: &'a ReviewRunId,
+    reviewer_id: &'a AgentId,
     round: u32,
-    context_sha: &str,
-    stance_query: Option<&str>,
-    prompt_profile: Option<&str>,
-    stance_hits: &[DrawerHit],
-    review_worktree: &Path,
-) -> String {
+    context_sha: &'a str,
+    stance_query: Option<&'a str>,
+    prompt_profile: Option<&'a str>,
+    stance_hits: &'a [DrawerHit],
+    review_worktree: &'a Path,
+}
+
+fn review_prompt(input: &ReviewPromptInput<'_, '_>) -> String {
+    let &ReviewPromptInput {
+        ctx,
+        review_run_id,
+        reviewer_id,
+        round,
+        context_sha,
+        stance_query,
+        prompt_profile,
+        stance_hits,
+        review_worktree,
+    } = input;
     let mut prompt = base_review_prompt(ctx, round, context_sha);
     append_review_runtime_context(&mut prompt, ctx, review_worktree);
     append_review_submission_context(&mut prompt, ctx, review_run_id, reviewer_id);
@@ -249,9 +261,10 @@ fn append_review_runtime_context(
     if !prompt.is_empty() && !prompt.ends_with('\n') {
         prompt.push('\n');
     }
-    let cwd = std::env::current_dir()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|_| "<unknown>".to_string());
+    let cwd = std::env::current_dir().map_or_else(
+        |_| "<unknown>".to_string(),
+        |path| path.display().to_string(),
+    );
     let _ = writeln!(prompt, "agentd_daemon_cwd: {cwd}");
     let _ = writeln!(
         prompt,

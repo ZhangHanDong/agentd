@@ -3,6 +3,7 @@
 //! invariants exercised directly through the `Store` trait, and (2) the real
 //! engine driving the full canonical park/resume flow against `SqliteStore`.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use agentd_core::dot::parser;
@@ -172,22 +173,24 @@ async fn reviewer_worktree_mapping_is_take_once() {
     );
 }
 
-#[tokio::test]
-async fn active_worktree_paths_include_non_finished_task_and_review_worktrees() {
-    let (s, _d) = store().await;
+const RUNNING_TASK_PATH: &str = "/tmp/wt-task-tr_0123456789ABCDEFGHJKMNPQRS";
+const RUNNING_RELEASED_REVIEW_PATH: &str = "/tmp/wt-review-rr_0123456789ABCDEFGHJKMNPQRS-released";
+const RUNNING_ACTIVE_REVIEW_PATH: &str = "/tmp/wt-review-rr_0123456789ABCDEFGHJKMNPQRS-active";
+const FAILED_TASK_PATH: &str = "/tmp/wt-task-tr_11111111111111111111111111";
+const FAILED_REVIEW_PATH: &str = "/tmp/wt-review-rr_11111111111111111111111111-debug";
+const FINISHED_TASK_PATH: &str = "/tmp/wt-task-tr_22222222222222222222222222";
+const FINISHED_REVIEW_PATH: &str = "/tmp/wt-review-rr_22222222222222222222222222-done";
 
+async fn seed_running_worktree_paths(s: &SqliteStore) {
     let running = RunId::from_string("running");
     s.insert_run(&running, "sha").await.expect("running run");
     let running_task = s
         .insert_task_run(&running, &NodeId::parsed("implement"))
         .await
         .expect("running task");
-    s.set_task_run_worktree(
-        &running_task,
-        &PathBuf::from("/tmp/wt-task-tr_0123456789ABCDEFGHJKMNPQRS"),
-    )
-    .await
-    .expect("running task worktree");
+    s.set_task_run_worktree(&running_task, &PathBuf::from(RUNNING_TASK_PATH))
+        .await
+        .expect("running task worktree");
     s.complete_task_run(&running_task)
         .await
         .expect("task may be complete before workflow terminal");
@@ -199,7 +202,7 @@ async fn active_worktree_paths_include_non_finished_task_and_review_worktrees() 
     s.set_review_worktree(
         &running_review,
         &released_reviewer,
-        &PathBuf::from("/tmp/wt-review-rr_0123456789ABCDEFGHJKMNPQRS-released"),
+        &PathBuf::from(RUNNING_RELEASED_REVIEW_PATH),
     )
     .await
     .expect("set released reviewer worktree");
@@ -213,104 +216,107 @@ async fn active_worktree_paths_include_non_finished_task_and_review_worktrees() 
     s.set_review_worktree(
         &running_review,
         &AgentId::parsed("active"),
-        &PathBuf::from("/tmp/wt-review-rr_0123456789ABCDEFGHJKMNPQRS-active"),
+        &PathBuf::from(RUNNING_ACTIVE_REVIEW_PATH),
     )
     .await
     .expect("set active reviewer worktree");
+}
 
-    let failed = RunId::from_string("failed");
-    s.insert_run(&failed, "sha").await.expect("failed run");
-    let failed_task = s
-        .insert_task_run(&failed, &NodeId::parsed("implement"))
+async fn seed_terminal_worktree_paths(
+    s: &SqliteStore,
+    run_id: &str,
+    status: RunStatus,
+    task_path: &str,
+    reviewer: &str,
+    review_path: &str,
+) {
+    let run = RunId::from_string(run_id);
+    s.insert_run(&run, "sha").await.expect("terminal run");
+    let task = s
+        .insert_task_run(&run, &NodeId::parsed("implement"))
         .await
-        .expect("failed task");
-    s.set_task_run_worktree(
-        &failed_task,
-        &PathBuf::from("/tmp/wt-task-tr_11111111111111111111111111"),
-    )
-    .await
-    .expect("failed task worktree");
-    let failed_review = s
-        .insert_review_run(&failed, &NodeId::parsed("review"), 1, 1, "csha")
+        .expect("terminal task");
+    s.set_task_run_worktree(&task, &PathBuf::from(task_path))
         .await
-        .expect("failed review");
+        .expect("terminal task worktree");
+    let review = s
+        .insert_review_run(&run, &NodeId::parsed("review"), 1, 1, "csha")
+        .await
+        .expect("terminal review");
     s.set_review_worktree(
-        &failed_review,
-        &AgentId::parsed("debug"),
-        &PathBuf::from("/tmp/wt-review-rr_11111111111111111111111111-debug"),
+        &review,
+        &AgentId::parsed(reviewer),
+        &PathBuf::from(review_path),
     )
     .await
-    .expect("failed reviewer worktree");
-    s.update_run_status(&failed, RunStatus::Failed)
+    .expect("terminal reviewer worktree");
+    s.update_run_status(&run, status)
         .await
-        .expect("mark failed");
+        .expect("mark terminal");
+}
 
-    let finished = RunId::from_string("finished");
-    s.insert_run(&finished, "sha").await.expect("finished run");
-    let finished_task = s
-        .insert_task_run(&finished, &NodeId::parsed("implement"))
-        .await
-        .expect("finished task");
-    s.set_task_run_worktree(
-        &finished_task,
-        &PathBuf::from("/tmp/wt-task-tr_22222222222222222222222222"),
-    )
-    .await
-    .expect("finished task worktree");
-    let finished_review = s
-        .insert_review_run(&finished, &NodeId::parsed("review"), 1, 1, "csha")
-        .await
-        .expect("finished review");
-    s.set_review_worktree(
-        &finished_review,
-        &AgentId::parsed("done"),
-        &PathBuf::from("/tmp/wt-review-rr_22222222222222222222222222-done"),
-    )
-    .await
-    .expect("finished reviewer worktree");
-    s.update_run_status(&finished, RunStatus::Finished)
-        .await
-        .expect("mark finished");
-
+async fn active_path_set(s: &SqliteStore) -> HashSet<PathBuf> {
     let paths = s.active_worktree_paths().await.expect("active paths");
-    let paths: std::collections::HashSet<PathBuf> = paths.into_iter().collect();
+    paths.into_iter().collect()
+}
 
+fn assert_active_worktree_paths(paths: &HashSet<PathBuf>) {
     assert!(
-        paths.contains(&PathBuf::from("/tmp/wt-task-tr_0123456789ABCDEFGHJKMNPQRS")),
+        paths.contains(&PathBuf::from(RUNNING_TASK_PATH)),
         "running workflow keeps task worktree even after task_run completion"
     );
     assert!(
-        paths.contains(&PathBuf::from(
-            "/tmp/wt-review-rr_0123456789ABCDEFGHJKMNPQRS-active"
-        )),
+        paths.contains(&PathBuf::from(RUNNING_ACTIVE_REVIEW_PATH)),
         "unreleased reviewer worktree for running workflow is active"
     );
     assert!(
-        paths.contains(&PathBuf::from("/tmp/wt-task-tr_11111111111111111111111111")),
+        paths.contains(&PathBuf::from(FAILED_TASK_PATH)),
         "failed workflow keeps task worktree for debugging"
     );
     assert!(
-        paths.contains(&PathBuf::from(
-            "/tmp/wt-review-rr_11111111111111111111111111-debug"
-        )),
+        paths.contains(&PathBuf::from(FAILED_REVIEW_PATH)),
         "failed workflow keeps unreleased reviewer worktree for debugging"
     );
     assert!(
-        !paths.contains(&PathBuf::from(
-            "/tmp/wt-review-rr_0123456789ABCDEFGHJKMNPQRS-released"
-        )),
+        !paths.contains(&PathBuf::from(RUNNING_RELEASED_REVIEW_PATH)),
         "released reviewer worktree is no longer active"
     );
     assert!(
-        !paths.contains(&PathBuf::from("/tmp/wt-task-tr_22222222222222222222222222")),
+        !paths.contains(&PathBuf::from(FINISHED_TASK_PATH)),
         "finished workflow task worktree is boot-GC cleanup debris"
     );
     assert!(
-        !paths.contains(&PathBuf::from(
-            "/tmp/wt-review-rr_22222222222222222222222222-done"
-        )),
+        !paths.contains(&PathBuf::from(FINISHED_REVIEW_PATH)),
         "finished workflow reviewer worktree is boot-GC cleanup debris"
     );
+}
+
+#[tokio::test]
+async fn active_worktree_paths_include_non_finished_task_and_review_worktrees() {
+    let (s, _d) = store().await;
+
+    seed_running_worktree_paths(&s).await;
+    seed_terminal_worktree_paths(
+        &s,
+        "failed",
+        RunStatus::Failed,
+        FAILED_TASK_PATH,
+        "debug",
+        FAILED_REVIEW_PATH,
+    )
+    .await;
+    seed_terminal_worktree_paths(
+        &s,
+        "finished",
+        RunStatus::Finished,
+        FINISHED_TASK_PATH,
+        "done",
+        FINISHED_REVIEW_PATH,
+    )
+    .await;
+
+    let paths = active_path_set(&s).await;
+    assert_active_worktree_paths(&paths);
 }
 
 #[tokio::test]

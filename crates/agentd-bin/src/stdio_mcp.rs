@@ -208,11 +208,11 @@ fn empty_input_schema() -> JsonObject {
 }
 
 fn success_response(id: Value, result: Value) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "result": result,
-    })
+    let mut response = Map::new();
+    response.insert("jsonrpc".to_string(), Value::String("2.0".to_string()));
+    response.insert("id".to_string(), id);
+    response.insert("result".to_string(), result);
+    Value::Object(response)
 }
 
 fn error_response(id: Value, code: i64, message: impl Into<String>, data: Option<Value>) -> Value {
@@ -222,9 +222,9 @@ fn error_response(id: Value, code: i64, message: impl Into<String>, data: Option
     if let Some(data) = data {
         error.insert("data".to_string(), data);
     }
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "error": Value::Object(error),
-    })
+    let mut response = Map::new();
+    response.insert("jsonrpc".to_string(), Value::String("2.0".to_string()));
+    response.insert("id".to_string(), id);
+    response.insert("error".to_string(), Value::Object(error));
+    Value::Object(response)
 }

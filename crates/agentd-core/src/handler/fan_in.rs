@@ -165,7 +165,9 @@ fn normalized_text_diff(previous: &str, current: &str) -> f64 {
     if max_len == 0 {
         return 0.0;
     }
-    levenshtein_chars(&previous, &current) as f64 / max_len as f64
+    let distance = u32::try_from(levenshtein_chars(&previous, &current)).unwrap_or(u32::MAX);
+    let max_len = u32::try_from(max_len).unwrap_or(u32::MAX);
+    f64::from(distance) / f64::from(max_len)
 }
 
 fn levenshtein_chars(a: &str, b: &str) -> usize {

@@ -100,7 +100,7 @@ impl FakeWorktreeProvider {
         }
     }
 
-    async fn paths(&self) -> Vec<PathBuf> {
+    fn paths(&self) -> Vec<PathBuf> {
         self.paths.lock().expect("lock").clone()
     }
 }
@@ -628,7 +628,7 @@ async fn build_production_host_preserves_active_worktrees_during_boot_gc() {
     gc_worktrees_on_boot(&store, &pool).await.expect("boot gc");
 
     assert_eq!(
-        provider.paths().await,
+        provider.paths(),
         vec![active],
         "daemon boot-GC preserves store-active worktrees and removes unreferenced leftovers"
     );
@@ -759,7 +759,7 @@ async fn cleanup_failed_worktrees_dry_run_lists_without_releasing() {
     );
     assert_eq!(plan.released, 0, "dry-run releases nothing");
     assert_eq!(
-        provider.paths().await,
+        provider.paths(),
         vec![
             failed_task_path.clone(),
             failed_review_path.clone(),
@@ -804,7 +804,7 @@ async fn cleanup_failed_worktrees_execute_removes_failed_worktrees_and_clears_re
         "execute released both failed-run worktrees"
     );
     assert_eq!(
-        provider.paths().await,
+        provider.paths(),
         vec![running_path.clone()],
         "execute leaves unrelated running worktree alone"
     );

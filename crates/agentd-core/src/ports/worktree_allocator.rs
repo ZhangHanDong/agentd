@@ -1,4 +1,4 @@
-//! Worktree allocation seam for per-task_run isolation (P2 C1' R3a).
+//! Worktree allocation seam for per-`task_run` isolation (P2 C1' R3a).
 //!
 //! This is intentionally only the core port. Real git-backed allocation and
 //! release are adapter/daemon concerns.
@@ -9,7 +9,7 @@ use crate::CoreError;
 
 #[async_trait::async_trait]
 pub trait WorktreeAllocator: Send + Sync + std::fmt::Debug {
-    /// Allocate a worktree keyed by the task_run id.
+    /// Allocate a worktree keyed by the `task_run` id.
     ///
     /// # Errors
     /// [`CoreError`] if allocation fails.

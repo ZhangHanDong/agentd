@@ -64,17 +64,23 @@ pub struct DaemonConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentdCli, AgentdCommand};
+    use super::{AgentdCli, AgentdCommand, CleanupWorktreesArgs};
     use clap::Parser;
     use clap::error::ErrorKind;
     use std::path::PathBuf;
 
+    fn cleanup_worktrees_args(cli: &AgentdCli) -> &CleanupWorktreesArgs {
+        match cli.command.as_ref() {
+            Some(AgentdCommand::CleanupWorktrees(args)) => Some(args),
+            _ => None,
+        }
+        .expect("expected cleanup-worktrees command")
+    }
+
     #[test]
     fn agentd_cli_cleanup_worktrees_is_dry_run_by_default() {
         let cli = AgentdCli::parse_from(["agentd", "cleanup-worktrees"]);
-        let Some(AgentdCommand::CleanupWorktrees(args)) = cli.command else {
-            panic!("expected cleanup-worktrees command");
-        };
+        let args = cleanup_worktrees_args(&cli);
         assert!(!args.execute, "cleanup-worktrees is dry-run by default");
     }
 
@@ -105,9 +111,7 @@ mod tests {
             "--execute",
         ])
         .expect("shared options before cleanup-worktrees parse");
-        let Some(AgentdCommand::CleanupWorktrees(args)) = cli.command else {
-            panic!("expected cleanup-worktrees command");
-        };
+        let args = cleanup_worktrees_args(&cli);
 
         assert!(args.execute);
         assert_eq!(PathBuf::from("state/agentd.db"), cli.config.db_path);
@@ -129,9 +133,7 @@ mod tests {
             "--execute",
         ])
         .expect("shared options after cleanup-worktrees parse");
-        let Some(AgentdCommand::CleanupWorktrees(args)) = cli.command else {
-            panic!("expected cleanup-worktrees command");
-        };
+        let args = cleanup_worktrees_args(&cli);
 
         assert!(args.execute);
         assert_eq!(PathBuf::from("state/agentd.db"), cli.config.db_path);

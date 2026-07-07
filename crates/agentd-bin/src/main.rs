@@ -54,7 +54,7 @@ async fn main() -> ExitCode {
             }
             Err(err) => Err(Box::new(err)),
         },
-        None => daemon::serve(cli.config).await.map(|()| ()),
+        None => daemon::serve(cli.config).await,
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
