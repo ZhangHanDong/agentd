@@ -3,6 +3,7 @@
 //! `draft.dot` E2E + emit assertions land in 9a-T3; this skeleton checks
 //! construction + a read.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -11,12 +12,13 @@ use agentd_bin::{
     daemon::{cleanup_failed_worktrees, gc_worktrees_on_boot},
 };
 use agentd_core::CoreError;
-use agentd_core::engine::RunProgress;
+use agentd_core::engine::{Checkpoint, RunProgress};
 use agentd_core::ports::{
-    AgentBackend, CommandError, CommandOutput, CommandRunner, RunOpts, RunStatus, WorktreeAllocator,
+    AgentBackend, CommandError, CommandOutput, CommandRunner, RunOpts, RunStatus, Store,
+    WorktreeAllocator,
 };
 use agentd_core::test_support::{FakeBackend, MempalStub, RecordingCommandRunner};
-use agentd_core::types::{AgentHandle, NodeId, RunId, SpawnRequest};
+use agentd_core::types::{AgentHandle, AgentId, NodeId, RunContext, RunId, SpawnRequest};
 use agentd_store::{SqliteStore, review_repo, run_repo, task_repo};
 use agentd_surface::host::RunHost;
 use agentd_surface::mcp_server::dispatch;
@@ -167,6 +169,38 @@ async fn production_host_with_allocator(
         runner,
         _dir: dir,
     }
+}
+
+async fn seed_open_task_checkpoint(host: &ProductionRunHost, run: &str, context: RunContext) {
+    let run_id = RunId::from_string(run);
+    let node_id = NodeId::parsed("implement");
+    run_repo::record_run(host.store().pool(), &run_id, "execute.dot", "sha")
+        .await
+        .expect("record run");
+    let task_run_id = task_repo::insert_task_run(host.store().pool(), &run_id, &node_id)
+        .await
+        .expect("insert task run");
+    task_repo::set_task_run_agent(
+        host.store().pool(),
+        &task_run_id,
+        &AgentId::parsed("implementer"),
+    )
+    .await
+    .expect("set owner");
+    task_repo::set_task_run_worktree(host.store().pool(), &task_run_id, "/tmp/agentd-task-wt")
+        .await
+        .expect("set worktree");
+    host.store()
+        .write_checkpoint(&Checkpoint {
+            run_id,
+            current_node: node_id,
+            completed_nodes: Vec::new(),
+            retry_counts: BTreeMap::new(),
+            context_snapshot: context,
+            workflow_sha: "sha".to_string(),
+        })
+        .await
+        .expect("write checkpoint");
 }
 
 #[tokio::test]
@@ -450,6 +484,61 @@ async fn production_open_task_returns_assigned_agent_id() {
         assignment.agent_id, "implementer",
         "production open_task returns the codergen role as task owner"
     );
+}
+
+#[tokio::test]
+async fn production_open_task_returns_checkpoint_runtime_metadata() {
+    let (host, _dir) = production_host().await;
+    let mut context = RunContext::new();
+    context.set("spec_path", json!(".agentd/run/frozen.spec.md"));
+    context.set("plan_path", json!(".agentd/run/plan.md"));
+    context.set("context_pack", json!(".agentd/run/context-pack.json"));
+    seed_open_task_checkpoint(&host, "e-assignment-metadata", context).await;
+
+    let assignment = host
+        .open_task(
+            &RunId::from_string("e-assignment-metadata"),
+            &NodeId::parsed("implement"),
+        )
+        .await
+        .expect("open task")
+        .expect("assignment exists");
+
+    assert_eq!(assignment.agent_id, "implementer");
+    assert_eq!(assignment.worktree.as_deref(), Some("/tmp/agentd-task-wt"));
+    assert_eq!(
+        assignment.spec_path.as_deref(),
+        Some(".agentd/run/frozen.spec.md")
+    );
+    assert_eq!(assignment.plan_path.as_deref(), Some(".agentd/run/plan.md"));
+    assert_eq!(
+        assignment.context_pack.as_deref(),
+        Some(".agentd/run/context-pack.json")
+    );
+}
+
+#[tokio::test]
+async fn production_open_task_ignores_non_string_runtime_metadata() {
+    let (host, _dir) = production_host().await;
+    let mut context = RunContext::new();
+    context.set("spec_path", json!({"path": ".agentd/run/frozen.spec.md"}));
+    context.set("context_pack", json!([".agentd/run/context-pack.json"]));
+    seed_open_task_checkpoint(&host, "e-assignment-non-string", context).await;
+
+    let assignment = host
+        .open_task(
+            &RunId::from_string("e-assignment-non-string"),
+            &NodeId::parsed("implement"),
+        )
+        .await
+        .expect("open task")
+        .expect("assignment exists");
+
+    assert_eq!(assignment.agent_id, "implementer");
+    assert_eq!(assignment.worktree.as_deref(), Some("/tmp/agentd-task-wt"));
+    assert!(assignment.spec_path.is_none());
+    assert!(assignment.plan_path.is_none());
+    assert!(assignment.context_pack.is_none());
 }
 
 #[tokio::test]

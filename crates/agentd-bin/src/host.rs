@@ -334,16 +334,18 @@ impl RunHost for ProductionRunHost {
         node_id: &NodeId,
     ) -> Result<Option<TaskAssignment>, CoreError> {
         let found = task_repo::find_open_task_run(self.store.pool(), run_id, node_id).await?;
-        Ok(
-            found.map(|(task_run_id, worktree, agent_id)| TaskAssignment {
-                task_run_id,
-                agent_id: agent_id.unwrap_or_default(),
-                worktree,
-                spec_path: None,
-                plan_path: None,
-                context_pack: None,
-            }),
-        )
+        let Some((task_run_id, worktree, agent_id)) = found else {
+            return Ok(None);
+        };
+        let checkpoint = self.store.load_checkpoint(run_id).await?;
+        Ok(Some(TaskAssignment {
+            task_run_id,
+            agent_id: agent_id.unwrap_or_default(),
+            worktree,
+            spec_path: checkpoint_context_string(checkpoint.as_ref(), "spec_path"),
+            plan_path: checkpoint_context_string(checkpoint.as_ref(), "plan_path"),
+            context_pack: checkpoint_context_string(checkpoint.as_ref(), "context_pack"),
+        }))
     }
 
     async fn review_counts(
@@ -372,6 +374,14 @@ impl RunHost for ProductionRunHost {
             })
             .collect())
     }
+}
+
+fn checkpoint_context_string(checkpoint: Option<&Checkpoint>, key: &str) -> Option<String> {
+    checkpoint?
+        .context_snapshot
+        .get(key)
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
 }
 
 /// Map a wire flow name to its shipped `.dot` file, or `None` for an unknown

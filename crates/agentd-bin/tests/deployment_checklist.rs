@@ -43,12 +43,23 @@ fn deployment_checklist_marks_p121_agent_id_gap_resolved() {
 }
 
 #[test]
-fn deployment_checklist_keeps_spec_and_plan_path_gaps() {
+fn deployment_checklist_marks_p136_task_assignment_metadata_resolved() {
     let checklist = read_repo_file("docs/p0.9-deployment-checklist.md");
+    let p136 = read_repo_file("specs/e2e/p136-task-assignment-runtime-metadata.spec.md");
     let line = task_assignment_gap_line(&checklist);
 
     assert!(
-        line.contains("spec_path") && line.contains("plan_path"),
-        "TaskAssignment gap line should keep spec_path and plan_path as remaining gaps: {line}"
+        p136.contains("ProductionRunHost::open_task")
+            && p136.contains("spec_path")
+            && p136.contains("plan_path"),
+        "P136 spec should document the runtime metadata bridge"
+    );
+    assert!(
+        line.contains("P136") && line.contains("runtime metadata"),
+        "TaskAssignment gap line should name P136 runtime metadata resolution: {line}"
+    );
+    assert!(
+        !line.contains("remaining gaps are `spec_path`/`plan_path`"),
+        "TaskAssignment gap line still lists spec_path/plan_path as remaining: {line}"
     );
 }
