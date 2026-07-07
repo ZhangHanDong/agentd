@@ -178,6 +178,15 @@ fn input_schema_for_tool(name: &str) -> JsonObject {
             },
             "required": ["review_run_id", "reviewer_id", "verdict"]
         }),
+        "submit_human_answer" => json!({
+            "type": "object",
+            "properties": {
+                "wait_id": { "type": "string" },
+                "answer": { "type": "string" },
+                "feedback": { "type": "string" }
+            },
+            "required": ["wait_id", "answer"]
+        }),
         "check_inbox" => json!({
             "type": "object",
             "properties": {

@@ -1,5 +1,5 @@
 //! The transport-agnostic MCP tool dispatcher (design §4.12.1): registers the
-//! five agentd tools and routes a `tools/call` to its handler. The rmcp stdio
+//! agentd tools and routes a `tools/call` to its handler. The rmcp stdio
 //! transport that hosts this dispatcher is wired into the daemon in P0.9 — it
 //! needs a real MCP client (an agent) to exercise, so binding it now would be
 //! untestable; the dispatcher here is the full, tested agent-facing contract.
@@ -8,7 +8,9 @@ use serde_json::Value;
 
 use crate::error::SurfaceError;
 use crate::host::RunHost;
-use crate::tools::{assign_task, check_inbox, query_run, submit_outcome, submit_review};
+use crate::tools::{
+    assign_task, check_inbox, query_run, submit_human_answer, submit_outcome, submit_review,
+};
 
 /// One registered MCP tool.
 #[derive(Debug, Clone, Copy)]
@@ -17,7 +19,7 @@ pub struct ToolDescriptor {
     pub description: &'static str,
 }
 
-/// The five agentd MCP tools (design §4.12.1).
+/// The agentd MCP tools (design §4.12.1).
 #[must_use]
 pub fn tool_descriptors() -> Vec<ToolDescriptor> {
     vec![
@@ -32,6 +34,10 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
         ToolDescriptor {
             name: "submit_review",
             description: "Submit a reviewer verdict for a review run.",
+        },
+        ToolDescriptor {
+            name: "submit_human_answer",
+            description: "Submit a local operator answer for a parked wait.human node.",
         },
         ToolDescriptor {
             name: "check_inbox",
@@ -72,6 +78,13 @@ pub async fn dispatch(host: &dyn RunHost, name: &str, args: Value) -> Result<Val
         "submit_review" => encode(
             submit_review::submit_review(host, serde_json::from_value(args).map_err(bad_args)?)
                 .await?,
+        ),
+        "submit_human_answer" => encode(
+            submit_human_answer::submit_human_answer(
+                host,
+                serde_json::from_value(args).map_err(bad_args)?,
+            )
+            .await?,
         ),
         "check_inbox" => encode(
             check_inbox::check_inbox(host, serde_json::from_value(args).map_err(bad_args)?).await?,

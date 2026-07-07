@@ -12,6 +12,7 @@ use agentd_surface::test_support::FakeRunHost;
 use agentd_surface::tools::assign_task::{AssignTaskInput, assign_task};
 use agentd_surface::tools::check_inbox::{CheckInboxInput, check_inbox};
 use agentd_surface::tools::query_run::{QueryRunInput, query_run};
+use agentd_surface::tools::submit_human_answer::{SubmitHumanAnswerInput, submit_human_answer};
 use agentd_surface::tools::submit_outcome::{SubmitOutcomeInput, submit_outcome};
 use agentd_surface::tools::submit_review::{SubmitReviewInput, submit_review};
 
@@ -37,6 +38,14 @@ fn submit_input(run: &str, node: &str) -> SubmitOutcomeInput {
         context_updates: serde_json::Map::new(),
         preferred_label: None,
         suggested_next: vec![],
+    }
+}
+
+fn human_answer_input(wait_id: &str) -> SubmitHumanAnswerInput {
+    SubmitHumanAnswerInput {
+        wait_id: wait_id.to_string(),
+        answer: "approve".to_string(),
+        feedback: Some("looks good".to_string()),
     }
 }
 
@@ -315,6 +324,54 @@ async fn assign_task_no_task_is_not_assigned() {
     assert_eq!(err.code(), "not_assigned");
 }
 
+// ---- submit_human_answer (p141) -------------------------------------------
+
+#[tokio::test]
+async fn submit_human_answer_delivers_and_reports_next() {
+    let host = FakeRunHost::new();
+    host.push_progress(RunProgress::Parked {
+        run_id: RunId::from_string("r1"),
+        node_id: NodeId::parsed("implement"),
+        reason: ParkReason::AgentOutcome {
+            task_run_id: TaskRunId::from_string("tr1"),
+        },
+    });
+
+    let out = submit_human_answer(&host, human_answer_input("hw1"))
+        .await
+        .expect("submit human answer ok");
+    assert!(out.accepted);
+    assert_eq!(out.next_node.as_deref(), Some("implement"));
+
+    let delivered = host.delivered();
+    assert_eq!(delivered.len(), 1);
+    match &delivered[0] {
+        EngineEvent::HumanAnswered {
+            wait_id,
+            answer,
+            feedback,
+        } => {
+            assert_eq!(wait_id, "hw1");
+            assert_eq!(answer, "approve");
+            assert_eq!(feedback.as_deref(), Some("looks good"));
+        }
+        other => panic!("expected HumanAnswered, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn submit_human_answer_stale_wait_is_already_submitted() {
+    let host = FakeRunHost::new();
+    host.push_progress(RunProgress::Ignored {
+        reason: "wait already answered".to_string(),
+    });
+
+    let err = submit_human_answer(&host, human_answer_input("hw1"))
+        .await
+        .expect_err("closed wait is already_submitted");
+    assert_eq!(err.code(), "already_submitted");
+}
+
 // ---- check_inbox + dispatcher (p70) ---------------------------------------
 
 #[tokio::test]
@@ -333,13 +390,14 @@ async fn check_inbox_returns_empty_v0() {
 }
 
 #[tokio::test]
-async fn dispatch_lists_five_tools() {
+async fn dispatch_lists_six_tools_with_submit_human_answer() {
     let names: Vec<&str> = tool_descriptors().iter().map(|d| d.name).collect();
-    assert_eq!(names.len(), 5);
+    assert_eq!(names.len(), 6);
     for expected in [
         "assign_task",
         "submit_outcome",
         "submit_review",
+        "submit_human_answer",
         "check_inbox",
         "query_run",
     ] {
