@@ -117,4 +117,10 @@ fn ci_clippy_known_warning_patterns_are_absent() {
         !tmux_pool_test.contains("create fake worktree {p:?}: {e}"),
         "tmux pool tests should avoid unnecessary debug formatting"
     );
+
+    let ci_workflow = read(".github/workflows/ci.yml");
+    assert!(
+        !ci_workflow.contains("arguments: --all-features check"),
+        "cargo-deny action should not receive a duplicate check subcommand"
+    );
 }

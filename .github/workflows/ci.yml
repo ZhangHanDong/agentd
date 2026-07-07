@@ -29,7 +29,7 @@ jobs:
           # cargo-deny takes the subcommand `check` (default if omitted). The
           # `--all-features` flag is global. Do NOT pass `--workspace` — it's
           # not a valid cargo-deny argument.
-          arguments: --all-features check
+          arguments: --all-features
 
   unit:
     name: Unit + Integration

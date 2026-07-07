@@ -12,8 +12,9 @@ denies warning patterns in `agentd-core`; this slice removes those warning
 patterns without changing workflow behavior. After fixing the first
 `agentd-core` batch, local workspace clippy revealed additional denied warning
 batches in `agentd-bin`, `agentd-tmux`, `agentd-surface`, `agentd-store`, and
-`agentd-core` tests; this slice covers the full observed lint batch needed for
-the same CI command to pass.
+`agentd-core` tests; GitHub also exposed a cargo-deny action argument bug in
+the same lint job. This slice covers the full observed lint batch and the
+non-relaxing CI invocation fix needed for the lint job to pass.
 
 ## Decisions
 
@@ -28,6 +29,8 @@ the same CI command to pass.
   changing allocation, snapshot, or launch behavior.
 - Keep HTTP/store tests behaviorally identical while refactoring clippy-only
   test-shape warnings.
+- Fix the cargo-deny action invocation by passing only global arguments to the
+  action's `arguments` field; keep cargo-deny enabled.
 - Add a source-inspection regression test for these exact clippy patterns.
 
 ## Boundaries
@@ -35,6 +38,7 @@ the same CI command to pass.
 ### Allowed Changes
 
 - specs/e2e/p135-ci-clippy-clean.spec.md
+- .github/workflows/ci.yml
 - crates/agentd-core/src/handler/codergen.rs
 - crates/agentd-core/src/handler/fan_in.rs
 - crates/agentd-core/src/handler/fan_out.rs
@@ -73,6 +77,7 @@ the same CI command to pass.
 <!-- lint-ack: observable-decision-coverage — this slice is clippy-shape cleanup only; HTTP/store behavior remains covered by the unchanged existing test assertions and the workspace all-targets clippy compile. -->
 <!-- lint-ack: output-mode-coverage — output is mentioned only as CI/source command output; no runtime file/stdout output mode changes in this slice. -->
 <!-- lint-ack: boundary-entry-point — allowed Rust entry points are covered by `cargo clippy --workspace --all-targets -- -D warnings`; this slice does not change runtime entry behavior. -->
+<!-- lint-ack: bdd-rule-grouping — this P135 cleanup spec is a flat CI repair checklist; grouping would add ceremony without changing coverage. -->
 
 Scenario: known clippy regression markers are absent
   Test:
@@ -96,3 +101,14 @@ Scenario: workspace clippy command passes
   Given the PR branch after the source cleanup
   When `cargo clippy --workspace --all-targets -- -D warnings` runs
   Then it exits 0 without clippy errors
+
+Scenario: cargo-deny invocation remains valid
+  Test:
+    Package: agentd-core
+    Filter: ci_clippy_known_warning_patterns_are_absent
+  Level: source inspection
+  Test Double: GitHub Actions workflow text
+  Given the lint job uses EmbarkStudios cargo-deny action
+  When the regression test scans the workflow
+  Then it does not pass the cargo-deny `check` subcommand through `arguments`
+  And local `cargo deny --all-features check` exits 0
