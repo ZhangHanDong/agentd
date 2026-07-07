@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 
-use crate::{SemanticEvent, SpecifyError};
+use crate::{SemanticEvent, SpecifyClient, SpecifyError};
 
 /// Specify event kind for a local run park that needs external progress.
 pub const SPECIFY_AGENT_BLOCKED: &str = "agent.blocked";
@@ -48,6 +48,23 @@ pub fn map_agentd_event(
         kind: specify_kind.to_owned(),
         payload: semantic_payload(&event, &payload),
     }))
+}
+
+/// Map and report a local durable event through the Specify client seam.
+///
+/// Returns `Ok(true)` when a mapped event was handed to the client. Returns
+/// `Ok(false)` for unknown local event kinds without calling the client.
+pub async fn report_agentd_event(
+    client: &dyn SpecifyClient,
+    workflow_id: &str,
+    event: AgentdEventRef<'_>,
+) -> Result<bool, SpecifyError> {
+    let Some(event) = map_agentd_event(workflow_id, event)? else {
+        return Ok(false);
+    };
+
+    client.report_event(event).await?;
+    Ok(true)
 }
 
 fn decode_payload(event: &AgentdEventRef<'_>) -> Result<Value, SpecifyError> {
