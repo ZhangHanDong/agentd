@@ -155,8 +155,12 @@ evidence:
 
 success criterion:
   execute.dot reaches a terminal run state after real agents implement/review,
-  publish_branch pushes agentd/<task_run_id>, and open_pr either opens a PR or
-  fails with a captured preflight error from scripts/agentd_open_pr.sh.
+  publish_branch pushes agentd/<task_run_id>, and open_pr opens a real PR.
+
+failure evidence:
+  if there is a captured preflight error from scripts/agentd_open_pr.sh, the
+  harness records the failed run evidence and exits non-zero; that is
+  failure evidence, not success.
 EOF
 }
 
