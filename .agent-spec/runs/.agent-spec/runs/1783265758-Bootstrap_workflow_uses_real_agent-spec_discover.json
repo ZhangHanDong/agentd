@@ -1,0 +1,10 @@
+{
+  "spec_name": "Bootstrap workflow uses real agent-spec discover",
+  "passing": true,
+  "summary": "5/5 passed, 0 failed, 0 skipped, 0 uncertain",
+  "timestamp": 1783265758,
+  "vcs": {
+    "vcs_type": "git",
+    "change_ref": "4229024"
+  }
+}

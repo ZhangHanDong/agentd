@@ -1,0 +1,1 @@
+error: daemon rejected the run (HTTP 500): {"error":"backend error: recoverable: agent did not reach its main prompt within 15s"}

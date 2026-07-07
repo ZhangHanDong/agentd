@@ -1,0 +1,24 @@
+  AGENTD_MCP_STDIO_CMD:
+  '/Users/zhangalex/Work/Projects/AI/agentd/target/debug/agentd' --db-path
+  '/Users/zhangalex/Work/Projects/AI/agentd/.agentd/real-execute-smoke/real-exe
+  cute-smoke-20260707070439/agentd.db' --workflows-dir
+  '/Users/zhangalex/Work/Projects/AI/agentd/workflows' --repo-dir
+  '/Users/zhangalex/Work/Projects/AI/agentd' --worktree-base
+  '/Users/zhangalex/Work/Projects/AI/agentd/.agentd/real-execute-smoke/real-exe
+  cute-smoke-20260707070439/worktrees' --log-level 'error' mcp-stdio
+  protocol: line-delimited JSON-RPC 2.0 over stdin/stdout
+  usage: run the command, call tools/list to inspect tools, then call
+  tools/call with name and arguments to submit outcomes or reviews
+  ⎿  UserPromptSubmit hook error
+  ⎿  Failed with non-blocking status code: Error occurred while executing hook
+     command: ENOENT: no such file or directory, posix_spawn '/bin/sh'
+  ⎿  You've hit your monthly spend limit.
+     /usage-credits to adjust your monthly spend limit.
+
+✻ Cogitated for 0s
+
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents

@@ -1,0 +1,10 @@
+{
+  "spec_name": "Bootstrap workflow — derive a spec from an existing codebase (§7.3 P1.5)",
+  "passing": true,
+  "summary": "4/4 passed, 0 failed, 0 skipped, 0 uncertain",
+  "timestamp": 1783265758,
+  "vcs": {
+    "vcs_type": "git",
+    "change_ref": "4229024"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "spec_name": "Per-reviewer stance pack prompts",
+  "passing": true,
+  "summary": "5/5 passed, 0 failed, 0 skipped, 0 uncertain",
+  "timestamp": 1783265177,
+  "vcs": {
+    "vcs_type": "git",
+    "change_ref": "4229024"
+  }
+}

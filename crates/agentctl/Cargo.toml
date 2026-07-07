@@ -1,0 +1,32 @@
+[package]
+name = "agentctl"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+# Application CLI, not a crates.io library: keeps its version-less path dep on
+# agentd-core out of cargo-deny's wildcard ban (allow-wildcard-paths applies to
+# private crates only).
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "agentctl"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+agentd-core = { path = "../agentd-core" }
+
+[dev-dependencies]
+async-trait = "0.1"
+tempfile = { workspace = true }
+tokio = { workspace = true }
+# test-support exposes the in-memory port fakes so the workflow walk-tests drive
+# the REAL Engine over fakes (NOT FakeRunHost). Dev-only — never in the bin, so
+# the production `agentctl` build keeps no test-support code.
+agentd-core = { path = "../agentd-core", features = ["test-support"] }

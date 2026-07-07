@@ -1,0 +1,323 @@
+//! Tests for `agentd_core::graph::NodeGraph` validation. Names match the spec `Test:` selectors.
+
+use agentd_core::dot::parser;
+use agentd_core::graph::NodeGraph;
+
+fn build(src: &str) -> Result<NodeGraph, agentd_core::CoreError> {
+    let ast = parser::parse(src).expect("dot parse");
+    NodeGraph::from_ast(&ast)
+}
+
+fn err_msg(src: &str) -> String {
+    match build(src) {
+        Ok(_) => panic!("expected validation error, got Ok"),
+        Err(e) => format!("{e}"),
+    }
+}
+
+#[test]
+fn node_graph_rejects_no_start() {
+    let src = r#"digraph m {
+        "work" [handler=tool];
+        "end" [shape=Msquare];
+        "work" -> "end";
+    }"#;
+    let msg = err_msg(src);
+    assert!(msg.contains("start"), "msg: {msg}");
+}
+
+#[test]
+fn node_graph_rejects_no_terminal() {
+    let src = r#"digraph m {
+        "start" [shape=Mdiamond];
+        "work" [handler=tool];
+        "start" -> "work";
+    }"#;
+    let msg = err_msg(src);
+    assert!(msg.contains("terminal"), "msg: {msg}");
+}
+
+#[test]
+fn node_graph_rejects_unknown_handler() {
+    let src = r#"digraph m {
+        "start" [shape=Mdiamond];
+        "work" [handler=stack.manager_loop];
+        "end" [shape=Msquare];
+        "start" -> "work";
+        "work" -> "end";
+    }"#;
+    let msg = err_msg(src);
+    assert!(
+        msg.contains("handler") && msg.contains("stack.manager_loop"),
+        "msg: {msg}"
+    );
+}
+
+#[test]
+fn node_graph_rejects_unreachable_node() {
+    let src = r#"digraph m {
+        "start" [shape=Mdiamond];
+        "end" [shape=Msquare];
+        "orphan" [handler=tool];
+        "start" -> "end";
+    }"#;
+    let msg = err_msg(src);
+    assert!(
+        msg.contains("unreachable") && msg.contains("orphan"),
+        "msg: {msg}"
+    );
+}
+
+#[test]
+fn node_graph_rejects_goal_gate_not_on_any_path() {
+    // gate is reachable from start but cannot reach any terminal (dead end).
+    let src = r#"digraph m {
+        "start" [shape=Mdiamond];
+        "gate" [handler=tool, goal_gate=true];
+        "end" [shape=Msquare];
+        "start" -> "end";
+        "start" -> "gate";
+    }"#;
+    let msg = err_msg(src);
+    assert!(
+        msg.contains("goal_gate") && msg.contains("gate"),
+        "msg: {msg}"
+    );
+}
+
+#[test]
+fn node_graph_rejects_unknown_pre_tool() {
+    let src = r#"digraph m {
+        "start" [shape=Mdiamond];
+        "work" [handler=codergen, pre_tools="frobnicate(x=1)"];
+        "end" [shape=Msquare];
+        "start" -> "work";
+        "work" -> "end";
+    }"#;
+    let msg = err_msg(src);
+    assert!(msg.contains("frobnicate"), "msg: {msg}");
+}
+
+#[test]
+fn node_graph_accepts_retry_target_and_retry_policy_attrs() {
+    let src = r#"digraph m {
+        "start" [shape=Mdiamond];
+        "impl" [handler=codergen, retry_policy="max=3,backoff=exp"];
+        "verify" [handler=tool, goal_gate=true];
+        "end" [shape=Msquare];
+        "start" -> "impl";
+        "impl" -> "verify";
+        "verify" -> "end" [condition="outcome=success"];
+        "verify" -> "impl" [condition="outcome=fail", retry_target=true];
+    }"#;
+    build(src).expect("retry_target + retry_policy should validate");
+}
+
+#[test]
+fn node_graph_accepts_delphi_visibility_with_converge_aggregator() {
+    let src = r#"digraph m {
+        "start" [shape=Mdiamond];
+        "review" [handler=parallel.fan_out, reviewers="claude-sec,codex-perf", visibility=delphi, max_rounds=3];
+        "agg" [handler=parallel.fan_in, aggregator=converge_or_majority_pass];
+        "end" [shape=Msquare];
+        "start" -> "review";
+        "review" -> "agg";
+        "agg" -> "end" [condition="outcome=success"];
+        "agg" -> "review" [condition="outcome=fail"];
+    }"#;
+    build(src).expect("well-formed Delphi fan_out/fan_in pair should validate");
+}
+
+#[test]
+fn node_graph_rejects_delphi_visibility_without_max_rounds() {
+    let src = r#"digraph m {
+        "start" [shape=Mdiamond];
+        "review" [handler=parallel.fan_out, visibility=delphi];
+        "agg" [handler=parallel.fan_in, aggregator=converge_or_majority_pass];
+        "end" [shape=Msquare];
+        "start" -> "review";
+        "review" -> "agg";
+        "agg" -> "end";
+    }"#;
+    let msg = err_msg(src);
+    assert!(msg.contains("max_rounds"), "msg: {msg}");
+}
+
+#[test]
+fn node_graph_rejects_delphi_visibility_with_non_converge_aggregator() {
+    let src = r#"digraph m {
+        "start" [shape=Mdiamond];
+        "review" [handler=parallel.fan_out, visibility=delphi, max_rounds=3];
+        "agg" [handler=parallel.fan_in, aggregator=majority_pass];
+        "end" [shape=Msquare];
+        "start" -> "review";
+        "review" -> "agg";
+        "agg" -> "end";
+    }"#;
+    let msg = err_msg(src);
+    assert!(msg.contains("converge_or"), "msg: {msg}");
+}
+
+#[test]
+fn node_graph_rejects_unknown_converge_fallback() {
+    let src = r#"digraph m {
+        "start" [shape=Mdiamond];
+        "review" [handler=parallel.fan_out, visibility=delphi, max_rounds=3];
+        "agg" [handler=parallel.fan_in, aggregator=converge_or_sideways];
+        "end" [shape=Msquare];
+        "start" -> "review";
+        "review" -> "agg";
+        "agg" -> "end";
+    }"#;
+    let msg = err_msg(src);
+    assert!(msg.contains("sideways"), "msg: {msg}");
+}
+
+#[test]
+fn node_graph_rejects_non_delphi_max_rounds_above_one() {
+    let src = r#"digraph m {
+        "start" [shape=Mdiamond];
+        "review" [handler=parallel.fan_out, visibility=blind, max_rounds=3];
+        "agg" [handler=parallel.fan_in, aggregator=majority_pass];
+        "end" [shape=Msquare];
+        "start" -> "review";
+        "review" -> "agg";
+        "agg" -> "end";
+    }"#;
+    let msg = err_msg(src);
+    assert!(msg.contains("visibility=delphi"), "msg: {msg}");
+}
+
+#[test]
+fn node_graph_accepts_delphi_findings_diff_convergence() {
+    let src = r#"digraph m {
+        "start" [shape=Mdiamond];
+        "review" [handler=parallel.fan_out, visibility=delphi, max_rounds=3, convergence="findings_diff<0.1>"];
+        "agg" [handler=parallel.fan_in, aggregator=converge_or_majority_pass];
+        "end" [shape=Msquare];
+        "start" -> "review";
+        "review" -> "agg";
+        "agg" -> "end";
+    }"#;
+    build(src).expect("findings_diff convergence should validate");
+}
+
+#[test]
+fn node_graph_rejects_malformed_delphi_findings_diff_convergence() {
+    let src = r#"digraph m {
+        "start" [shape=Mdiamond];
+        "review" [handler=parallel.fan_out, visibility=delphi, max_rounds=3, convergence="findings_diff<sideways>"];
+        "agg" [handler=parallel.fan_in, aggregator=converge_or_majority_pass];
+        "end" [shape=Msquare];
+        "start" -> "review";
+        "review" -> "agg";
+        "agg" -> "end";
+    }"#;
+    let msg = err_msg(src);
+    assert!(msg.contains("findings_diff"), "msg: {msg}");
+}
+
+#[test]
+fn node_graph_rejects_multi_fan_out_into_one_fan_in() {
+    let src = r#"digraph m {
+        "start" [shape=Mdiamond];
+        "ra" [handler=parallel.fan_out];
+        "rb" [handler=parallel.fan_out];
+        "agg" [handler=parallel.fan_in];
+        "end" [shape=Msquare];
+        "start" -> "ra";
+        "start" -> "rb";
+        "ra" -> "agg";
+        "rb" -> "agg";
+        "agg" -> "end";
+    }"#;
+    let msg = err_msg(src);
+    assert!(msg.contains("fan_out"), "msg: {msg}");
+}
+
+#[test]
+fn node_graph_accepts_minimal_valid_graph() {
+    let src = r#"digraph m {
+        "start" [shape=Mdiamond];
+        "work" [handler=tool];
+        "end" [shape=Msquare];
+        "start" -> "work";
+        "work" -> "end";
+    }"#;
+    let g = build(src).expect("minimal valid graph");
+    assert_eq!(g.nodes.len(), 3);
+    assert_eq!(g.edges.len(), 2);
+}
+
+#[test]
+fn node_graph_reports_all_violations_not_just_first() {
+    // no terminal AND unknown handler — both must appear.
+    let src = r#"digraph m {
+        "start" [shape=Mdiamond];
+        "work" [handler=stack.manager_loop];
+        "start" -> "work";
+    }"#;
+    let msg = err_msg(src);
+    assert!(
+        msg.contains("terminal"),
+        "missing terminal violation: {msg}"
+    );
+    assert!(
+        msg.contains("stack.manager_loop"),
+        "missing unknown-handler violation: {msg}"
+    );
+}
+
+#[test]
+fn node_graph_rejects_multiple_starts() {
+    // The engine drives a run from a single entry point, so more than one
+    // Mdiamond start would silently execute only the first-declared component.
+    let src = r#"digraph m {
+        "s1" [shape=Mdiamond];
+        "s2" [shape=Mdiamond];
+        "work" [handler=tool];
+        "end" [shape=Msquare];
+        "s1" -> "work";
+        "s2" -> "work";
+        "work" -> "end";
+    }"#;
+    let msg = err_msg(src);
+    assert!(
+        msg.contains("start nodes"),
+        "expected a multiple-start violation, got: {msg}"
+    );
+}
+
+#[test]
+fn node_graph_rejects_undeclared_edge_endpoint() {
+    // 'ghost' is referenced by edges but never declared. The parser tolerates
+    // it, but validation must reject it — otherwise the engine steps into a
+    // node missing from the graph at run time.
+    let src = r#"digraph m {
+        "start" [shape=Mdiamond];
+        "end" [shape=Msquare];
+        "start" -> "ghost";
+        "ghost" -> "end";
+    }"#;
+    let msg = err_msg(src);
+    assert!(
+        msg.contains("edge endpoint 'ghost'"),
+        "expected an undeclared-endpoint violation, got: {msg}"
+    );
+}
+
+#[test]
+fn node_graph_rejects_duplicate_node_id() {
+    // The same id declared twice would corrupt shape/handler classification.
+    let src = r#"digraph m {
+        "a" [shape=Mdiamond];
+        "a" [handler=tool];
+        "end" [shape=Msquare];
+        "a" -> "end";
+    }"#;
+    let msg = err_msg(src);
+    assert!(
+        msg.contains("duplicate node id 'a'"),
+        "expected a duplicate-node-id violation, got: {msg}"
+    );
+}

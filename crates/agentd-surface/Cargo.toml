@@ -1,0 +1,44 @@
+[package]
+name = "agentd-surface"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+# The daemon's outward surface (MCP + HTTP/SSE), not a crates.io library — keeps
+# its version-less path dep on agentd-core out of cargo-deny's wildcard ban.
+publish = false
+
+[lints]
+workspace = true
+
+# `test-support` gates the in-crate `FakeRunHost` seam fake (src/test_support),
+# mirroring the other crates. Not a default feature; never ships in a release.
+[features]
+test-support = []
+
+[dependencies]
+agentd-core = { path = "../agentd-core" }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = "0.1"
+# HTTP+SSE surface (7b). axum is workspace-pinned at 0.7 (`:id` path params);
+# futures::stream::iter builds the finite SSE replay stream.
+axum = { workspace = true }
+futures = "0.3"
+# The live SSE tail (P1): replay frames then tail a lossy broadcast, awaiting a
+# snapshot resync inside the generator — async-stream keeps that readable.
+async-stream = "0.3"
+
+[dev-dependencies]
+# Self path dep enabling the in-crate test-support so tool tests inject the
+# FakeRunHost without a real engine, MCP client, or socket.
+agentd-surface = { path = ".", features = ["test-support"] }
+tokio-test = "0.4"
+# Drive the axum Router in-process (no socket) and read the response body.
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 7 * * *"  # nightly 07:00 UTC for the e2e job (defined in P0.9)
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  RUST_BACKTRACE: 1
+
+jobs:
+  lint:
+    name: Lint (fmt + clippy + deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          # cargo-deny takes the subcommand `check` (default if omitted). The
+          # `--all-features` flag is global. Do NOT pass `--workspace` — it's
+          # not a valid cargo-deny argument.
+          arguments: --all-features
+
+  unit:
+    name: Unit + Integration
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      # --no-tests=warn: empty test sets in early phases must not fail the run.
+      - run: cargo nextest run --workspace --no-fail-fast --no-tests=warn
+
+  spec-lifecycle:
+    name: agent-spec lifecycle + guard
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install agent-spec
+        run: cargo install --locked agent-spec || true
+      - name: Run lifecycle per spec (allow empty matches in early phases)
+        run: |
+          # `lifecycle` takes ONE spec file (not a glob); --format is text|json|md.
+          mapfile -t specs < <(find specs \( -name '*.spec' -o -name '*.spec.md' \) 2>/dev/null | sort)
+          if [ "${#specs[@]}" -eq 0 ]; then
+            echo "No specs yet; skipping."
+            exit 0
+          fi
+          for spec in "${specs[@]}"; do
+            echo "== $spec =="
+            agent-spec lifecycle "$spec" --code . --min-score 0.7 --format text
+          done
+      - name: Run guard
+        run: |
+          if find specs \( -name '*.spec' -o -name '*.spec.md' \) 2>/dev/null | head -1 | grep -q .; then
+            agent-spec guard --code .
+          fi
+
+  cross-deps-sanity:
+    name: Boundary checks
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Forbid palace.db references
+        # Scope to production source only; test fixtures may construct the string.
+        run: |
+          if grep -R --line-number 'palace\.db' crates/*/src; then
+            echo "::error::agentd must not reference palace.db. See design §3.1."
+            exit 1
+          fi
+      - name: Forbid send-keys -l
+        run: |
+          if grep -R --line-number 'send-keys -l' crates/*/src; then
+            echo "::error::send-keys -l forbidden. See design §4.6."
+            exit 1
+          fi
+
+  dot-validate:
+    name: workflow DOT validation
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p agentctl --release
+      - name: Validate shipped DOT files
+        run: |
+          for f in workflows/*.dot; do
+            echo "==> $f"
+            ./target/release/agentctl flow validate "$f"
+          done
+
+  # docs job (cargo doc + mdbook) added when docs/book exists.
+  # e2e job added in P0.9.

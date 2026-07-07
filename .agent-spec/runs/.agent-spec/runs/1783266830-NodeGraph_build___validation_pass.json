@@ -1,0 +1,10 @@
+{
+  "spec_name": "NodeGraph build + validation pass",
+  "passing": false,
+  "summary": "23/24 passed, 1 failed, 0 skipped, 0 uncertain",
+  "timestamp": 1783266830,
+  "vcs": {
+    "vcs_type": "git",
+    "change_ref": "4229024"
+  }
+}

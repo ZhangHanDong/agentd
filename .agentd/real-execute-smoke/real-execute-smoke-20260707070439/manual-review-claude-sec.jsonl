@@ -1,0 +1,1 @@
+{"id":"manual-review-claude-sec","jsonrpc":"2.0","result":{"content":[{"text":"{\"accepted\":true,\"fan_in_pending\":2}","type":"text"}],"isError":false,"structuredContent":{"accepted":true,"fan_in_pending":2}}}

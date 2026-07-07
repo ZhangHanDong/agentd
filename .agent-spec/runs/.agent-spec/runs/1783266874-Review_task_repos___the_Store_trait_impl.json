@@ -1,0 +1,10 @@
+{
+  "spec_name": "Review/task repos + the Store trait impl",
+  "passing": false,
+  "summary": "4/5 passed, 1 failed, 0 skipped, 0 uncertain",
+  "timestamp": 1783266874,
+  "vcs": {
+    "vcs_type": "git",
+    "change_ref": "4229024"
+  }
+}

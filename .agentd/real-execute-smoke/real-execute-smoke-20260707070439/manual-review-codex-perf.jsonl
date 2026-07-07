@@ -1,0 +1,1 @@
+{"id":"manual-review-codex-perf","jsonrpc":"2.0","result":{"content":[{"text":"{\"accepted\":true,\"fan_in_pending\":1}","type":"text"}],"isError":false,"structuredContent":{"accepted":true,"fan_in_pending":1}}}

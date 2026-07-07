@@ -1,0 +1,10 @@
+{
+  "spec_name": "Dashboard formats JSON event payloads",
+  "passing": true,
+  "summary": "4/4 passed, 0 failed, 0 skipped, 0 uncertain",
+  "timestamp": 1783268432,
+  "vcs": {
+    "vcs_type": "git",
+    "change_ref": "4229024"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "spec_name": "Delphi workflow contract and converge fallback",
+  "passing": true,
+  "summary": "7/7 passed, 0 failed, 0 skipped, 0 uncertain",
+  "timestamp": 1783263783,
+  "vcs": {
+    "vcs_type": "git",
+    "change_ref": "4229024"
+  }
+}

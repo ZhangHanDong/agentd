@@ -1,0 +1,46 @@
+[package]
+name = "agentd-bin"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+# Application daemon, not a crates.io library — keeps its version-less path deps
+# out of cargo-deny's wildcard ban.
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "agentd_bin"
+path = "src/lib.rs"
+
+[[bin]]
+name = "agentd"
+path = "src/main.rs"
+
+[dependencies]
+agentd-core = { path = "../agentd-core" }
+agentd-store = { path = "../agentd-store" }
+agentd-surface = { path = "../agentd-surface" }
+agentd-tmux = { path = "../agentd-tmux" }
+async-trait = "0.1"
+sha2 = "0.10"
+serde_json = { workspace = true }
+clap = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+rmcp = { workspace = true }
+
+[dev-dependencies]
+# The in-memory port fakes (FakeBackend/MempalStub/FixedClock/RecordingCommandRunner)
+# so the production-RunHost contract tests run over a real SqliteStore + fakes.
+agentd-core = { path = "../agentd-core", features = ["test-support"] }
+tempfile = { workspace = true }
+# Drive the assembled axum router in-process (no socket) + read the response body.
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

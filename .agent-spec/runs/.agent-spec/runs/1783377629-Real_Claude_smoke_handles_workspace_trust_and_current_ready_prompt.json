@@ -1,0 +1,10 @@
+{
+  "spec_name": "Real Claude smoke handles workspace trust and current ready prompt",
+  "passing": true,
+  "summary": "4/4 passed, 0 failed, 0 skipped, 0 uncertain",
+  "timestamp": 1783377629,
+  "vcs": {
+    "vcs_type": "git",
+    "change_ref": "4229024"
+  }
+}
