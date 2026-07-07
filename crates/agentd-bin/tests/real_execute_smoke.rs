@@ -288,6 +288,31 @@ fn real_execute_smoke_dry_run_mentions_history_preflight() {
 }
 
 #[test]
+fn real_execute_smoke_dry_run_distinguishes_pr_success_from_captured_preflight_failure() {
+    let out = run_script(&["--dry-run", "--run-id", "execute-success-criterion"]);
+
+    assert!(
+        out.status.success(),
+        "dry-run exits 0; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("open_pr opens a real PR"),
+        "success criterion should require real PR creation: {stdout}"
+    );
+    assert!(
+        stdout.contains("captured preflight error from scripts/agentd_open_pr.sh")
+            && stdout.contains("failure evidence, not success"),
+        "plan should classify captured open_pr preflight errors as failure evidence: {stdout}"
+    );
+    assert!(
+        !stdout.contains("open_pr either opens a PR or"),
+        "plan must not treat open_pr preflight failure as a success alternative: {stdout}"
+    );
+}
+
+#[test]
 fn real_execute_smoke_preflight_uses_pr_history_status_helper() {
     let body = fs::read_to_string(script_path()).expect("read execute smoke script");
     assert!(
