@@ -16,7 +16,7 @@ pushing. dot-validate and docs jobs are deferred until their dependencies land.
 - Jobs: lint, unit (matrix ubuntu+macos), spec-lifecycle, cross-deps-sanity
 - cargo-nextest runs tests with --no-tests=warn so empty test sets do not fail early phases
 - cargo-deny gates licenses and advisories
-- Boundary checks use ripgrep scoped to crates/*/src/** so test fixtures are not flagged
+- Boundary checks scan only crates/*/src/** so test fixtures are not flagged
 
 ## Boundaries
 
@@ -44,17 +44,17 @@ Scenario: Local check script mirrors CI and succeeds on a clean tree
 Scenario: A palace.db reference under crate source fails the boundary check
   Test: scaffold_palace_db_reference_fails_gate
   Given a fake crate tree whose src file contains the literal palace.db
-  When the boundary ripgrep pattern is applied to that tree
-  Then ripgrep reports a match
+  When the boundary source scan is applied to that tree
+  Then the scan reports a match
 
 Scenario: A send-keys literal under crate source fails the boundary check
   Test: scaffold_send_keys_dash_l_fails_gate
   Given a fake crate tree whose src file contains the forbidden send-keys literal
-  When the boundary ripgrep pattern is applied to that tree
-  Then ripgrep reports a match
+  When the boundary source scan is applied to that tree
+  Then the scan reports a match
 
 Scenario: The boundary check ignores forbidden strings under tests directories
   Test: scaffold_gate_does_not_flag_tests_directory
   Given a fake crate tree whose tests file contains the literal palace.db
-  When the boundary ripgrep pattern is applied to that tree
-  Then ripgrep reports no match
+  When the boundary source scan is applied to that tree
+  Then the scan reports no match

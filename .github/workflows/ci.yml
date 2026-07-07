@@ -84,16 +84,14 @@ jobs:
       - name: Forbid palace.db references
         # Scope to production source only; test fixtures may construct the string.
         run: |
-          if rg --quiet --glob 'crates/*/src/**' 'palace\.db' .; then
+          if grep -R --line-number 'palace\.db' crates/*/src; then
             echo "::error::agentd must not reference palace.db. See design §3.1."
-            rg --line-number --glob 'crates/*/src/**' 'palace\.db' .
             exit 1
           fi
       - name: Forbid send-keys -l
         run: |
-          if rg --quiet --glob 'crates/*/src/**' 'send-keys -l' .; then
+          if grep -R --line-number 'send-keys -l' crates/*/src; then
             echo "::error::send-keys -l forbidden. See design §4.6."
-            rg --line-number --glob 'crates/*/src/**' 'send-keys -l' .
             exit 1
           fi
 

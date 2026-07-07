@@ -31,6 +31,8 @@ non-relaxing CI invocation fix needed for the lint job to pass.
   test-shape warnings.
 - Fix the cargo-deny action invocation by passing only global arguments to the
   action's `arguments` field; keep cargo-deny enabled.
+- Remove the scaffold/boundary gate runtime dependency on `rg` so GitHub runners
+  without ripgrep still exercise the gate correctly.
 - Add a source-inspection regression test for these exact clippy patterns.
 
 ## Boundaries
@@ -38,6 +40,7 @@ non-relaxing CI invocation fix needed for the lint job to pass.
 ### Allowed Changes
 
 - specs/e2e/p135-ci-clippy-clean.spec.md
+- specs/scaffold/p0-ci-gates.spec.md
 - .github/workflows/ci.yml
 - crates/agentd-core/src/handler/codergen.rs
 - crates/agentd-core/src/handler/fan_in.rs
@@ -46,6 +49,7 @@ non-relaxing CI invocation fix needed for the lint job to pass.
 - crates/agentd-core/src/test_support/in_memory_store.rs
 - crates/agentd-core/tests/ci_clippy.rs
 - crates/agentd-core/tests/handlers_park.rs
+- crates/agentd-core/tests/scaffold.rs
 - crates/agentd-bin/src/cli.rs
 - crates/agentd-bin/src/main.rs
 - crates/agentd-bin/src/stdio_mcp.rs

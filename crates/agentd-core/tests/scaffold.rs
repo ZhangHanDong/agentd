@@ -87,22 +87,43 @@ fn scaffold_local_check_script_runs() {
     assert!(status.success(), "scripts/check.sh exited non-zero");
 }
 
-// The boundary tests below verify the GATE PATTERN, not the gate's real
+// The boundary tests below verify the GATE SCOPE, not the gate's real
 // invocation against this repo's crates/. They build a tempdir mirroring the
-// production glob shape (crates/<n>/src/), so the production glob
-// `crates/*/src/**` is what's exercised. They never touch the real tree.
+// production shape (crates/<n>/src/) and scan only those source trees. They
+// never touch the real tree and do not require external tools in CI.
 
-fn rg_finds(pattern: &str, root: &Path) -> bool {
-    // Mirror the production gate EXACTLY: it runs from the repo root and searches
-    // `.` with `--glob 'crates/*/src/**'`. ripgrep globs are matched against paths
-    // relative to the search root, so we must cd into `root` and search `.` — NOT
-    // pass an absolute path (which would prepend a prefix the glob can't match).
-    let out = Command::new("rg")
-        .args(["--quiet", "--glob", "crates/*/src/**", pattern, "."])
-        .current_dir(root)
-        .output()
-        .expect("rg must be installed (CONTRIBUTING.md lists it as a dev dep)");
-    out.status.success()
+fn boundary_scan_finds(pattern: &str, root: &Path) -> bool {
+    let needle = match pattern {
+        r"palace\.db" => "palace.db",
+        other => other,
+    };
+    let crates = root.join("crates");
+    if !crates.is_dir() {
+        return false;
+    }
+    for entry in std::fs::read_dir(&crates).expect("read fake crates dir") {
+        let src = entry.expect("crate entry").path().join("src");
+        if src.is_dir() && tree_contains(&src, needle) {
+            return true;
+        }
+    }
+    false
+}
+
+fn tree_contains(root: &Path, needle: &str) -> bool {
+    for entry in std::fs::read_dir(root).expect("read source tree") {
+        let path = entry.expect("source entry").path();
+        if path.is_dir() {
+            if tree_contains(&path, needle) {
+                return true;
+            }
+        } else if path.is_file()
+            && std::fs::read_to_string(&path).is_ok_and(|body| body.contains(needle))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 #[test]
@@ -121,7 +142,7 @@ fn scaffold_palace_db_reference_fails_gate() {
     )
     .expect("write leak file");
     assert!(
-        rg_finds(r"palace\.db", dir.path()),
+        boundary_scan_finds(r"palace\.db", dir.path()),
         "gate pattern should detect 'palace.db' under crates/*/src/** but did not",
     );
 }
@@ -140,7 +161,7 @@ fn scaffold_send_keys_dash_l_fails_gate() {
     let bad = format!("fn bad() {{ let _ = \"send-keys{} \"; }}", " -l");
     std::fs::write(&leak, bad).expect("write leak file");
     assert!(
-        rg_finds("send-keys -l", dir.path()),
+        boundary_scan_finds("send-keys -l", dir.path()),
         "gate pattern should detect the forbidden literal under crates/*/src/** but did not",
     );
 }
@@ -159,7 +180,7 @@ fn scaffold_gate_does_not_flag_tests_directory() {
     std::fs::create_dir_all(leak.parent().expect("parent")).expect("mkdir");
     std::fs::write(&leak, "// fixture referencing palace.db").expect("write");
     assert!(
-        !rg_finds(r"palace\.db", dir.path()),
+        !boundary_scan_finds(r"palace\.db", dir.path()),
         "gate must scope to crates/*/src/** and ignore tests/",
     );
 }

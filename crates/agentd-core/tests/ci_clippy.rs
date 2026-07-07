@@ -11,6 +11,14 @@ fn read(path: &str) -> String {
 
 #[test]
 fn ci_clippy_known_warning_patterns_are_absent() {
+    assert_core_markers_absent();
+    assert_tmux_markers_absent();
+    assert_surface_markers_absent();
+    assert_agentd_bin_markers_absent();
+    assert_ci_workflow_markers_absent();
+}
+
+fn assert_core_markers_absent() {
     let codergen = read("crates/agentd-core/src/handler/codergen.rs");
     assert!(
         !codergen.contains(".map(|path| path.display().to_string())\n        .unwrap_or_else(|_| \"<unknown>\".to_string())"),
@@ -72,7 +80,31 @@ fn ci_clippy_known_warning_patterns_are_absent() {
         !handlers_park.contains("req.worktree != PathBuf::from(\"/tmp/agentd-task-wt\")"),
         "handler tests should avoid owned PathBuf comparisons"
     );
+}
 
+fn assert_tmux_markers_absent() {
+    let tmux_pool = read("crates/agentd-tmux/src/pool.rs");
+    assert!(
+        !tmux_pool.contains(".filter_map(|path| path.file_name().map(|name| name.to_os_string()))"),
+        "pool preserve-name collection should avoid redundant closure"
+    );
+    assert!(
+        !tmux_pool.contains("let dst = dest.join(&name);"),
+        "sync_dir_contents should avoid dest/dst similar names"
+    );
+    assert!(
+        !tmux_pool.contains("panic!(\"git {}: {err}\", args.join(\" \"))"),
+        "tmux pool test git helpers should avoid clippy::panic"
+    );
+
+    let tmux_pool_test = read("crates/agentd-tmux/tests/pool.rs");
+    assert!(
+        !tmux_pool_test.contains("create fake worktree {p:?}: {e}"),
+        "tmux pool tests should avoid unnecessary debug formatting"
+    );
+}
+
+fn assert_surface_markers_absent() {
     let surface_http = read("crates/agentd-surface/tests/http.rs");
     assert!(
         !surface_http.contains("r#\"fetch(`/runs/${\"#"),
@@ -86,7 +118,9 @@ fn ci_clippy_known_warning_patterns_are_absent() {
         !surface_http.contains("r#\"/events\"#"),
         "surface HTTP tests should avoid needless raw string hashes"
     );
+}
 
+fn assert_agentd_bin_markers_absent() {
     let agentd_cli = read("crates/agentd-bin/src/cli.rs");
     assert!(
         !agentd_cli.contains("panic!(\"expected cleanup-worktrees command\")"),
@@ -111,16 +145,18 @@ fn ci_clippy_known_warning_patterns_are_absent() {
         !agentd_contract.contains("async fn paths(&self) -> Vec<PathBuf>"),
         "contract test helpers should not be async without await"
     );
+}
 
-    let tmux_pool_test = read("crates/agentd-tmux/tests/pool.rs");
-    assert!(
-        !tmux_pool_test.contains("create fake worktree {p:?}: {e}"),
-        "tmux pool tests should avoid unnecessary debug formatting"
-    );
-
+fn assert_ci_workflow_markers_absent() {
     let ci_workflow = read(".github/workflows/ci.yml");
     assert!(
         !ci_workflow.contains("arguments: --all-features check"),
         "cargo-deny action should not receive a duplicate check subcommand"
+    );
+
+    let scaffold = read("crates/agentd-core/tests/scaffold.rs");
+    assert!(
+        !scaffold.contains("Command::new(\"rg\")"),
+        "scaffold boundary tests should not require ripgrep on CI runners"
     );
 }
