@@ -50,6 +50,10 @@ async fn body_of(
     String::from_utf8(bytes.to_vec()).expect("utf8")
 }
 
+fn has_line(body: &str, expected: &str) -> bool {
+    body.lines().any(|line| line == expected)
+}
+
 #[tokio::test]
 async fn live_stream_replays_then_tails_without_dup() {
     let (tx, rx) = broadcast::channel(16);
@@ -74,6 +78,54 @@ async fn live_stream_replays_then_tails_without_dup() {
     assert!(
         body.contains("run_finished"),
         "closed on the terminal: {body}"
+    );
+}
+
+#[tokio::test]
+async fn live_stream_sanitizes_event_kind_crlf() {
+    let (_tx, rx) = broadcast::channel(16);
+    let replay = vec![
+        rec(1, "run_parked\nevent: injected\rbad", "{}"),
+        rec(2, "run_finished", "{}"),
+    ];
+
+    let body = body_of(replay, rx, Arc::new(FakeRunHost::new())).await;
+
+    assert!(
+        has_line(&body, "event: run_parked_event: injected_bad"),
+        "sanitized event kind should stay on one event line: {body}"
+    );
+    assert!(
+        !has_line(&body, "event: injected"),
+        "CR/LF in kind must not inject a second event field: {body}"
+    );
+}
+
+#[tokio::test]
+async fn live_stream_sanitizes_payload_crlf() {
+    let (_tx, rx) = broadcast::channel(16);
+    let replay = vec![
+        rec(
+            1,
+            "node.parked",
+            "first\r\nsecond\nevent: injected\ndata: attack",
+        ),
+        rec(2, "run_finished", "{}"),
+    ];
+
+    let body = body_of(replay, rx, Arc::new(FakeRunHost::new())).await;
+
+    assert!(
+        body.contains(r"first\r\nsecond\nevent: injected\ndata: attack"),
+        "payload CR/LF should be rendered as literal escapes: {body}"
+    );
+    assert!(
+        !has_line(&body, "event: injected"),
+        "payload must not inject an event field: {body}"
+    );
+    assert!(
+        !has_line(&body, "data: attack"),
+        "payload must not inject a data field: {body}"
     );
 }
 

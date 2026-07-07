@@ -34,6 +34,13 @@ fn checkpoint_atomicity_gap_line(checklist: &str) -> &str {
         .expect("Checkpoint/outcome atomicity known-gap line")
 }
 
+fn sse_sanitization_gap_line(checklist: &str) -> &str {
+    checklist
+        .lines()
+        .find(|line| line.contains("**SSE field sanitization**"))
+        .expect("SSE field sanitization known-gap line")
+}
+
 #[test]
 fn deployment_checklist_marks_p121_agent_id_gap_resolved() {
     let checklist = read_repo_file("docs/p0.9-deployment-checklist.md");
@@ -116,5 +123,25 @@ fn deployment_checklist_marks_p138_checkpoint_atomicity_resolved() {
         !line.contains("crash between the outcome insert and the checkpoint write")
             && !line.contains("duplicate-able node"),
         "Checkpoint/outcome line still describes the duplicate-able node gap: {line}"
+    );
+}
+
+#[test]
+fn deployment_checklist_marks_p139_sse_sanitization_resolved() {
+    let checklist = read_repo_file("docs/p0.9-deployment-checklist.md");
+    let p139 = read_repo_file("specs/e2e/p139-sse-field-sanitization.spec.md");
+    let line = sse_sanitization_gap_line(&checklist);
+
+    assert!(
+        p139.contains("SSE frame builder") && p139.contains("CR/LF"),
+        "P139 spec should document the SSE boundary sanitizer"
+    );
+    assert!(
+        line.contains("P139") && line.contains("boundary"),
+        "SSE sanitization line should name P139 boundary sanitizer: {line}"
+    );
+    assert!(
+        !line.contains("sanitize at the SSE boundary"),
+        "SSE line still describes boundary sanitization as future work: {line}"
     );
 }

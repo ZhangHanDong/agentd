@@ -20,6 +20,7 @@ is P0.9.
 - `GET /healthz` returns `200` with body `ok`.
 - `GET /runs/:id` calls `query_run` over the host: `Ok` → `200` JSON `{status, current_node, completed_nodes, context}`; the `not_found` (`NotFound`) error → `404`.
 - `GET /runs/:id/events?from_seq=N` returns a `text/event-stream` replaying the host's events with `seq > from_seq`, each as one SSE frame (`id` = seq, `event` = kind, `data` = payload). `from_seq` defaults to `0` when absent. As of P1 the stream then TAILS new events live and closes on a terminal event — the live-tail + backpressure behaviour is specified in `p75-sse-live-tail.spec.md`; this route spec keeps the replay + cursor + 400-validation contract.
+- The SSE frame builder sanitizes CR/LF at the boundary before calling axum's `Event::event` or `Event::data`, so a malformed `EventRecord` cannot panic the route or inject extra SSE fields. The persisted event row and production emit payload JSON shape are unchanged.
 - A non-integer `from_seq` is rejected by the query extractor with `400` (before the stream).
 
 ## Boundaries
@@ -68,3 +69,10 @@ Scenario: a non-integer from_seq is rejected with 400
   Test: http_sse_invalid_from_seq_is_400
   When GET /runs/r1/events?from_seq=notanumber is requested
   Then the response is 400
+
+Scenario: SSE sanitizes CRLF fields before building frames
+  Test: http_sse_sanitizes_crlf_fields
+  Given a host event replay with CR/LF in both `kind` and `payload`
+  When GET /runs/r1/events is requested
+  Then the response is 200 and collecting the body does not panic
+  And the body contains no injected `event:` or `data:` field lines
