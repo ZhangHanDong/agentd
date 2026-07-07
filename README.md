@@ -29,6 +29,7 @@ crates/
 ├── agentd-tmux/        # TmuxBackend impl
 ├── agentd-store/       # sqlx + sqlite
 ├── agentd-mempal/      # rmcp client wrapper
+├── agentd-specify/     # optional Specify client/adapter seam
 ├── agentd-github/      # octocrab + webhook
 ├── agentd-matrix/      # matrix-sdk + cowork-bus gateway
 ├── agentd-surface/     # axum HTTP+SSE + rmcp server

@@ -1,0 +1,27 @@
+[package]
+name = "agentd-specify"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+# Optional Specify adapter foundation. It is not a crates.io library and keeps
+# the external Specify API out of the runtime until that contract is defined.
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+test-support = []
+
+[dependencies]
+async-trait = "0.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+agentd-specify = { path = ".", features = ["test-support"] }
+tokio = { workspace = true }
