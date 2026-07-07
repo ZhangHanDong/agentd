@@ -27,6 +27,13 @@ fn initial_context_gap_line(checklist: &str) -> &str {
         .expect("Initial run context known-gap line")
 }
 
+fn checkpoint_atomicity_gap_line(checklist: &str) -> &str {
+    checklist
+        .lines()
+        .find(|line| line.contains("**Checkpoint/outcome atomicity**"))
+        .expect("Checkpoint/outcome atomicity known-gap line")
+}
+
 #[test]
 fn deployment_checklist_marks_p121_agent_id_gap_resolved() {
     let checklist = read_repo_file("docs/p0.9-deployment-checklist.md");
@@ -88,5 +95,26 @@ fn deployment_checklist_marks_p137_initial_context_resolved() {
     assert!(
         !line.contains("accepts but does not seed `context`"),
         "Initial run context line still says production discards context: {line}"
+    );
+}
+
+#[test]
+fn deployment_checklist_marks_p138_checkpoint_atomicity_resolved() {
+    let checklist = read_repo_file("docs/p0.9-deployment-checklist.md");
+    let p138 = read_repo_file("specs/e2e/p138-outcome-checkpoint-atomicity.spec.md");
+    let line = checkpoint_atomicity_gap_line(&checklist);
+
+    assert!(
+        p138.contains("Store") && p138.contains("atomically"),
+        "P138 spec should document the outcome/checkpoint atomic commit"
+    );
+    assert!(
+        line.contains("P138") && line.contains("atomic"),
+        "Checkpoint/outcome line should name P138 atomic resolution: {line}"
+    );
+    assert!(
+        !line.contains("crash between the outcome insert and the checkpoint write")
+            && !line.contains("duplicate-able node"),
+        "Checkpoint/outcome line still describes the duplicate-able node gap: {line}"
     );
 }

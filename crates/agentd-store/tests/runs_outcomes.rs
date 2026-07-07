@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 
 use agentd_core::engine::Checkpoint;
 use agentd_core::ports::RunStatus;
-use agentd_core::types::{Artifact, ArtifactKind, NodeId, Outcome, RunContext, RunId, Status};
+use agentd_core::types::{
+    Artifact, ArtifactKind, MempalWrite, NodeId, Outcome, RunContext, RunId, Status,
+};
 use agentd_store::{SqliteStore, StoreError, checkpoint_repo, outcome_repo, run_repo};
 use sqlx::Row;
 
@@ -188,4 +190,58 @@ async fn checkpoint_round_trips_through_store() {
         .expect("load2")
         .expect("some");
     assert_eq!(back2.current_node, NodeId::parsed("aggregate"));
+}
+
+#[tokio::test]
+async fn outcome_checkpoint_commit_rolls_back_outcome_when_checkpoint_fails() {
+    let (s, _d) = store().await;
+    let run = RunId::from_string("r1");
+    let ghost_run = RunId::from_string("ghost");
+    let node = NodeId::parsed("impl");
+    run_repo::insert_run(s.pool(), &run, "sha")
+        .await
+        .expect("run");
+
+    let mut outcome = Outcome::success();
+    outcome.mempal_writes.push(MempalWrite::KgAdd {
+        subject: "s".to_string(),
+        predicate: "p".to_string(),
+        object: "o".to_string(),
+    });
+    let checkpoint = Checkpoint {
+        run_id: ghost_run,
+        current_node: NodeId::parsed("review"),
+        completed_nodes: vec![node.clone()],
+        retry_counts: BTreeMap::new(),
+        context_snapshot: RunContext::new(),
+        workflow_sha: "sha".to_string(),
+    };
+
+    let result = outcome_repo::insert_node_outcome_and_checkpoint(
+        s.pool(),
+        &run,
+        &node,
+        &outcome,
+        &checkpoint,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "unknown checkpoint run should fail inside the atomic commit"
+    );
+
+    let outcome_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM node_outcomes WHERE run_id = ?")
+            .bind(run.as_str())
+            .fetch_one(s.pool())
+            .await
+            .expect("outcome count");
+    let outbox_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM mempal_outbox WHERE run_id = ?")
+            .bind(run.as_str())
+            .fetch_one(s.pool())
+            .await
+            .expect("outbox count");
+    assert_eq!(outcome_count, 0, "outcome row must roll back");
+    assert_eq!(outbox_count, 0, "outbox row must roll back with outcome");
 }

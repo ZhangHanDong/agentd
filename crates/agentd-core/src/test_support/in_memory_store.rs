@@ -66,6 +66,9 @@ struct Inner {
     review_worktrees: HashMap<(String, String), PathBuf>,
     task_runs: HashMap<String, TaskRunRow>,
     checkpoints: HashMap<String, Checkpoint>,
+    separate_outcome_writes: usize,
+    separate_checkpoint_writes: usize,
+    atomic_outcome_checkpoint_writes: usize,
 }
 
 impl Inner {
@@ -114,6 +117,24 @@ impl InMemoryStore {
             .get(task_run_id.as_str())
             .and_then(|r| r.agent_id.clone())
     }
+
+    /// Test-only count of atomic outcome-plus-checkpoint commits.
+    #[must_use]
+    pub fn atomic_outcome_checkpoint_writes(&self) -> usize {
+        self.lock().atomic_outcome_checkpoint_writes
+    }
+
+    /// Test-only count of writes through the separate outcome API.
+    #[must_use]
+    pub fn separate_outcome_writes(&self) -> usize {
+        self.lock().separate_outcome_writes
+    }
+
+    /// Test-only count of writes through the separate checkpoint API.
+    #[must_use]
+    pub fn separate_checkpoint_writes(&self) -> usize {
+        self.lock().separate_checkpoint_writes
+    }
 }
 
 #[async_trait::async_trait]
@@ -160,11 +181,26 @@ impl Store for InMemoryStore {
         outcome: &Outcome,
     ) -> Result<(), CoreError> {
         let key = (run_id.as_str().to_string(), node_id.as_str().to_string());
-        self.lock()
-            .outcomes
-            .entry(key)
-            .or_default()
-            .push(outcome.clone());
+        let mut inner = self.lock();
+        inner.outcomes.entry(key).or_default().push(outcome.clone());
+        inner.separate_outcome_writes += 1;
+        Ok(())
+    }
+
+    async fn insert_node_outcome_and_checkpoint(
+        &self,
+        run_id: &RunId,
+        node_id: &NodeId,
+        outcome: &Outcome,
+        checkpoint: &Checkpoint,
+    ) -> Result<(), CoreError> {
+        let key = (run_id.as_str().to_string(), node_id.as_str().to_string());
+        let mut inner = self.lock();
+        inner.outcomes.entry(key).or_default().push(outcome.clone());
+        inner
+            .checkpoints
+            .insert(checkpoint.run_id.as_str().to_string(), checkpoint.clone());
+        inner.atomic_outcome_checkpoint_writes += 1;
         Ok(())
     }
 
@@ -456,9 +492,11 @@ impl Store for InMemoryStore {
     }
 
     async fn write_checkpoint(&self, checkpoint: &Checkpoint) -> Result<(), CoreError> {
-        self.lock()
+        let mut inner = self.lock();
+        inner
             .checkpoints
             .insert(checkpoint.run_id.as_str().to_string(), checkpoint.clone());
+        inner.separate_checkpoint_writes += 1;
         Ok(())
     }
 
