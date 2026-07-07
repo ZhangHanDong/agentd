@@ -9,7 +9,7 @@ use agentd_core::ports::{CommandOutput, RunStatus, Store};
 use agentd_core::test_support::{
     FakeBackend, FixedClock, InMemoryStore, MempalStub, RecordingCommandRunner,
 };
-use agentd_core::types::{NodeId, Outcome, ReviewRunId, RunId, TaskRunId, VerdictValue};
+use agentd_core::types::{NodeId, Outcome, ReviewRunId, RunId, Status, TaskRunId, VerdictValue};
 
 struct Harness {
     run_id: RunId,
@@ -114,6 +114,30 @@ async fn engine_persists_outcome_after_each_done_node() {
     );
 }
 
+#[tokio::test]
+async fn engine_commits_done_outcome_and_checkpoint_together() {
+    let h = Harness::new();
+    let g = graph(MINIMAL);
+    let progress = h.engine(&g).execute(&h.run_id).await.expect("execute");
+
+    assert_eq!(progress, finished(&h.run_id));
+    assert_eq!(
+        h.store.atomic_outcome_checkpoint_writes(),
+        2,
+        "decide and work outcomes should each commit with their following checkpoint"
+    );
+    assert_eq!(
+        h.store.separate_outcome_writes(),
+        0,
+        "completed nodes should not persist outcomes through the separate outcome API"
+    );
+    assert_eq!(
+        h.store.separate_checkpoint_writes(),
+        1,
+        "start still writes its synthetic checkpoint separately"
+    );
+}
+
 const WAIT_GRAPH: &str = r#"digraph m {
     "start" [shape=Mdiamond];
     "ask" [handler="wait.human", prompt="approve?"];
@@ -201,6 +225,33 @@ async fn engine_goal_gate_blocks_terminal_until_satisfied() {
         .await
         .expect("execute ok");
     assert_eq!(done, finished(&passing.run_id));
+}
+
+#[tokio::test]
+async fn engine_goal_gate_uses_pending_outcome_before_atomic_commit() {
+    let h = Harness::new();
+    let g = graph(GOAL_GATE_GRAPH);
+    h.runner.push_output(Ok(CommandOutput {
+        stdout: "ok\n".to_string(),
+        stderr: String::new(),
+        status: 0,
+    }));
+
+    let done = h.engine(&g).execute(&h.run_id).await.expect("execute");
+
+    assert_eq!(done, finished(&h.run_id));
+    assert_eq!(
+        h.store.atomic_outcome_checkpoint_writes(),
+        1,
+        "the goal_gate node outcome should commit with the checkpoint to the terminal"
+    );
+    let gate_outcome = h
+        .store
+        .latest_outcome(&h.run_id, &NodeId::parsed("gate"))
+        .await
+        .expect("latest")
+        .expect("gate outcome");
+    assert_eq!(gate_outcome.status, Status::Success);
 }
 
 const CANONICAL: &str = r#"digraph m {

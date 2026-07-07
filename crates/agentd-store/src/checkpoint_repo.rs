@@ -5,7 +5,7 @@
 
 use agentd_core::engine::Checkpoint;
 use agentd_core::types::{NodeId, RunId};
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, SqliteConnection, SqlitePool};
 
 use crate::error::StoreError;
 use crate::util::now_unix;
@@ -16,6 +16,18 @@ use crate::util::now_unix;
 /// Returns [`StoreError::Serde`] on JSON-encode failure, [`StoreError::Sqlx`] on db failure.
 pub async fn write_checkpoint(
     pool: &SqlitePool,
+    checkpoint: &Checkpoint,
+) -> Result<(), StoreError> {
+    let mut conn = pool.acquire().await?;
+    write_checkpoint_on_conn(&mut conn, checkpoint).await
+}
+
+/// Upsert a checkpoint using the caller's connection or transaction.
+///
+/// # Errors
+/// Returns [`StoreError::Serde`] on JSON-encode failure, [`StoreError::Sqlx`] on db failure.
+pub async fn write_checkpoint_on_conn(
+    conn: &mut SqliteConnection,
     checkpoint: &Checkpoint,
 ) -> Result<(), StoreError> {
     let completed = serde_json::to_string(&checkpoint.completed_nodes)?;
@@ -40,7 +52,7 @@ pub async fn write_checkpoint(
     .bind(context)
     .bind(&checkpoint.workflow_sha)
     .bind(now_unix())
-    .execute(pool)
+    .execute(conn)
     .await?;
     Ok(())
 }
