@@ -59,6 +59,7 @@ pub struct ProductionRunHost {
     mempal: Box<dyn MempalClient>,
     clock: Box<dyn Clock>,
     worktree_allocator: Option<Box<dyn WorktreeAllocator>>,
+    accept_workflow_change: bool,
     registry: HandlerRegistry,
     workflows_dir: PathBuf,
     /// The live-event broadcast (P1): the emit point publishes here for the SSE
@@ -94,6 +95,7 @@ impl ProductionRunHost {
             mempal,
             clock,
             worktree_allocator: None,
+            accept_workflow_change: false,
             registry: HandlerRegistry::with_builtins(),
             workflows_dir: workflows_dir.into(),
             live_tx: broadcast::channel(LIVE_BROADCAST_CAPACITY).0,
@@ -114,6 +116,14 @@ impl ProductionRunHost {
         allocator: Option<Box<dyn WorktreeAllocator>>,
     ) -> Self {
         self.worktree_allocator = allocator;
+        self
+    }
+
+    /// Operator policy for resuming a parked run after its workflow file content
+    /// sha changed. Default false; daemon config exposes the explicit opt-in.
+    #[must_use]
+    pub fn with_accept_workflow_change(mut self, accept: bool) -> Self {
+        self.accept_workflow_change = accept;
         self
     }
 
@@ -151,6 +161,7 @@ impl ProductionRunHost {
             },
             sha.to_string(),
         )
+        .with_accept_workflow_change(self.accept_workflow_change)
         .with_worktree_allocator(self.worktree_allocator.as_deref())
     }
 

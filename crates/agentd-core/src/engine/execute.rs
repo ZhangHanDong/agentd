@@ -31,6 +31,7 @@ pub struct Engine<'a> {
     registry: &'a HandlerRegistry,
     ports: Ports<'a>,
     workflow_sha: String,
+    accept_workflow_change: bool,
     /// Optional per-task_run worktree allocator (P2 C1' R3a). Default `None`
     /// leaves codergen spawning in `"."`.
     worktree_allocator: Option<&'a dyn WorktreeAllocator>,
@@ -73,8 +74,18 @@ impl<'a> Engine<'a> {
             registry,
             ports,
             workflow_sha: workflow_sha.into(),
+            accept_workflow_change: false,
             worktree_allocator: None,
         }
+    }
+
+    /// Allow resuming a checkpoint whose stored workflow sha differs from the
+    /// current graph sha. Default is false; production wires this to an explicit
+    /// operator flag.
+    #[must_use]
+    pub fn with_accept_workflow_change(mut self, accept: bool) -> Self {
+        self.accept_workflow_change = accept;
+        self
     }
 
     /// Thread an optional per-task_run worktree allocator into handlers.
@@ -160,6 +171,7 @@ impl<'a> Engine<'a> {
             .ok_or_else(|| {
                 CoreError::Invariant(format!("parked run {} has no checkpoint", run_id.as_str()))
             })?;
+        checkpoint.resume_guard(&self.workflow_sha, self.accept_workflow_change)?;
         let mut state = RunState {
             current: node_id.clone(),
             context: checkpoint.context_snapshot,
