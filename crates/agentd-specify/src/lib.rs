@@ -21,7 +21,7 @@ pub use client::{OfflineSpecify, SpecifyClient};
 pub use error::SpecifyError;
 pub use events::{
     AgentdEventRef, SPECIFY_AGENT_BLOCKED, SPECIFY_WORKFLOW_FAILED, SPECIFY_WORKFLOW_FINISHED,
-    map_agentd_event,
+    map_agentd_event, report_agentd_event,
 };
 pub use types::{
     AcceptanceReport, DraftReceipt, DraftSpec, FrozenSpec, IssueContext, SemanticEvent,
