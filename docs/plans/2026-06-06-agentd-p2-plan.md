@@ -38,11 +38,19 @@ after terminal success, reviewer snapshot worktrees, failed-run cleanup, and
 maintenance CLI hardening.
 
 The remaining real execute smoke gate is operator-gated environment coverage,
-not missing local wiring. It still requires the explicit opt-in
+not missing local wiring. A 2026-07-07 real attempt
+(`real-execute-smoke-20260707070439`) produced useful partial evidence:
+`partial_execute_chain_verified_publish_ok_pr_blocked`. It reached implement,
+verify_lifecycle, review, aggregate, and publish_branch, then stopped at
+`failed_at_open_pr` because the published branch had no common history with
+`origin/main`; Claude also hit a monthly spend limit, so the operator manually
+submitted implement and review outcomes through agentd MCP stdio. That leaves
+the remaining full real execute smoke gate open: a clean
 `AGENTD_REAL_EXECUTE_SMOKE=1 bash scripts/agentd_real_execute_smoke.sh --execute`
-because that path can run real agents and create a GitHub PR. Non-destructive
-dry-run/preflight checks are safe local evidence; the opt-in execute run remains
-the real-environment capstone.
+run where the real agent path and real `open_pr` path complete without manual
+substitution or PR-history repair. Non-destructive dry-run/preflight checks are
+safe local evidence; the opt-in execute run remains the real-environment
+capstone.
 
 ## 1. The safety model (what replaces D1)
 

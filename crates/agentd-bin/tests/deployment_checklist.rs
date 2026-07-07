@@ -55,6 +55,13 @@ fn sigkill_drill_line(checklist: &str) -> &str {
         .expect("real SIGKILL harness checklist line")
 }
 
+fn real_execute_status_line(checklist: &str) -> &str {
+    checklist
+        .lines()
+        .find(|line| line.contains("partial_execute_chain_verified_publish_ok_pr_blocked"))
+        .expect("partial real execute status line")
+}
+
 #[test]
 fn deployment_checklist_marks_p121_agent_id_gap_resolved() {
     let checklist = read_repo_file("docs/p0.9-deployment-checklist.md");
@@ -194,5 +201,57 @@ fn deployment_checklist_mentions_real_sigkill_harness() {
     assert!(
         line.contains("AGENTD_REAL_SIGKILL_SMOKE=1") && line.contains("--execute"),
         "SIGKILL checklist line should name the guarded execute opt-in: {line}"
+    );
+}
+
+#[test]
+fn deployment_checklist_records_partial_real_execute_attempt() {
+    let checklist = read_repo_file("docs/p0.9-deployment-checklist.md");
+    let line = real_execute_status_line(&checklist);
+
+    for expected in [
+        "real-execute-smoke-20260707070439",
+        "partial_execute_chain_verified_publish_ok_pr_blocked",
+        "failed_at_open_pr",
+        "no common history",
+        "monthly spend limit",
+        "manually submitted",
+        "MCP stdio",
+    ] {
+        assert!(
+            line.contains(expected),
+            "real execute status line should contain {expected:?}: {line}"
+        );
+    }
+
+    assert!(
+        !line.contains("full real execute smoke complete")
+            && !line.contains("real execute smoke finished"),
+        "partial status line must not claim the full real execute smoke completed: {line}"
+    );
+}
+
+#[test]
+fn p2_plan_records_real_execute_partial_not_complete() {
+    let plan = read_repo_file("docs/plans/2026-06-06-agentd-p2-plan.md");
+
+    for expected in [
+        "partial_execute_chain_verified_publish_ok_pr_blocked",
+        "real-execute-smoke-20260707070439",
+        "failed_at_open_pr",
+        "no common history",
+        "monthly spend limit",
+        "remaining full real execute smoke gate",
+    ] {
+        assert!(
+            plan.contains(expected),
+            "P2 plan should contain {expected:?}"
+        );
+    }
+
+    assert!(
+        !plan.contains("full real execute smoke complete")
+            && !plan.contains("real execute smoke finished"),
+        "P2 plan must not claim the full real execute smoke completed"
     );
 }
