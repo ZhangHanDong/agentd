@@ -52,6 +52,13 @@ substitution or PR-history repair. Non-destructive dry-run/preflight checks are
 safe local evidence; the opt-in execute run remains the real-environment
 capstone.
 
+Post-P150 safe preflight readiness (2026-07-07, main `0e42750`): `agentd_pr_history_status.sh HEAD main`
+reported `merge_base 0e42750`, and dry-run/preflight-only checks passed for
+`agentd_real_claude_smoke.sh --preflight-only`,
+`agentd_real_execute_smoke.sh --preflight-only`, and
+`agentd_real_sigkill_smoke.sh --preflight-only`. no `AGENTD_REAL_* --execute`
+gate was run, so the real execute, real SIGKILL, and demo gates remain open.
+
 ## 1. The safety model (what replaces D1)
 
 D1 (never edit `agentd-core/**`) was P0/P1's stability anchor. P2 lifts it; the

@@ -65,6 +65,39 @@ fn p2_plan_keeps_real_execute_smoke_as_remaining_gate() {
 }
 
 #[test]
+fn p2_plan_records_post_p150_preflight_readiness_not_completion() {
+    let plan = read("docs/plans/2026-06-06-agentd-p2-plan.md");
+
+    for expected in [
+        "Post-P150 safe preflight readiness",
+        "0e42750",
+        "agentd_real_claude_smoke.sh --preflight-only",
+        "agentd_real_execute_smoke.sh --preflight-only",
+        "agentd_real_sigkill_smoke.sh --preflight-only",
+        "agentd_pr_history_status.sh HEAD main",
+        "merge_base 0e42750",
+        "no `AGENTD_REAL_* --execute`",
+        "real execute, real SIGKILL, and demo gates remain open",
+    ] {
+        assert!(
+            plan.contains(expected),
+            "P2 plan should contain {expected:?}"
+        );
+    }
+
+    for forbidden in [
+        "Post-P150 real execute smoke complete",
+        "real SIGKILL smoke complete",
+        "demo gate complete",
+    ] {
+        assert!(
+            !plan.contains(forbidden),
+            "P2 plan must not claim completion: {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn p11_spec_no_longer_claims_r3a_is_unimplemented() {
     let spec = read("specs/core/p11-per-task-run-worktree.spec.md");
     let daemon = read("crates/agentd-bin/src/daemon.rs");

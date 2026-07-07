@@ -51,7 +51,7 @@ fn workflow_change_resume_line(checklist: &str) -> &str {
 fn sigkill_drill_line(checklist: &str) -> &str {
     checklist
         .lines()
-        .find(|line| line.contains("agentd_real_sigkill_smoke.sh"))
+        .find(|line| line.contains("**Real SIGKILL smoke:**"))
         .expect("real SIGKILL harness checklist line")
 }
 
@@ -67,6 +67,13 @@ fn open_pr_recovery_guidance_line(checklist: &str) -> &str {
         .lines()
         .find(|line| line.contains("task-branch repair guidance"))
         .expect("open_pr recovery guidance line")
+}
+
+fn post_p150_safe_preflight_line(checklist: &str) -> &str {
+    checklist
+        .lines()
+        .find(|line| line.contains("Post-P150 safe preflight"))
+        .expect("post-P150 safe preflight status line")
 }
 
 #[test]
@@ -277,6 +284,35 @@ fn deployment_checklist_mentions_open_pr_history_recovery_guidance() {
         assert!(
             line.contains(expected),
             "open_pr recovery guidance line should contain {expected:?}: {line}"
+        );
+    }
+}
+
+#[test]
+fn deployment_checklist_records_post_p150_safe_preflights() {
+    let checklist = read_repo_file("docs/p0.9-deployment-checklist.md");
+    let p151 = read_repo_file("specs/e2e/p151-real-env-preflight-status-docs.spec.md");
+    let line = post_p150_safe_preflight_line(&checklist);
+
+    assert!(
+        p151.contains("Real environment preflight status docs")
+            && p151.contains("AGENTD_REAL_* --execute"),
+        "P151 spec should document the safe preflight status-only scope"
+    );
+
+    for expected in [
+        "0e42750",
+        "agentd_real_claude_smoke.sh --preflight-only",
+        "agentd_real_execute_smoke.sh --preflight-only",
+        "agentd_real_sigkill_smoke.sh --preflight-only",
+        "agentd_pr_history_status.sh HEAD main",
+        "merge_base 0e42750",
+        "no AGENTD_REAL_* --execute",
+        "remain open",
+    ] {
+        assert!(
+            line.contains(expected),
+            "post-P150 safe preflight line should contain {expected:?}: {line}"
         );
     }
 }
