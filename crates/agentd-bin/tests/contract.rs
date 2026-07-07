@@ -125,6 +125,7 @@ impl WorktreeProvider for FakeWorktreeProvider {
 
 struct ObservedHost {
     host: ProductionRunHost,
+    backend: Arc<FakeBackend>,
     runner: Arc<RecordingCommandRunner>,
     _dir: tempfile::TempDir,
 }
@@ -166,6 +167,7 @@ async fn production_host_with_allocator(
     .with_worktree_allocator(allocator);
     ObservedHost {
         host,
+        backend,
         runner,
         _dir: dir,
     }
@@ -237,6 +239,90 @@ async fn start_draft(host: &ProductionRunHost, run: &RunId) -> RunProgress {
         .await
         .expect("record run");
     host.start_run(run).await.expect("start run")
+}
+
+#[tokio::test]
+async fn production_start_workflow_seeds_initial_context() {
+    let observed = production_host_with_allocator(None).await;
+    let host = &observed.host;
+    let run = RunId::from_string("r-initial-context");
+
+    let parked = host
+        .start_workflow(
+            "draft",
+            &run,
+            json!({
+                "issue_id": "ISS-137",
+                "issue_title": "Seed initial context",
+                "issue_body": "The first agent should receive the seeded issue context.",
+                "non_prompt_key": 137
+            }),
+        )
+        .await
+        .expect("start workflow");
+    assert!(
+        matches!(
+            parked,
+            RunProgress::Parked { ref node_id, .. } if node_id.as_str() == "propose_spec"
+        ),
+        "draft start parks at propose_spec, got {parked:?}"
+    );
+
+    let snap = host
+        .run_snapshot(&run)
+        .await
+        .expect("snapshot read")
+        .expect("snapshot exists");
+    assert_eq!(snap.context["issue_id"], "ISS-137");
+    assert_eq!(snap.context["issue_title"], "Seed initial context");
+    assert_eq!(
+        snap.context["issue_body"],
+        "The first agent should receive the seeded issue context."
+    );
+
+    let spawned = observed.backend.spawned();
+    assert_eq!(spawned.len(), 1, "one spec-writer spawned");
+    let prompt = spawned[0]
+        .initial_prompt
+        .as_deref()
+        .expect("initial prompt");
+    assert!(
+        prompt.contains("issue_id: ISS-137"),
+        "prompt carries issue_id: {prompt}"
+    );
+    assert!(
+        prompt.contains("issue_title: Seed initial context"),
+        "prompt carries issue_title: {prompt}"
+    );
+    assert!(
+        prompt.contains("issue_body: The first agent should receive the seeded issue context."),
+        "prompt carries issue_body: {prompt}"
+    );
+}
+
+#[tokio::test]
+async fn production_start_workflow_rejects_non_object_initial_context() {
+    let (host, _dir) = production_host().await;
+    let run = RunId::from_string("r-bad-initial-context");
+
+    let err = host
+        .start_workflow("draft", &run, json!("ISS-137"))
+        .await
+        .expect_err("string context is invalid");
+    assert!(
+        err.to_string()
+            .contains("initial workflow context must be a JSON object or null"),
+        "unexpected error: {err}"
+    );
+
+    let snap = host
+        .run_snapshot(&run)
+        .await
+        .expect("snapshot read after rejected start");
+    assert!(
+        snap.is_none(),
+        "invalid context is rejected before recording a run"
+    );
 }
 
 #[tokio::test]

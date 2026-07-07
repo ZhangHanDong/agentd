@@ -111,6 +111,68 @@ fn run_start_live_posts_and_reports_success() {
 }
 
 #[test]
+fn run_start_live_posts_context_file_json() {
+    use std::io::{Read, Write};
+    use std::sync::mpsc;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let context_path = dir.path().join("context.json");
+    std::fs::write(
+        &context_path,
+        r#"{"issue_id":"ISS-137","issue_title":"Seed initial context"}"#,
+    )
+    .expect("write context");
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let (tx, rx) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        if let Ok((mut sock, _)) = listener.accept() {
+            let mut buf = [0_u8; 4096];
+            let n = sock.read(&mut buf).expect("read request");
+            tx.send(String::from_utf8_lossy(&buf[..n]).to_string())
+                .expect("send request");
+            let body = r#"{"run_id":"ISS-137","status":"parked"}"#;
+            let resp = format!(
+                "HTTP/1.1 201 Created\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(resp.as_bytes());
+        }
+    });
+
+    let url = format!("http://127.0.0.1:{port}");
+    let out = agentctl(&[
+        "run",
+        "start",
+        "--flow",
+        "draft",
+        "--workflows-dir",
+        &workflows_dir(),
+        "--daemon-url",
+        &url,
+        "--context-file",
+        context_path.to_str().expect("context path"),
+        "ISS-137",
+    ]);
+    let _ = server.join();
+    assert!(
+        out.status.success(),
+        "a 201 from the daemon is a success exit; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let request = rx.recv().expect("captured request");
+    assert!(
+        request.contains(r#""context":{"issue_id":"ISS-137""#),
+        "request body posts the context file JSON: {request}"
+    );
+    assert!(
+        request.contains(r#""issue_title":"Seed initial context""#),
+        "request body preserves context fields: {request}"
+    );
+}
+
+#[test]
 fn run_start_live_unreachable_daemon_errors_cleanly() {
     // Bind a free port then close it -> a connect there is guaranteed refused,
     // so the live path fails fast and cleanly (never hangs).

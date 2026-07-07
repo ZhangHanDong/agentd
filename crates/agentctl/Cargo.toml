@@ -21,6 +21,7 @@ path = "src/main.rs"
 [dependencies]
 clap = { workspace = true }
 agentd-core = { path = "../agentd-core" }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 async-trait = "0.1"

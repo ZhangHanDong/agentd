@@ -16,7 +16,7 @@ use agentd_core::handler::{HandlerRegistry, Ports};
 use agentd_core::ports::{
     AgentBackend, Clock, CommandRunner, MempalClient, Store, WorktreeAllocator,
 };
-use agentd_core::types::{NodeId, ReviewRunId, RunId};
+use agentd_core::types::{NodeId, ReviewRunId, RunContext, RunId};
 use agentd_store::{SqliteStore, event_repo, review_repo, run_repo, task_repo};
 use agentd_surface::host::{
     EventRecord, LiveEvent, RunHost, RunSnapshot, RunSummary, TaskAssignment,
@@ -161,12 +161,27 @@ impl ProductionRunHost {
     /// # Errors
     /// [`CoreError`] on a store/handler/engine failure or an unresolved graph.
     pub async fn start_run(&self, run_id: &RunId) -> Result<RunProgress, CoreError> {
+        self.start_run_with_context(run_id, RunContext::new()).await
+    }
+
+    /// Start a run with an explicit initial context.
+    ///
+    /// # Errors
+    /// [`CoreError`] on a store/handler/engine failure or an unresolved graph.
+    async fn start_run_with_context(
+        &self,
+        run_id: &RunId,
+        initial_context: RunContext,
+    ) -> Result<RunProgress, CoreError> {
         // Serialize per run (P2 Foundation A): every run-advancing op on one run
         // is mutually exclusive, so it can't race a concurrent deliver.
         let lock = self.run_locks.lock_for(run_id.as_str());
         let _guard = lock.lock().await;
         let (graph, sha) = self.resolve_graph(run_id).await?;
-        let progress = self.engine(&graph, &sha).execute(run_id).await?;
+        let progress = self
+            .engine(&graph, &sha)
+            .execute_with_context(run_id, initial_context)
+            .await?;
         self.emit(run_id, &progress).await?;
         Ok(progress)
     }
@@ -266,16 +281,15 @@ impl RunHost for ProductionRunHost {
         &self,
         flow: &str,
         run_id: &RunId,
-        _context: Value,
+        context: Value,
     ) -> Result<RunProgress, CoreError> {
         let file = flow_to_file(flow)
             .ok_or_else(|| CoreError::Invariant(format!("unknown flow '{flow}'")))?;
-        // The initial `context` is accepted but not seeded in the MVP — the
-        // shipped workflows use fixed paths, not context vars (real-env gap).
+        let initial_context = run_context_from_value(context)?;
         let src = std::fs::read_to_string(self.workflows_dir.join(file))?;
         let sha = sha256_hex(src.as_bytes());
         run_repo::record_run(self.store.pool(), run_id, file, &sha).await?;
-        self.start_run(run_id).await
+        self.start_run_with_context(run_id, initial_context).await
     }
 
     async fn deliver(&self, event: EngineEvent) -> Result<RunProgress, CoreError> {
@@ -382,6 +396,28 @@ fn checkpoint_context_string(checkpoint: Option<&Checkpoint>, key: &str) -> Opti
         .get(key)
         .and_then(Value::as_str)
         .map(ToString::to_string)
+}
+
+fn run_context_from_value(value: Value) -> Result<RunContext, CoreError> {
+    match value {
+        Value::Null => Ok(RunContext::new()),
+        Value::Object(map) => Ok(RunContext(map)),
+        other => Err(CoreError::Invariant(format!(
+            "initial workflow context must be a JSON object or null, got {}",
+            json_type_name(&other)
+        ))),
+    }
+}
+
+fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 /// Map a wire flow name to its shipped `.dot` file, or `None` for an unknown

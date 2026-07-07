@@ -7,10 +7,12 @@
 //! agent events — deferred to P0.9. Without `--dry-run` this returns a clear
 //! deferred error rather than hanging.
 
+use std::path::Path;
 use std::process::ExitCode;
 
 use agentd_core::dot::parser;
 use agentd_core::graph::{NodeDef, NodeGraph, NodeShape};
+use serde_json::{Value, json};
 
 use crate::cli::{RunCmd, RunStartArgs};
 
@@ -62,8 +64,16 @@ fn start(args: &RunStartArgs) -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    let context = match read_context_file(args.context_file.as_deref()) {
+        Ok(context) => context,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::from(EXIT_INVALID);
+        }
+    };
+
     // Live run: POST to the daemon, which owns the store + production RunHost.
-    match post_run(&args.daemon_url, args.flow.name(), &args.id) {
+    match post_run(&args.daemon_url, args.flow.name(), &args.id, &context) {
         Ok((code, body)) if (200..300).contains(&code) => {
             println!("run started via {}: {body}", args.daemon_url);
             ExitCode::SUCCESS
@@ -79,10 +89,15 @@ fn start(args: &RunStartArgs) -> ExitCode {
     }
 }
 
-/// Minimal dependency-free `POST /runs` to the daemon (a single request over a
-/// blocking socket; the agent advances the run thereafter). Returns the HTTP
-/// status code + response body, or a human-readable transport error.
-fn post_run(daemon_url: &str, flow: &str, id: &str) -> Result<(u16, String), String> {
+/// Minimal `POST /runs` to the daemon (a single request over a blocking socket;
+/// the agent advances the run thereafter). Returns the HTTP status code +
+/// response body, or a human-readable transport error.
+fn post_run(
+    daemon_url: &str,
+    flow: &str,
+    id: &str,
+    context: &Value,
+) -> Result<(u16, String), String> {
     use std::io::Write;
     use std::net::TcpStream;
 
@@ -92,7 +107,12 @@ fn post_run(daemon_url: &str, flow: &str, id: &str) -> Result<(u16, String), Str
         .trim_end_matches('/');
     let mut stream = TcpStream::connect(addr)
         .map_err(|e| format!("cannot reach daemon at {daemon_url}: {e}"))?;
-    let body = format!(r#"{{"flow":"{flow}","run_id":"{id}","context":{{}}}}"#);
+    let body = json!({
+        "flow": flow,
+        "run_id": id,
+        "context": context,
+    })
+    .to_string();
     let request = format!(
         "POST /runs HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n\
          Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -102,6 +122,35 @@ fn post_run(daemon_url: &str, flow: &str, id: &str) -> Result<(u16, String), Str
         .write_all(request.as_bytes())
         .map_err(|e| format!("writing to daemon failed: {e}"))?;
     read_response(stream)
+}
+
+fn read_context_file(path: Option<&Path>) -> Result<Value, String> {
+    let Some(path) = path else {
+        return Ok(json!({}));
+    };
+    let src = std::fs::read_to_string(path)
+        .map_err(|err| format!("cannot read context file {}: {err}", path.display()))?;
+    let value: Value = serde_json::from_str(&src)
+        .map_err(|err| format!("context file {} is not valid JSON: {err}", path.display()))?;
+    match value {
+        Value::Object(_) | Value::Null => Ok(value),
+        other => Err(format!(
+            "context file {} must contain a JSON object or null, got {}",
+            path.display(),
+            json_type_name(&other)
+        )),
+    }
+}
+
+fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 /// Read + parse the daemon's HTTP response from `stream`, bounding the buffered
