@@ -1,6 +1,6 @@
 # agentd — P2 implementation plan (unfreeze core + targeted unblocks)
 
-> Status: planning (not committed). Reconciles the design-doc
+> Status: as-built plus remaining real-env gates. Reconciles the design-doc
 > [§7.3 P2](../specs/2026-05-29-agentd-design.md) ("architectural cleanup") with
 > what the P1 season actually proved is needed. **The headline P2 item is already
 > done; P2 is smaller and more targeted than the design doc implies.** Successor
@@ -26,6 +26,23 @@ So P2 is NOT a 200–400-round extraction refactor. It is: **lift the D1 freeze 
 make a few targeted, additive core changes that activate the P1 work three walls
 deferred** — with the existing test suite as the regression net that replaces the
 freeze. The optional structural splits are weighed in §5, not the spine.
+
+## 0.5 Current as-built status
+
+Worktree activation is delivered in the local runtime path. The daemon injects `WorktreePool`
+through `ProductionRunHost::with_worktree_allocator`, and `execute.dot` consumes `${worktree}` for `agent-spec lifecycle --code` and for
+`scripts/agentd_publish_worktree.sh ${worktree} ${task_run_id}`. The same
+activation line is covered by the follow-on P99-P104/P106/P107 specs: keyed
+task-run allocation, branch publication from the implementer worktree, release
+after terminal success, reviewer snapshot worktrees, failed-run cleanup, and
+maintenance CLI hardening.
+
+The remaining real execute smoke gate is operator-gated environment coverage,
+not missing local wiring. It still requires the explicit opt-in
+`AGENTD_REAL_EXECUTE_SMOKE=1 bash scripts/agentd_real_execute_smoke.sh --execute`
+because that path can run real agents and create a GitHub PR. Non-destructive
+dry-run/preflight checks are safe local evidence; the opt-in execute run remains
+the real-environment capstone.
 
 ## 1. The safety model (what replaces D1)
 

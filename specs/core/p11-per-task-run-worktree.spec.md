@@ -1,32 +1,29 @@
 spec: task
-name: "Per-task_run worktree allocation — connect the design-faithful worktree (P2 C1' R3a, DRAFT)"
-tags: [core, store, bin, handler, p2, worktree, draft]
+name: "Per-task_run worktree allocation — connect the design-faithful worktree (P2 C1' R3a)"
+tags: [core, store, bin, handler, p2, worktree]
 ---
 
-> STATUS: DRAFT — design pending an advisor review pass before implementation
-> (R3 is the deepest C1 piece; the team gates coding on a reviewed spec). The
-> R3b forks (reviewer worktrees, open_pr-from-worktree, restart) are scoped OUT
-> here with their open questions stated. The vestigial C1a threading cleanup is
-> handled by P103.
+> STATUS: COMPLETE FOR R3a — this mechanism contract is implemented and verified.
+> Activation is covered by P99-P104: daemon allocator injection, execute.dot
+> `${worktree}` consumption, branch publication, reviewer snapshots, and
+> worktree release/cleanup are follow-on contracts rather than p11 concerns.
+> The vestigial C1a threading cleanup is handled by P103.
 
 ## Intent
 
 Make the worktree real (R1 reverted the wrong cwd model; R2 restored `${...}`
-substitution). R3a is the INERT MECHANISM HALF (like C1a): the `WorktreeAllocator`
-port, the codergen reorder behind it, `set_task_run_worktree`, and the builder
-seam — so when an allocator IS injected, codergen allocates a per-task_run
-worktree, spawns the agent into it, persists `task_runs.worktree_path`, and stages
-it so a downstream tool resolves `${worktree}`. Proven by FAKE-allocator tests.
+substitution). R3a is the mechanism contract: the `WorktreeAllocator` port, the
+codergen reorder behind it, `set_task_run_worktree`, and the builder seam. When
+an allocator is injected, codergen allocates a per-task_run worktree, spawns the
+agent into it, persists `task_runs.worktree_path`, and stages it so a downstream
+tool resolves `${worktree}`. Proven by fake-allocator tests.
 
-INERT BY DESIGN: the daemon keeps passing `None` and execute.dot stays UNMIGRATED,
-so behavior is unchanged and every existing test stays green. ACTIVATION is R3b,
-done as ONE COHERENT UNIT — because half-activating strands the reviewers:
-injecting the allocator alone makes `implement` run in W while `review` (fan_out,
-out of R3a) still spawns in `"."` and `verify --code .` checks the wrong tree.
-R3b must inject + give review a real implementation source + migrate
-execute.dot's `verify` AND `review` together, with the real `start_run` e2e.
-P99 initially shared W with reviewers; P104 later replaces that with independent
-reviewer snapshots. R3a does NOT touch the daemon, agentd-tmux, or execute.dot.
+R3a is complete. The current daemon/workflow activation is handled by later
+contracts: P99 injects the real pool into the production host, P100 publishes the
+implementer worktree branch before PR creation, P101 releases worktrees after
+terminal success, P104 gives reviewers independent snapshot worktrees, and
+P106/P107 cover failed-run cleanup and maintenance hardening. This p11 spec stays
+focused on the reusable core/store mechanism.
 
 Load-bearing assumption (VERIFIED): a value codergen stages into the context
 survives the park/resume — `step_once` merges staged updates into `state.context`
@@ -46,7 +43,8 @@ worktree stages identically.
   `HandlerCtx` gain `with_worktree_allocator(Option<&dyn WorktreeAllocator>)`
   (default `None`), exactly like C1a's `with_worktree`. This keeps the 22
   `HandlerCtx::new` + 5 `Engine::new` literal sites unchanged (a `Ports` field
-  would churn every literal). The daemon opts in; tests default to `None`.
+  would churn every literal). Production activation opts in through later specs;
+  core tests can still use `None` to preserve the old `"."` behavior.
 - codergen REORDER (the fix the frozen core blocked, now D1-lifted): today it
   spawns THEN `insert_task_run`. New order — `insert_task_run` → `task_run_id` →
   `allocate(task_run_id)` → `W` (if an allocator is injected; else `"."`) →
@@ -79,20 +77,16 @@ worktree stages identically.
 
 ### Forbidden
 
-- Do NOT inject the allocator in the daemon, add a real (git) allocator impl, or
-  migrate any workflow — that is R3b's coherent ACTIVATION (see Out of Scope). The
-  daemon keeps passing `None`; R3a is inert.
-- Do not allocate worktrees for reviewers / `fan_out` (R3b).
-- No new migration: `task_runs.worktree_path` already exists.
+- Do not broaden p11 beyond the core/store mechanism that R3a verifies; daemon
+  activation, reviewer snapshots, PR publication, and cleanup are documented in
+  P99-P104/P106/P107.
+- Do not add a new migration: `task_runs.worktree_path` already exists.
 
-## Out of Scope (R3b — activation + the open forks, parked deliberately)
+## Out of Scope (activation follow-ons)
 
-- ACTIVATION as one coherent unit: inject the real allocator in the daemon
-  (`agentd-bin`/`agentd-tmux` over `GitWorktreeProvider`), migrate execute.dot's
-  `verify_lifecycle` `--code .` → `--code ${worktree}` AND give `review` a real
-  implementation source, and the REAL e2e (the p9 guard: a real `start_run`
-  records the allocated worktree, not `"."` — which only has something to assert
-  once the daemon injects, i.e. in R3b, not under an inert R3a).
+- Activation is covered by P99-P104: real allocator injection, execute.dot's
+  `${worktree}` use, branch publication, reviewer snapshots, and release are
+  follow-on contracts, not p11 acceptance criteria.
 - REVIEWER worktrees: P104 resolves this by keying reviewer snapshots as
   `review-${review_run_id}-${reviewer_id}` and snapshotting from the implementer
   worktree.
