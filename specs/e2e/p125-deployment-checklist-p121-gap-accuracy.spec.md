@@ -6,9 +6,10 @@ tags: [e2e, p0.9, docs, deployment, assign-task]
 ## Intent
 
 Keep the real-environment deployment checklist aligned with the completed P121
-ownership work before the next real Claude smoke is executed. P121 resolved the
-old `agent_id` assignment gap by persisting task-run ownership, while
-`spec_path` and `plan_path` remain deferred task-assignment metadata gaps.
+ownership work. P121 resolved the old `agent_id` assignment gap by persisting
+task-run ownership; P136 later resolves the `spec_path` / `plan_path` /
+`context_pack` task-assignment metadata bridge by reading checkpoint context
+strings when present.
 
 ## Decisions
 
@@ -16,7 +17,9 @@ old `agent_id` assignment gap by persisting task-run ownership, while
   protects the corrected known-gap status.
 - Treat `agent_id` as resolved by P121 and do not list it among remaining
   `TaskAssignment` gaps.
-- Keep `spec_path` and `plan_path` listed as remaining `TaskAssignment` gaps.
+- Keep the line compatible with P136: `spec_path`, `plan_path`, and
+  `context_pack` are runtime metadata values supplied from checkpoint context,
+  not remaining `TaskAssignment` schema gaps.
 
 ## Boundaries
 
@@ -44,18 +47,19 @@ Scenario: deployment checklist marks the agent_id gap resolved
   And it does not say `agent_id` is populated from spawn context instead of the
   store
 
-Scenario: deployment checklist keeps spec and plan path gaps explicit
+Scenario: deployment checklist marks runtime metadata bridge resolved
   Test:
     Package: agentd-bin
-    Filter: deployment_checklist_keeps_spec_and_plan_path_gaps
+    Filter: deployment_checklist_marks_p136_task_assignment_metadata_resolved
   Level: static docs regression test
   Given docs/p0.9-deployment-checklist.md
   When the TaskAssignment known-gap line is inspected
-  Then it still names `spec_path` and `plan_path` as remaining gaps
+  Then it names P136 as the runtime metadata bridge
+  And it does not list `spec_path` or `plan_path` as remaining gaps
 
 ## Out of Scope
 
 - Changing the P121 implementation.
-- Persisting `spec_path`, `plan_path`, or `context_pack`.
+- Persisting `spec_path`, `plan_path`, or `context_pack` as schema columns.
 - Executing the real Claude smoke, full `execute.dot`, SIGKILL drill, or 90
   second demo.
