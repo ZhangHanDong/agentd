@@ -48,6 +48,10 @@ async fn body_string(resp: axum::http::Response<Body>) -> String {
     String::from_utf8(bytes.to_vec()).expect("utf8")
 }
 
+fn has_line(body: &str, expected: &str) -> bool {
+    body.lines().any(|line| line == expected)
+}
+
 #[tokio::test]
 async fn http_healthz_ok() {
     let resp = get(app(FakeRunHost::new()), "/healthz").await;
@@ -124,6 +128,46 @@ async fn http_sse_invalid_from_seq_is_400() {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn http_sse_sanitizes_crlf_fields() {
+    let host = FakeRunHost::new();
+    host.set_events(
+        "r1",
+        vec![
+            EventRecord {
+                seq: 1,
+                kind: "run_parked\nevent: injected\rbad".into(),
+                payload: "first\r\nsecond\nevent: injected\ndata: attack".into(),
+            },
+            EventRecord {
+                seq: 2,
+                kind: "run_finished".into(),
+                payload: "{}".into(),
+            },
+        ],
+    );
+
+    let resp = get(app(host), "/runs/r1/events").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+    assert!(
+        has_line(&body, "event: run_parked_event: injected_bad"),
+        "sanitized event kind should stay on one event line: {body}"
+    );
+    assert!(
+        body.contains(r"first\r\nsecond\nevent: injected\ndata: attack"),
+        "payload CR/LF should be rendered as literal escapes: {body}"
+    );
+    assert!(
+        !has_line(&body, "event: injected"),
+        "CR/LF fields must not inject a second event field: {body}"
+    );
+    assert!(
+        !has_line(&body, "data: attack"),
+        "CR/LF fields must not inject a second data field: {body}"
+    );
 }
 
 #[tokio::test]
