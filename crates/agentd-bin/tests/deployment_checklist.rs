@@ -62,6 +62,13 @@ fn real_execute_status_line(checklist: &str) -> &str {
         .expect("partial real execute status line")
 }
 
+fn open_pr_recovery_guidance_line(checklist: &str) -> &str {
+    checklist
+        .lines()
+        .find(|line| line.contains("task-branch repair guidance"))
+        .expect("open_pr recovery guidance line")
+}
+
 #[test]
 fn deployment_checklist_marks_p121_agent_id_gap_resolved() {
     let checklist = read_repo_file("docs/p0.9-deployment-checklist.md");
@@ -254,4 +261,22 @@ fn p2_plan_records_real_execute_partial_not_complete() {
             && !plan.contains("real execute smoke finished"),
         "P2 plan must not claim the full real execute smoke completed"
     );
+}
+
+#[test]
+fn deployment_checklist_mentions_open_pr_history_recovery_guidance() {
+    let checklist = read_repo_file("docs/p0.9-deployment-checklist.md");
+    let line = open_pr_recovery_guidance_line(&checklist);
+
+    for expected in [
+        "agentd_open_pr.sh",
+        "publish_branch",
+        "no common history",
+        "task-branch repair guidance",
+    ] {
+        assert!(
+            line.contains(expected),
+            "open_pr recovery guidance line should contain {expected:?}: {line}"
+        );
+    }
 }
