@@ -11,8 +11,8 @@ pub use enterprise::{
 };
 pub use handle::{AgentHandle, AgentStatus, BackendKind, CliKind, LaunchStrategy, SpawnRequest};
 pub use ids::{
-    AgentId, AgentProfileId, NodeId, ReviewRunId, RunId, RuntimeAttemptId, RuntimeSessionId,
-    TaskRunId, WorkerId, WorkerIncarnationId,
+    AgentId, AgentProfileId, AuditEventId, ExecutionArtifactId, NodeId, ReviewRunId, RunId,
+    RuntimeAttemptId, RuntimeSessionId, TaskRunId, WorkerId, WorkerIncarnationId,
 };
 pub use outcome::{Artifact, ArtifactKind, MempalWrite, Outcome, Status};
 pub use verdict::{ReviewVerdict, VerdictValue};

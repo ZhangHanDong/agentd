@@ -51,6 +51,8 @@ id_newtype!(WorkerId, "wk");
 id_newtype!(WorkerIncarnationId, "wi");
 id_newtype!(RuntimeSessionId, "rs");
 id_newtype!(RuntimeAttemptId, "ra");
+id_newtype!(ExecutionArtifactId, "ar");
+id_newtype!(AuditEventId, "ae");
 
 impl NodeId {
     /// `NodeId`s in DOT files are operator-authored; preserve as-is.
