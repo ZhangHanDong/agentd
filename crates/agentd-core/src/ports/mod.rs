@@ -10,6 +10,7 @@ pub mod command_runner;
 pub mod mempal;
 pub mod project_authority;
 pub mod store;
+pub mod task_lease;
 pub mod worktree_allocator;
 
 pub use agent_allocator::{
@@ -25,4 +26,8 @@ pub use project_authority::{
     ProjectAuthorityMode, ProjectAuthorityPort, ProjectSnapshotResolveRequest,
 };
 pub use store::{RunStatus, Store};
+pub use task_lease::{
+    TaskLeaseCloseRequest, TaskLeaseDispatchRequest, TaskLeaseError, TaskLeasePort,
+    TaskLeaseRejectionReason, TaskLeaseRenewRequest,
+};
 pub use worktree_allocator::WorktreeAllocator;

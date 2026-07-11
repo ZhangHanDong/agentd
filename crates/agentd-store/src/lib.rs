@@ -36,6 +36,7 @@ pub mod run_repo;
 pub mod runtime_session_repo;
 pub mod store;
 mod store_impl;
+pub mod task_lease_control_plane;
 pub mod task_repo;
 mod util;
 pub mod worker_repo;

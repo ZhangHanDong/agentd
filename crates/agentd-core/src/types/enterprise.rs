@@ -2,7 +2,11 @@
 
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize};
+use thiserror::Error;
+
+use super::{LeaseId, TaskRunId, WorkerIncarnationId};
 
 macro_rules! contract_status {
     (
@@ -92,3 +96,92 @@ contract_status!(
     }
     terminal { Exited, Gone }
 );
+
+contract_status!(
+    LeaseStatus {
+        Active => "active",
+        Released => "released",
+        Expired => "expired",
+        Cancelled => "cancelled",
+        Superseded => "superseded",
+    }
+    terminal { Released, Expired, Cancelled, Superseded }
+);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+#[serde(transparent)]
+pub struct FencingToken(u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("fencing token must be greater than zero")]
+pub struct InvalidFencingToken;
+
+impl FencingToken {
+    /// Construct a non-zero task-scoped fencing token.
+    ///
+    /// # Errors
+    /// Returns [`InvalidFencingToken`] when `value` is zero.
+    pub const fn new(value: u64) -> Result<Self, InvalidFencingToken> {
+        if value == 0 {
+            Err(InvalidFencingToken)
+        } else {
+            Ok(Self(value))
+        }
+    }
+
+    #[must_use]
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for FencingToken {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = u64::deserialize(deserializer)?;
+        Self::new(value).map_err(D::Error::custom)
+    }
+}
+
+impl fmt::Display for FencingToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskLeaseClaim {
+    pub execution_task_id: TaskRunId,
+    pub worker_incarnation_id: WorkerIncarnationId,
+    pub lease_id: LeaseId,
+    pub fencing_token: FencingToken,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskLeaseGrant {
+    pub lease_id: LeaseId,
+    pub execution_task_id: TaskRunId,
+    pub worker_incarnation_id: WorkerIncarnationId,
+    pub fencing_token: FencingToken,
+    pub status: LeaseStatus,
+    pub acquired_at: i64,
+    pub expires_at: i64,
+    pub renewed_at: Option<i64>,
+    pub terminal_at: Option<i64>,
+    pub terminal_reason: Option<String>,
+    pub record_version: u64,
+}
+
+impl TaskLeaseGrant {
+    #[must_use]
+    pub fn claim(&self) -> TaskLeaseClaim {
+        TaskLeaseClaim {
+            execution_task_id: self.execution_task_id.clone(),
+            worker_incarnation_id: self.worker_incarnation_id.clone(),
+            lease_id: self.lease_id.clone(),
+            fencing_token: self.fencing_token,
+        }
+    }
+}

@@ -53,6 +53,7 @@ id_newtype!(RuntimeSessionId, "rs");
 id_newtype!(RuntimeAttemptId, "ra");
 id_newtype!(ExecutionArtifactId, "ar");
 id_newtype!(AuditEventId, "ae");
+id_newtype!(LeaseId, "ls");
 
 impl NodeId {
     /// `NodeId`s in DOT files are operator-authored; preserve as-is.
