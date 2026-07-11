@@ -13,6 +13,7 @@
 pub mod agent_chat_import;
 pub mod agent_chat_task_graph_repo;
 pub mod agent_chat_task_repo;
+pub mod agent_profile_repo;
 pub mod agent_repo;
 pub mod agent_scheduler_repo;
 pub mod artifact_repo;
@@ -30,10 +31,12 @@ pub mod project_repo;
 pub mod relay_repo;
 pub mod review_repo;
 pub mod run_repo;
+pub mod runtime_session_repo;
 pub mod store;
 mod store_impl;
 pub mod task_repo;
 mod util;
+pub mod worker_repo;
 pub mod worktree_cleanup_repo;
 
 pub use error::StoreError;
