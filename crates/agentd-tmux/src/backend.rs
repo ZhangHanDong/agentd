@@ -1,8 +1,9 @@
 //! `TmuxBackend` (design §4.1–§4.5): the real agent-spawning backend. It holds
 //! an injected `Arc<dyn CommandRunner>` (P0.3 D3) so every flow is testable
-//! against a `FakeRunner`. The agentd-core `AgentBackend` trait stays spawn-only
-//! (D1); the other capabilities (§4.6–§4.10) are inherent methods landed across
-//! P0.3 Tasks 2–5.
+//! against a `FakeRunner`. The agentd-core `AgentBackend` trait keeps spawn as
+//! the default path and lets scheduler-aware callers dispatch to an allocation;
+//! the other capabilities (§4.6–§4.10) are inherent methods landed across P0.3
+//! Tasks 2–5.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -10,7 +11,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use agentd_core::CoreError;
-use agentd_core::ports::{AgentBackend, CommandOutput, CommandRunner, RunOpts};
+use agentd_core::ports::{
+    AgentAllocation, AgentAllocationStatus, AgentBackend, CommandOutput, CommandRunner, RunOpts,
+};
 use agentd_core::types::{
     AgentHandle, AgentId, AgentStatus, BackendKind, CliKind, LaunchStrategy, SpawnRequest,
 };
@@ -20,8 +23,16 @@ use crate::error::BackendError;
 
 const AGENTD_MCP_STDIO_CMD_ENV: &str = "AGENTD_MCP_STDIO_CMD";
 const AGENTD_CLAUDE_AUTO_TRUST_WORKSPACE_ENV: &str = "AGENTD_CLAUDE_AUTO_TRUST_WORKSPACE";
-const LAUNCHER_GITIGNORE_PATTERN: &str = ".agentd-launcher-*.sh";
-const MCP_CONFIG_GITIGNORE_PATTERN: &str = ".agentd-mcp-*.json";
+const LAUNCHER_EXCLUDE_PATTERN: &str = ".agentd-launcher-*.sh";
+const MCP_CONFIG_EXCLUDE_PATTERN: &str = ".agentd-mcp-*.json";
+const CODEX_UNATTENDED_ARGS: &str = "codex --ask-for-approval never --sandbox danger-full-access";
+const AGENTD_MCP_TOOLS: &[&str] = &[
+    "assign_task",
+    "submit_outcome",
+    "submit_review",
+    "check_inbox",
+    "query_run",
+];
 
 /// Options for [`TmuxBackend::capture`] (design §4.8).
 #[derive(Debug, Clone, Copy)]
@@ -365,10 +376,21 @@ impl TmuxBackend {
     /// # Errors
     /// [`BackendError`] when the pane re-probe fails to run or parse.
     pub async fn rebind(&self, target: &str) -> Result<Option<AgentHandle>, BackendError> {
-        if !self.session_alive(target).await? {
+        let session = tmux_session_name(target);
+        let agent_id = session.strip_prefix("agentd-").unwrap_or(session);
+        self.rebind_target(target, AgentId::parsed(agent_id)).await
+    }
+
+    async fn rebind_target(
+        &self,
+        target: &str,
+        agent_id: AgentId,
+    ) -> Result<Option<AgentHandle>, BackendError> {
+        let session = tmux_session_name(target);
+        if !self.session_alive(session).await? {
             return Ok(None);
         }
-        let address = format!("{target}:0.0");
+        let address = tmux_pane_address(target);
         let probe = self
             .tmux(
                 &[
@@ -382,15 +404,14 @@ impl TmuxBackend {
             )
             .await?;
         let (pane_id, pid) = parse_pane_info(&probe.stdout)?;
-        let agent_id = target.strip_prefix("agentd-").unwrap_or(target);
         Ok(Some(AgentHandle {
-            agent_id: AgentId::parsed(agent_id),
+            agent_id,
             backend: BackendKind::Tmux,
             address,
             pane_id: Some(pane_id),
             pid,
             // Approximate; the DB holds the authoritative start time (§4.10).
-            session_name: target.to_string(),
+            session_name: session.to_string(),
             spawned_at: SystemTime::now(),
         }))
     }
@@ -482,14 +503,18 @@ impl AgentBackend for TmuxBackend {
         let launcher_path = req
             .worktree
             .join(format!(".agentd-launcher-{}.sh", req.agent_id.as_str()));
-        let mcp_config = build_claude_mcp_config(&req)?;
-        let launcher =
-            build_launcher_script(&req, mcp_config.as_ref().map(|config| config.0.as_path()))?;
+        let mcp_stdio_command = mcp_stdio_command(&req)?;
+        let mcp_config = build_claude_mcp_config(&req, mcp_stdio_command)?;
+        let launcher = build_launcher_script(
+            &req,
+            mcp_config.as_ref().map(|config| config.0.as_path()),
+            mcp_stdio_command,
+        )?;
         if let Some((path, contents)) = &mcp_config {
             write_file(path, contents)?;
         }
         write_file(&launcher_path, &launcher)?;
-        amend_gitignore(&req.worktree, mcp_config.is_some())?;
+        amend_git_exclude(&req.worktree, mcp_config.is_some())?;
 
         // §4.5 step 3: launch — directly, or wrapped in a transient systemd scope.
         let worktree_str = req.worktree.to_string_lossy().into_owned();
@@ -540,6 +565,35 @@ impl AgentBackend for TmuxBackend {
 
         Ok(handle)
     }
+
+    async fn dispatch_allocated(
+        &self,
+        req: SpawnRequest,
+        allocation: &AgentAllocation,
+    ) -> Result<AgentHandle, CoreError> {
+        if allocation.status != AgentAllocationStatus::Routed {
+            return self.spawn(req).await;
+        }
+        let target = allocation_tmux_target(allocation).ok_or_else(|| {
+            CoreError::Backend(format!(
+                "routed allocation for '{}' is missing a tmux target",
+                allocation.agent_id.as_str()
+            ))
+        })?;
+        let handle = self
+            .rebind_target(target, req.agent_id.clone())
+            .await?
+            .ok_or_else(|| {
+                CoreError::Backend(format!(
+                    "routed tmux target '{target}' for '{}' is not live",
+                    allocation.agent_id.as_str()
+                ))
+            })?;
+        if let Some(prompt) = req.initial_prompt.as_deref() {
+            self.send_prompt(&handle, prompt).await?;
+        }
+        Ok(handle)
+    }
 }
 
 /// Build the launcher script body (design §4.5): shebang, `cd` into the
@@ -553,6 +607,7 @@ impl AgentBackend for TmuxBackend {
 fn build_launcher_script(
     req: &SpawnRequest,
     mcp_config_path: Option<&Path>,
+    mcp_stdio_command: Option<&str>,
 ) -> Result<String, BackendError> {
     let mut script = String::from("#!/usr/bin/env bash\nset -euo pipefail\n");
     script.push_str("cd ");
@@ -579,22 +634,32 @@ fn build_launcher_script(
         script.push('\n');
     }
     script.push_str("exec ");
-    push_cli_exec(&mut script, req.cli, mcp_config_path);
+    push_cli_exec(&mut script, req.cli, mcp_config_path, mcp_stdio_command);
     script.push('\n');
     Ok(script)
 }
 
-fn build_claude_mcp_config(req: &SpawnRequest) -> Result<Option<(PathBuf, String)>, BackendError> {
+fn mcp_stdio_command(req: &SpawnRequest) -> Result<Option<&str>, BackendError> {
     let Some(command) = req.env_overrides.get(AGENTD_MCP_STDIO_CMD_ENV) else {
         return Ok(None);
     };
-    if req.cli != CliKind::ClaudeCode {
-        return Ok(None);
-    }
     if command.trim().is_empty() {
         return Err(BackendError::Invariant(format!(
             "{AGENTD_MCP_STDIO_CMD_ENV} cannot be empty"
         )));
+    }
+    Ok(Some(command))
+}
+
+fn build_claude_mcp_config(
+    req: &SpawnRequest,
+    mcp_stdio_command: Option<&str>,
+) -> Result<Option<(PathBuf, String)>, BackendError> {
+    let Some(command) = mcp_stdio_command else {
+        return Ok(None);
+    };
+    if req.cli != CliKind::ClaudeCode {
+        return Ok(None);
     }
 
     let path = req
@@ -647,15 +712,70 @@ fn is_shell_identifier(key: &str) -> bool {
 }
 
 /// Push the CLI command line launched per [`CliKind`] (v0 defaults; configurable later).
-fn push_cli_exec(script: &mut String, cli: CliKind, mcp_config_path: Option<&Path>) {
-    match (cli, mcp_config_path) {
-        (CliKind::ClaudeCode, Some(path)) => {
+fn push_cli_exec(
+    script: &mut String,
+    cli: CliKind,
+    mcp_config_path: Option<&Path>,
+    mcp_stdio_command: Option<&str>,
+) {
+    match (cli, mcp_config_path, mcp_stdio_command) {
+        (CliKind::ClaudeCode, Some(path), _) => {
             script.push_str("claude --mcp-config ");
             script.push_str(&sh_quote(&path.to_string_lossy()));
             script.push_str(" --strict-mcp-config");
         }
-        (CliKind::ClaudeCode, None) => script.push_str("claude"),
-        (CliKind::Codex, _) => script.push_str("codex"),
+        (CliKind::ClaudeCode, None, _) => script.push_str("claude"),
+        (CliKind::Codex, _, Some(command)) => {
+            let command_override = format!("mcp_servers.agentd.command={}", toml_string("sh"));
+            let args_override = format!(
+                "mcp_servers.agentd.args=[{}, {}]",
+                toml_string("-lc"),
+                toml_string(command)
+            );
+            script.push_str(CODEX_UNATTENDED_ARGS);
+            script.push_str(" -c ");
+            script.push_str(&sh_quote(&command_override));
+            script.push_str(" -c ");
+            script.push_str(&sh_quote(&args_override));
+            for tool in AGENTD_MCP_TOOLS {
+                let approval_override =
+                    format!("mcp_servers.agentd.tools.{tool}.approval_mode=\"approve\"");
+                script.push_str(" -c ");
+                script.push_str(&sh_quote(&approval_override));
+            }
+        }
+        (CliKind::Codex, _, None) => script.push_str(CODEX_UNATTENDED_ARGS),
+    }
+}
+
+fn toml_string(value: &str) -> String {
+    serde_json::to_string(value).expect("serializing a string cannot fail")
+}
+
+fn allocation_tmux_target(allocation: &AgentAllocation) -> Option<&str> {
+    ["tmuxTarget", "tmux_target", "address"]
+        .into_iter()
+        .find_map(|key| {
+            allocation
+                .runtime
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|target| !target.is_empty())
+}
+
+fn tmux_session_name(target: &str) -> &str {
+    target
+        .split_once(':')
+        .map_or(target, |(session, _)| session)
+}
+
+fn tmux_pane_address(target: &str) -> String {
+    if target.contains(':') {
+        target.to_string()
+    } else {
+        format!("{target}:0.0")
     }
 }
 
@@ -700,14 +820,23 @@ fn write_file(path: &Path, contents: &str) -> Result<(), BackendError> {
         .map_err(|e| BackendError::Recoverable(format!("failed to write {}: {e}", path.display())))
 }
 
-/// Append `.agentd-launcher-*.sh` to the worktree `.gitignore` if not already
-/// present (idempotent). A missing `.gitignore` is created.
-fn amend_gitignore(worktree: &Path, include_mcp_config: bool) -> Result<(), BackendError> {
-    let path = worktree.join(".gitignore");
+/// Append agentd-generated artifact patterns to git's local exclude file if not
+/// already present (idempotent). This keeps launcher artifacts out of status
+/// without changing the agent's tracked `.gitignore`.
+fn amend_git_exclude(worktree: &Path, include_mcp_config: bool) -> Result<(), BackendError> {
+    let path = git_exclude_path(worktree)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            BackendError::Recoverable(format!(
+                "failed to create git exclude directory {}: {e}",
+                parent.display()
+            ))
+        })?;
+    }
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     let mut content = existing;
-    for pattern in [LAUNCHER_GITIGNORE_PATTERN, MCP_CONFIG_GITIGNORE_PATTERN] {
-        if pattern == MCP_CONFIG_GITIGNORE_PATTERN && !include_mcp_config {
+    for pattern in [LAUNCHER_EXCLUDE_PATTERN, MCP_CONFIG_EXCLUDE_PATTERN] {
+        if pattern == MCP_CONFIG_EXCLUDE_PATTERN && !include_mcp_config {
             continue;
         }
         if content.lines().any(|line| line.trim() == pattern) {
@@ -720,4 +849,39 @@ fn amend_gitignore(worktree: &Path, include_mcp_config: bool) -> Result<(), Back
         content.push('\n');
     }
     write_file(&path, &content)
+}
+
+fn git_exclude_path(worktree: &Path) -> Result<PathBuf, BackendError> {
+    let dot_git = worktree.join(".git");
+    if dot_git.is_dir() || !dot_git.exists() {
+        return Ok(dot_git.join("info").join("exclude"));
+    }
+
+    let contents = std::fs::read_to_string(&dot_git).map_err(|e| {
+        BackendError::Recoverable(format!("failed to read {}: {e}", dot_git.display()))
+    })?;
+    let gitdir = contents
+        .strip_prefix("gitdir:")
+        .map(str::trim)
+        .ok_or_else(|| {
+            BackendError::Invariant(format!(
+                "{} is not a gitdir pointer file",
+                dot_git.display()
+            ))
+        })?;
+    let mut gitdir = PathBuf::from(gitdir);
+    if gitdir.is_relative() {
+        gitdir = worktree.join(gitdir);
+    }
+
+    let common_git = gitdir
+        .parent()
+        .and_then(|parent| {
+            (parent.file_name().and_then(|name| name.to_str()) == Some("worktrees"))
+                .then(|| parent.parent())
+                .flatten()
+        })
+        .map(Path::to_path_buf)
+        .unwrap_or(gitdir);
+    Ok(common_git.join("info").join("exclude"))
 }

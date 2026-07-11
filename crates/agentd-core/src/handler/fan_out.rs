@@ -10,8 +10,11 @@ use std::path::{Path, PathBuf};
 
 use crate::CoreError;
 use crate::engine::{EngineEvent, HandlerStep, ParkReason};
-use crate::handler::{Handler, HandlerCtx, sha256_hex, spawn_request};
-use crate::ports::DrawerHit;
+use crate::handler::{
+    Handler, HandlerCtx, append_agent_allocation_prompt_context, sha256_hex, spawn_request,
+    stage_agent_allocation,
+};
+use crate::ports::{AgentAllocation, AgentAllocationRequest, AgentAllocationStatus, DrawerHit};
 use crate::types::{AgentId, NodeId, Outcome, ReviewRunId, ReviewVerdict};
 
 #[derive(Debug)]
@@ -60,26 +63,16 @@ impl Handler for FanOutHandler {
             .insert_review_run(&run_id, &node_id, expected, round, &context_sha)
             .await?;
 
-        let reviewer_worktrees = reviewer_worktrees(ctx, &review_run_id, &roles).await?;
-        for reviewer in &reviewer_worktrees {
-            if let Some(key) = reviewer.release_key.as_deref() {
-                ctx.ports
-                    .store
-                    .set_review_worktree(&review_run_id, &reviewer.agent_id, &reviewer.worktree)
-                    .await
-                    .map_err(|err| {
-                        CoreError::Store(format!(
-                            "persist reviewer worktree {key} before spawn failed: {err}"
-                        ))
-                    })?;
-            }
-        }
+        let reviewer_worktrees =
+            reviewer_worktrees(ctx, &review_run_id, &roles, round, &context_sha).await?;
+        persist_reviewer_worktrees(ctx, &review_run_id, &reviewer_worktrees).await?;
 
         for reviewer in &reviewer_worktrees {
             let prompt = review_prompt(&ReviewPromptInput {
                 ctx,
                 review_run_id: &review_run_id,
                 reviewer_id: &reviewer.agent_id,
+                allocation: &reviewer.allocation,
                 round,
                 context_sha: &context_sha,
                 stance_query: stance_queries
@@ -95,25 +88,45 @@ impl Handler for FanOutHandler {
                     .map_or(&[][..], Vec::as_slice),
                 review_worktree: &reviewer.worktree,
             });
+            if reviewer.allocation.status == AgentAllocationStatus::Queued {
+                let base_prompt = queued_review_base_prompt(
+                    ctx,
+                    round,
+                    &context_sha,
+                    prompt_profiles
+                        .as_ref()
+                        .and_then(|profiles| profiles.get(&reviewer.role))
+                        .map(String::as_str),
+                    stance_queries
+                        .as_ref()
+                        .and_then(|queries| queries.get(&reviewer.role))
+                        .map(String::as_str),
+                    stance_packs
+                        .get(&reviewer.role)
+                        .map_or(&[][..], Vec::as_slice),
+                );
+                stage_agent_allocation(ctx, &reviewer.allocation);
+                stage_queued_fan_out_dispatch(
+                    ctx,
+                    &review_run_id,
+                    &reviewer.role,
+                    round,
+                    &context_sha,
+                    &base_prompt,
+                    &reviewer.worktree,
+                );
+                continue;
+            }
+            let request =
+                spawn_request(reviewer.agent_id.as_str(), Some(prompt), &reviewer.worktree);
             ctx.ports
                 .backend
-                .spawn(spawn_request(
-                    &reviewer.role,
-                    Some(prompt),
-                    &reviewer.worktree,
-                ))
+                .dispatch_allocated(request, &reviewer.allocation)
                 .await?;
+            stage_agent_allocation(ctx, &reviewer.allocation);
         }
 
-        ctx.stage(
-            "review_run_id",
-            serde_json::Value::String(review_run_id.as_str().to_string()),
-        );
-        ctx.stage("context_sha", serde_json::Value::String(context_sha));
-        ctx.stage(
-            "review_round",
-            serde_json::Value::Number(serde_json::Number::from(round)),
-        );
+        stage_review_run_context(ctx, &review_run_id, &context_sha, round);
         Ok(HandlerStep::Park(ParkReason::ReviewVerdicts {
             review_run_id,
             expected,
@@ -148,6 +161,9 @@ impl Handler for FanOutHandler {
                 },
             )
             .await?;
+        if let Some(drained) = ctx.ports.agent_allocator.release(&reviewer_id).await? {
+            stage_agent_allocation(ctx, &drained);
+        }
         release_reviewer_worktree(ctx, &review_run_id, &reviewer_id).await?;
         let collected = ctx.ports.store.count_verdicts(&review_run_id).await?;
         // Authoritative `expected` is the value stored at run() time, NOT a
@@ -187,6 +203,27 @@ impl Handler for FanOutHandler {
     }
 }
 
+async fn persist_reviewer_worktrees(
+    ctx: &HandlerCtx<'_>,
+    review_run_id: &ReviewRunId,
+    reviewer_worktrees: &[ReviewerWorktree],
+) -> Result<(), CoreError> {
+    for reviewer in reviewer_worktrees {
+        if let Some(key) = reviewer.release_key.as_deref() {
+            ctx.ports
+                .store
+                .set_review_worktree(review_run_id, &reviewer.agent_id, &reviewer.worktree)
+                .await
+                .map_err(|err| {
+                    CoreError::Store(format!(
+                        "persist reviewer worktree {key} before spawn failed: {err}"
+                    ))
+                })?;
+        }
+    }
+    Ok(())
+}
+
 fn review_worktree<'a>(ctx: &'a HandlerCtx<'_>) -> &'a Path {
     ctx.context
         .0
@@ -211,6 +248,7 @@ struct ReviewPromptInput<'a, 'ctx> {
     ctx: &'a HandlerCtx<'ctx>,
     review_run_id: &'a ReviewRunId,
     reviewer_id: &'a AgentId,
+    allocation: &'a AgentAllocation,
     round: u32,
     context_sha: &'a str,
     stance_query: Option<&'a str>,
@@ -224,6 +262,7 @@ fn review_prompt(input: &ReviewPromptInput<'_, '_>) -> String {
         ctx,
         review_run_id,
         reviewer_id,
+        allocation,
         round,
         context_sha,
         stance_query,
@@ -233,7 +272,31 @@ fn review_prompt(input: &ReviewPromptInput<'_, '_>) -> String {
     } = input;
     let mut prompt = base_review_prompt(ctx, round, context_sha);
     append_review_runtime_context(&mut prompt, ctx, review_worktree);
+    append_agent_allocation_prompt_context(&mut prompt, allocation);
     append_review_submission_context(&mut prompt, ctx, review_run_id, reviewer_id);
+    append_prompt_profile_and_stance(&mut prompt, prompt_profile, stance_query, stance_hits);
+    prompt
+}
+
+fn queued_review_base_prompt(
+    ctx: &HandlerCtx<'_>,
+    round: u32,
+    context_sha: &str,
+    prompt_profile: Option<&str>,
+    stance_query: Option<&str>,
+    stance_hits: &[DrawerHit],
+) -> String {
+    let mut prompt = base_review_prompt(ctx, round, context_sha);
+    append_prompt_profile_and_stance(&mut prompt, prompt_profile, stance_query, stance_hits);
+    prompt
+}
+
+fn append_prompt_profile_and_stance(
+    prompt: &mut String,
+    prompt_profile: Option<&str>,
+    stance_query: Option<&str>,
+    stance_hits: &[DrawerHit],
+) {
     if let Some(profile) = prompt_profile {
         let _ = writeln!(prompt);
         let _ = writeln!(prompt, "prompt_profile: {profile}");
@@ -250,7 +313,6 @@ fn review_prompt(input: &ReviewPromptInput<'_, '_>) -> String {
             }
         }
     }
-    prompt
 }
 
 fn append_review_runtime_context(
@@ -439,6 +501,7 @@ async fn stance_packs(
 struct ReviewerWorktree {
     role: String,
     agent_id: AgentId,
+    allocation: AgentAllocation,
     worktree: PathBuf,
     release_key: Option<String>,
 }
@@ -447,6 +510,8 @@ async fn reviewer_worktrees(
     ctx: &HandlerCtx<'_>,
     review_run_id: &ReviewRunId,
     roles: &[String],
+    round: u32,
+    context_sha: &str,
 ) -> Result<Vec<ReviewerWorktree>, CoreError> {
     let Some(source) = ctx
         .context
@@ -456,37 +521,167 @@ async fn reviewer_worktrees(
         .map(PathBuf::from)
     else {
         let fallback = review_worktree(ctx).to_path_buf();
-        return Ok(fallback_worktrees(roles, &fallback));
+        return allocated_worktrees(
+            ctx,
+            review_run_id,
+            roles,
+            None,
+            &fallback,
+            round,
+            context_sha,
+        )
+        .await;
     };
     let Some(allocator) = ctx.worktree_allocator() else {
-        return Ok(fallback_worktrees(roles, &source));
+        return allocated_worktrees(ctx, review_run_id, roles, None, &source, round, context_sha)
+            .await;
     };
 
+    allocated_worktrees(
+        ctx,
+        review_run_id,
+        roles,
+        Some((allocator, source.clone())),
+        &source,
+        round,
+        context_sha,
+    )
+    .await
+}
+
+async fn allocated_worktrees(
+    ctx: &HandlerCtx<'_>,
+    review_run_id: &ReviewRunId,
+    roles: &[String],
+    snapshot: Option<(&dyn crate::ports::WorktreeAllocator, PathBuf)>,
+    fallback: &Path,
+    round: u32,
+    context_sha: &str,
+) -> Result<Vec<ReviewerWorktree>, CoreError> {
     let mut out = Vec::with_capacity(roles.len());
     for role in roles {
-        let agent_id = AgentId::parsed(role);
-        let key = reviewer_worktree_key(review_run_id, &agent_id);
-        let worktree = allocator.allocate_snapshot(&key, &source).await?;
+        let allocation = allocate_reviewer(ctx, review_run_id, role, round, context_sha).await?;
+        let agent_id = allocation.agent_id.clone();
+        let (worktree, release_key) = if let Some((allocator, source)) = snapshot.as_ref() {
+            if allocation.status == AgentAllocationStatus::Queued {
+                (source.clone(), None)
+            } else {
+                let key = reviewer_worktree_key(review_run_id, &agent_id);
+                (
+                    allocator.allocate_snapshot(&key, source.as_path()).await?,
+                    Some(key),
+                )
+            }
+        } else {
+            (fallback.to_path_buf(), None)
+        };
         out.push(ReviewerWorktree {
             role: role.clone(),
             agent_id,
+            allocation,
             worktree,
-            release_key: Some(key),
+            release_key,
         });
     }
     Ok(out)
 }
 
-fn fallback_worktrees(roles: &[String], worktree: &Path) -> Vec<ReviewerWorktree> {
-    roles
-        .iter()
-        .map(|role| ReviewerWorktree {
-            role: role.clone(),
-            agent_id: AgentId::parsed(role),
-            worktree: worktree.to_path_buf(),
-            release_key: None,
+async fn allocate_reviewer(
+    ctx: &HandlerCtx<'_>,
+    review_run_id: &ReviewRunId,
+    role: &str,
+    round: u32,
+    context_sha: &str,
+) -> Result<AgentAllocation, CoreError> {
+    ctx.ports
+        .agent_allocator
+        .allocate(AgentAllocationRequest {
+            run_id: ctx.run_id.clone(),
+            node_id: NodeId::parsed(&ctx.node.id),
+            role: role.to_string(),
+            capability: ctx.node_attr("capability").map(ToString::to_string),
+            task: serde_json::json!({
+                "handler": "parallel.fan_out",
+                "kind": "workflow_fan_out_reviewer",
+                "runId": ctx.run_id.as_str(),
+                "nodeId": ctx.node.id,
+                "reviewRunId": review_run_id.as_str(),
+                "requestedRole": role,
+                "round": round,
+                "contextSha": context_sha,
+            }),
         })
-        .collect()
+        .await
+}
+
+fn stage_review_run_context(
+    ctx: &mut HandlerCtx<'_>,
+    review_run_id: &ReviewRunId,
+    context_sha: &str,
+    round: u32,
+) {
+    ctx.stage(
+        "review_run_id",
+        serde_json::Value::String(review_run_id.as_str().to_string()),
+    );
+    ctx.stage(
+        "context_sha",
+        serde_json::Value::String(context_sha.to_string()),
+    );
+    ctx.stage(
+        "review_round",
+        serde_json::Value::Number(serde_json::Number::from(round)),
+    );
+}
+
+fn stage_queued_fan_out_dispatch(
+    ctx: &mut HandlerCtx<'_>,
+    review_run_id: &ReviewRunId,
+    role: &str,
+    round: u32,
+    context_sha: &str,
+    base_prompt: &str,
+    source_worktree: &Path,
+) {
+    let mut root = ctx
+        .staged_updates()
+        .get("agentd_queued_workflow_dispatches")
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut node_entry = root
+        .remove(&ctx.node.id)
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    let mut reviewers = node_entry
+        .remove("reviewers")
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    reviewers.insert(
+        role.to_string(),
+        serde_json::json!({
+            "handler": "parallel.fan_out",
+            "reviewRunId": review_run_id.as_str(),
+            "requestedRole": role,
+            "round": round,
+            "contextSha": context_sha,
+            "basePrompt": base_prompt,
+            "sourceWorktree": source_worktree.to_string_lossy(),
+        }),
+    );
+    node_entry.insert(
+        "handler".to_string(),
+        serde_json::Value::String("parallel.fan_out".to_string()),
+    );
+    node_entry.insert(
+        "reviewers".to_string(),
+        serde_json::Value::Object(reviewers),
+    );
+    root.insert(ctx.node.id.clone(), serde_json::Value::Object(node_entry));
+    ctx.stage(
+        "agentd_queued_workflow_dispatches",
+        serde_json::Value::Object(root),
+    );
 }
 
 fn reviewer_worktree_key(review_run_id: &ReviewRunId, reviewer_id: &AgentId) -> String {

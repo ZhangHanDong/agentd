@@ -500,6 +500,7 @@ async fn engine_runs_canonical_flow_against_sqlite_store() {
         store: &store,
         mempal: &mempal,
         clock: &clock,
+        agent_allocator: &agentd_core::ports::DirectAgentAllocator,
     };
     let engine = Engine::new(&graph, &registry, ports, "sha-test");
     let run = RunId::from_string("run-1");

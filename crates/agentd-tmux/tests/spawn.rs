@@ -50,6 +50,14 @@ fn req_with_mcp_stdio(worktree: &Path, strategy: LaunchStrategy) -> SpawnRequest
     request
 }
 
+fn codex_dangerous_bypass_flag() -> String {
+    ["--dangerously-bypass", "approvals-and-sandbox"].join("-")
+}
+
+fn git_exclude_path(worktree: &Path) -> std::path::PathBuf {
+    worktree.join(".git").join("info").join("exclude")
+}
+
 #[tokio::test]
 async fn spawn_returns_handle_with_parsed_pane_id() {
     let rec = Arc::new(RecordingCommandRunner::new());
@@ -100,7 +108,7 @@ async fn spawn_returns_handle_with_parsed_pane_id() {
 }
 
 #[tokio::test]
-async fn spawn_writes_launcher_and_amends_gitignore() {
+async fn spawn_writes_launcher_and_amends_git_exclude() {
     let rec = Arc::new(RecordingCommandRunner::new());
     rec.push_output(ok("", 1));
     rec.push_output(ok("", 0));
@@ -121,11 +129,14 @@ async fn spawn_writes_launcher_and_amends_gitignore() {
         "launcher execs the claude CLI: {script}"
     );
 
-    let gitignore =
-        std::fs::read_to_string(dir.path().join(".gitignore")).expect("read .gitignore");
+    let exclude = std::fs::read_to_string(git_exclude_path(dir.path())).expect("read git exclude");
     assert!(
-        gitignore.contains(".agentd-launcher-*.sh"),
-        "gitignore should exclude launcher scripts, got: {gitignore:?}"
+        exclude.contains(".agentd-launcher-*.sh"),
+        "git exclude should exclude launcher scripts, got: {exclude:?}"
+    );
+    assert!(
+        !dir.path().join(".gitignore").exists(),
+        "launcher artifacts must not modify tracked .gitignore"
     );
 }
 
@@ -397,7 +408,7 @@ async fn spawn_rejects_invalid_env_key() {
 }
 
 #[tokio::test]
-async fn spawn_twice_amends_gitignore_once() {
+async fn spawn_twice_amends_git_exclude_once() {
     let dir = tempfile::tempdir().expect("tempdir");
     for pane in ["%1 1\n", "%2 2\n"] {
         let rec = Arc::new(RecordingCommandRunner::new());
@@ -409,17 +420,20 @@ async fn spawn_twice_amends_gitignore_once() {
             .await
             .expect("spawn succeeds");
     }
-    let gitignore =
-        std::fs::read_to_string(dir.path().join(".gitignore")).expect("read .gitignore");
-    let count = gitignore
+    let exclude = std::fs::read_to_string(git_exclude_path(dir.path())).expect("read git exclude");
+    let count = exclude
         .lines()
         .filter(|line| line.trim() == ".agentd-launcher-*.sh")
         .count();
-    assert_eq!(count, 1, "pattern written exactly once: {gitignore:?}");
+    assert_eq!(count, 1, "pattern written exactly once: {exclude:?}");
+    assert!(
+        !dir.path().join(".gitignore").exists(),
+        "launcher artifacts must not modify tracked .gitignore"
+    );
 }
 
 #[tokio::test]
-async fn spawn_gitignore_excludes_launcher_and_mcp_config_artifacts() {
+async fn spawn_git_exclude_excludes_launcher_and_mcp_config_artifacts() {
     let dir = tempfile::tempdir().expect("tempdir");
     for pane in ["%1 1\n", "%2 2\n"] {
         let rec = Arc::new(RecordingCommandRunner::new());
@@ -432,23 +446,61 @@ async fn spawn_gitignore_excludes_launcher_and_mcp_config_artifacts() {
             .expect("spawn succeeds");
     }
 
-    let gitignore =
-        std::fs::read_to_string(dir.path().join(".gitignore")).expect("read .gitignore");
-    let launcher_count = gitignore
+    let exclude = std::fs::read_to_string(git_exclude_path(dir.path())).expect("read git exclude");
+    let launcher_count = exclude
         .lines()
         .filter(|line| line.trim() == ".agentd-launcher-*.sh")
         .count();
-    let mcp_config_count = gitignore
+    let mcp_config_count = exclude
         .lines()
         .filter(|line| line.trim() == ".agentd-mcp-*.json")
         .count();
     assert_eq!(
         launcher_count, 1,
-        "launcher pattern written exactly once: {gitignore:?}"
+        "launcher pattern written exactly once: {exclude:?}"
     );
     assert_eq!(
         mcp_config_count, 1,
-        "mcp config pattern written exactly once: {gitignore:?}"
+        "mcp config pattern written exactly once: {exclude:?}"
+    );
+    assert!(
+        !dir.path().join(".gitignore").exists(),
+        "launcher artifacts must not modify tracked .gitignore"
+    );
+}
+
+#[tokio::test]
+async fn spawn_linked_worktree_gitdir_pointer_uses_common_git_exclude() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let common_git = dir.path().join(".git");
+    let linked_gitdir = common_git.join("worktrees").join("wt-task");
+    std::fs::create_dir_all(&linked_gitdir).expect("create linked gitdir");
+    let worktree = dir.path().join("wt-task");
+    std::fs::create_dir_all(&worktree).expect("create worktree");
+    std::fs::write(
+        worktree.join(".git"),
+        format!("gitdir: {}\n", linked_gitdir.display()),
+    )
+    .expect("write gitdir pointer");
+
+    let rec = Arc::new(RecordingCommandRunner::new());
+    rec.push_output(ok("", 1));
+    rec.push_output(ok("", 0));
+    rec.push_output(ok("%1 1\n", 0));
+    backend(&rec)
+        .spawn(req(&worktree, LaunchStrategy::Direct))
+        .await
+        .expect("spawn succeeds");
+
+    let exclude =
+        std::fs::read_to_string(common_git.join("info").join("exclude")).expect("read exclude");
+    assert!(
+        exclude.contains(".agentd-launcher-*.sh"),
+        "common git exclude should hide launcher: {exclude:?}"
+    );
+    assert!(
+        !worktree.join(".gitignore").exists(),
+        "linked worktree tracked .gitignore must not be modified"
     );
 }
 
@@ -467,7 +519,118 @@ async fn spawn_launcher_execs_codex_for_codex_cli() {
     let script = std::fs::read_to_string(dir.path().join(".agentd-launcher-claude-impl-a.sh"))
         .expect("read launcher");
     assert!(
-        script.contains("exec codex"),
+        script.contains("exec codex --ask-for-approval never --sandbox danger-full-access"),
         "codex CLI launcher: {script}"
     );
+    let dangerous_flag = codex_dangerous_bypass_flag();
+    assert!(
+        !script.contains(dangerous_flag.as_str()),
+        "managed Codex launch must not disable sandboxing: {script}"
+    );
+}
+
+#[tokio::test]
+async fn spawn_launcher_configures_codex_mcp_with_config_overrides_when_stdio_command_is_present() {
+    let rec = Arc::new(RecordingCommandRunner::new());
+    rec.push_output(ok("", 1));
+    rec.push_output(ok("", 0));
+    rec.push_output(ok("%1 1\n", 0));
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut request = req_with_mcp_stdio(dir.path(), LaunchStrategy::Direct);
+    request.cli = CliKind::Codex;
+    backend(&rec).spawn(request).await.expect("spawn succeeds");
+
+    let launcher = dir.path().join(".agentd-launcher-claude-impl-a.sh");
+    let script = std::fs::read_to_string(&launcher).expect("read launcher");
+    assert!(
+        script.contains("exec codex --ask-for-approval never --sandbox danger-full-access"),
+        "codex CLI launcher: {script}"
+    );
+    let dangerous_flag = codex_dangerous_bypass_flag();
+    assert!(
+        !script.contains(dangerous_flag.as_str()),
+        "managed Codex launch must not disable sandboxing: {script}"
+    );
+    assert!(
+        script.contains("-c 'mcp_servers.agentd.command=\"sh\"'"),
+        "codex launcher should configure agentd MCP command: {script}"
+    );
+    assert!(
+        script.contains(
+            "-c 'mcp_servers.agentd.args=[\"-lc\", \"agentd --db-path '\\''/tmp/agentd db.sqlite'\\'' mcp-stdio\"]'"
+        ),
+        "codex launcher should configure agentd MCP args: {script}"
+    );
+    for tool in [
+        "assign_task",
+        "submit_outcome",
+        "submit_review",
+        "check_inbox",
+        "query_run",
+    ] {
+        let approval_override =
+            format!("-c 'mcp_servers.agentd.tools.{tool}.approval_mode=\"approve\"'");
+        assert!(
+            script.contains(&approval_override),
+            "codex launcher should approve agentd MCP tool {tool}: {script}"
+        );
+    }
+    assert!(
+        !script.contains("CODEX_HOME="),
+        "launcher should preserve user's Codex home/auth: {script}"
+    );
+    assert!(
+        !dir.path().join(".agentd-mcp-claude-impl-a.json").exists(),
+        "codex launcher should not write a Claude-style MCP JSON config"
+    );
+}
+
+#[tokio::test]
+async fn spawn_launcher_execs_plain_codex_without_stdio_command() {
+    let rec = Arc::new(RecordingCommandRunner::new());
+    rec.push_output(ok("", 1));
+    rec.push_output(ok("", 0));
+    rec.push_output(ok("%1 1\n", 0));
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut request = req(dir.path(), LaunchStrategy::Direct);
+    request.cli = CliKind::Codex;
+    backend(&rec).spawn(request).await.expect("spawn succeeds");
+
+    let script = std::fs::read_to_string(dir.path().join(".agentd-launcher-claude-impl-a.sh"))
+        .expect("read launcher");
+    assert!(
+        script.contains("exec codex --ask-for-approval never --sandbox danger-full-access\n"),
+        "plain codex CLI launcher: {script}"
+    );
+    assert!(
+        !script.contains("mcp_servers.agentd"),
+        "plain codex launcher should not configure MCP: {script}"
+    );
+}
+
+#[tokio::test]
+async fn spawn_rejects_empty_mcp_stdio_command_for_codex() {
+    let rec = Arc::new(RecordingCommandRunner::new());
+    rec.push_output(ok("", 1));
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut request = req(dir.path(), LaunchStrategy::Direct);
+    request.cli = CliKind::Codex;
+    request
+        .env_overrides
+        .insert("AGENTD_MCP_STDIO_CMD".to_string(), "   ".to_string());
+    let err = backend(&rec)
+        .spawn(request)
+        .await
+        .expect_err("empty MCP command is rejected before launch");
+    match err {
+        CoreError::Backend(message) => assert!(
+            message.contains("AGENTD_MCP_STDIO_CMD") && message.contains("cannot be empty"),
+            "error should name the empty MCP command: {message}"
+        ),
+        other => panic!("expected CoreError::Backend, got {other:?}"),
+    }
+    assert_eq!(rec.calls().len(), 1, "rejected before new-session");
 }

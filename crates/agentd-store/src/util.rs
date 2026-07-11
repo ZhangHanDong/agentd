@@ -17,6 +17,18 @@ pub(crate) fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+/// Current unix time in milliseconds (saturating; never panics on a backwards
+/// clock). Message/inbox compatibility uses agent-chat-style millisecond `ts`
+/// values, unlike most execution rows which store seconds.
+#[must_use]
+pub(crate) fn now_unix_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_millis()).ok())
+        .unwrap_or(0)
+}
+
 pub(crate) fn run_status_str(s: RunStatus) -> &'static str {
     match s {
         RunStatus::Running => "running",

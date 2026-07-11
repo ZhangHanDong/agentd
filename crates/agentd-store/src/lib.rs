@@ -10,16 +10,24 @@
 // Production-only lint opt-ins. Test files don't pick these up.
 #![warn(clippy::unwrap_used, clippy::panic)]
 
+pub mod agent_chat_import;
+pub mod agent_chat_task_graph_repo;
+pub mod agent_chat_task_repo;
+pub mod agent_repo;
+pub mod agent_scheduler_repo;
 pub mod artifact_repo;
 pub mod checkpoint_repo;
 pub mod error;
 pub mod event_repo;
 pub mod human_wait_repo;
+pub mod matrix_bridge_repo;
+pub mod message_repo;
 pub mod outbox_repo;
 pub mod outcome_repo;
 pub mod paths;
 pub mod pool;
 pub mod project_repo;
+pub mod relay_repo;
 pub mod review_repo;
 pub mod run_repo;
 pub mod store;

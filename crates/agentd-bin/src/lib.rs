@@ -10,10 +10,14 @@ pub mod cli;
 pub mod clock;
 pub mod daemon;
 pub mod host;
+pub mod matrix_bridge;
 pub mod mempal;
 pub mod stdio_mcp;
 
-pub use cli::{AgentdCli, AgentdCommand, CleanupWorktreesArgs, DaemonConfig};
+pub use cli::{
+    AgentdCli, AgentdCommand, CleanupWorktreesArgs, DaemonConfig, MatrixBridgeOnceArgs,
+    MatrixClientBridgePreflightArgs, MatrixClientBridgeServiceArgs,
+};
 pub use clock::SystemClock;
 pub use host::ProductionRunHost;
 pub use mempal::OfflineMempal;

@@ -21,7 +21,7 @@ impl Default for ReadyPatterns {
         // These are defaults, not law — operators override per §4.7.
         Self {
             claude_code: vec!["? for shortcuts".to_string(), "auto mode on".to_string()],
-            codex: vec!["? for shortcuts".to_string()],
+            codex: vec!["? for shortcuts".to_string(), "\u{203a} ".to_string()],
         }
     }
 }
@@ -62,7 +62,7 @@ impl Default for Config {
         Self {
             ready_patterns: ReadyPatterns::default(),
             inject_delay: Duration::from_millis(60),
-            ready_deadline: Duration::from_secs(15),
+            ready_deadline: Duration::from_secs(45),
             ready_probe_initial: Duration::from_millis(300),
             ready_probe_max: Duration::from_secs(2),
             status_diff_gap: Duration::from_millis(800),

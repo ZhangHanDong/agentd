@@ -106,6 +106,16 @@ impl InMemoryStore {
             .and_then(|r| r.worktree_path.clone())
     }
 
+    /// Test-only list of task-run ids in insertion order-insensitive form.
+    #[must_use]
+    pub fn task_run_ids(&self) -> Vec<TaskRunId> {
+        self.lock()
+            .task_runs
+            .keys()
+            .map(|id| TaskRunId::from_string(id.clone()))
+            .collect()
+    }
+
     /// Test-only read of a `task_run`'s persisted agent id.
     #[must_use]
     pub fn task_agent(&self, task_run_id: &TaskRunId) -> Option<AgentId> {

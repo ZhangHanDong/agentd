@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use agentd_core::CoreError;
-use agentd_core::ports::{AgentBackend, WorktreeAllocator};
+use agentd_core::ports::{AgentAllocation, AgentAllocationStatus, AgentBackend, WorktreeAllocator};
 use agentd_core::types::{
     AgentHandle, AgentId, BackendKind, CliKind, LaunchStrategy, SpawnRequest,
 };
@@ -90,6 +90,19 @@ fn req_with_worktree(worktree: &str) -> SpawnRequest {
     }
 }
 
+fn routed_allocation() -> AgentAllocation {
+    AgentAllocation {
+        requested_role: "coding".to_string(),
+        agent_id: AgentId::parsed("implementer"),
+        status: AgentAllocationStatus::Routed,
+        tier: Some("medium".to_string()),
+        reservation_id: Some("sched_res_1".to_string()),
+        ticket: None,
+        provisioned_name: None,
+        runtime: serde_json::json!({"tmuxTarget": "agentd-implementer:0.0"}),
+    }
+}
+
 #[tokio::test]
 async fn pool_allocates_distinct_worktrees() {
     let pool = WorktreePool::new(Arc::new(FakeProvider::default()));
@@ -145,6 +158,29 @@ async fn pooled_backend_passes_through_explicit_worktree() {
         recorder.last().expect("recorded"),
         PathBuf::from("/explicit/path"),
         "an explicit worktree passes through unchanged"
+    );
+}
+
+#[tokio::test]
+async fn pooled_backend_forwards_routed_dispatch_without_allocating_unused_worktree() {
+    let recorder = SharedRecorder::default();
+    let provider = Arc::new(FakeProvider::default());
+    let backend = PooledBackend::new(recorder.clone(), WorktreePool::new(provider.clone()));
+
+    backend
+        .dispatch_allocated(req_with_worktree("."), &routed_allocation())
+        .await
+        .expect("dispatch");
+
+    assert_eq!(
+        recorder.last().expect("recorded"),
+        PathBuf::from("."),
+        "routed existing-pane dispatch should not allocate an unused worktree"
+    );
+    assert_eq!(recorder.dispatches(), 1, "inner dispatch path was used");
+    assert!(
+        provider.list().await.expect("list").is_empty(),
+        "no pool worktree was allocated for routed reuse"
     );
 }
 
@@ -311,11 +347,16 @@ async fn pool_release_rejects_mismatched_task_keyed_path() {
 #[derive(Default, Clone)]
 struct SharedRecorder {
     last_worktree: Arc<Mutex<Option<PathBuf>>>,
+    dispatches: Arc<Mutex<usize>>,
 }
 
 impl SharedRecorder {
     fn last(&self) -> Option<PathBuf> {
         self.last_worktree.lock().expect("lock").clone()
+    }
+
+    fn dispatches(&self) -> usize {
+        *self.dispatches.lock().expect("lock")
     }
 }
 
@@ -323,6 +364,24 @@ impl SharedRecorder {
 impl AgentBackend for SharedRecorder {
     async fn spawn(&self, req: SpawnRequest) -> Result<AgentHandle, CoreError> {
         *self.last_worktree.lock().expect("lock") = Some(req.worktree.clone());
+        Ok(AgentHandle {
+            agent_id: req.agent_id,
+            backend: BackendKind::Tmux,
+            address: "test".into(),
+            pane_id: None,
+            pid: None,
+            session_name: "s".into(),
+            spawned_at: SystemTime::UNIX_EPOCH,
+        })
+    }
+
+    async fn dispatch_allocated(
+        &self,
+        req: SpawnRequest,
+        _allocation: &AgentAllocation,
+    ) -> Result<AgentHandle, CoreError> {
+        *self.last_worktree.lock().expect("lock") = Some(req.worktree.clone());
+        *self.dispatches.lock().expect("lock") += 1;
         Ok(AgentHandle {
             agent_id: req.agent_id,
             backend: BackendKind::Tmux,

@@ -46,6 +46,7 @@ impl Harness {
             store: &self.store,
             mempal: &self.mempal,
             clock: &self.clock,
+            agent_allocator: &agentd_core::ports::DirectAgentAllocator,
         }
     }
 

@@ -4,7 +4,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use agentd_core::CoreError;
-use agentd_core::ports::AgentBackend;
+use agentd_core::ports::{AgentAllocation, AgentBackend};
 use agentd_core::types::{AgentHandle, SpawnRequest};
 
 use crate::DaemonConfig;
@@ -39,8 +39,19 @@ impl McpStdioContextBackend {
 #[async_trait::async_trait]
 impl AgentBackend for McpStdioContextBackend {
     async fn spawn(&self, mut req: SpawnRequest) -> Result<AgentHandle, CoreError> {
-        inject_context(&mut req, &self.command);
+        let command = command_for_agent(&self.command, req.agent_id.as_str());
+        inject_context(&mut req, &command);
         self.inner.spawn(req).await
+    }
+
+    async fn dispatch_allocated(
+        &self,
+        mut req: SpawnRequest,
+        allocation: &AgentAllocation,
+    ) -> Result<AgentHandle, CoreError> {
+        let command = command_for_agent(&self.command, req.agent_id.as_str());
+        inject_context(&mut req, &command);
+        self.inner.dispatch_allocated(req, allocation).await
     }
 }
 
@@ -64,6 +75,8 @@ pub fn mcp_stdio_command(agentd_exe: &Path, config: &DaemonConfig, daemon_cwd: &
         "--log-level".to_string(),
         sh_quote("error"),
         "mcp-stdio".to_string(),
+        "--proxy-url".to_string(),
+        sh_quote(&format!("http://127.0.0.1:{}", config.port)),
     ];
     parts.join(" ")
 }
@@ -83,6 +96,10 @@ fn inject_context(req: &mut SpawnRequest, command: &str) {
         Some(existing) if !existing.trim().is_empty() => format!("{existing}\n\n{block}"),
         _ => block,
     });
+}
+
+fn command_for_agent(command: &str, agent_id: &str) -> String {
+    format!("{command} --agent-id {}", sh_quote(agent_id))
 }
 
 fn prompt_block(command: &str) -> String {

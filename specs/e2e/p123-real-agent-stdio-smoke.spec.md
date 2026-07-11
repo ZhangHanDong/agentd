@@ -21,8 +21,8 @@ step over that wiring.
 - The config file uses a single server named `agentd` with Claude's project
   `.mcp.json` shape: `mcpServers.agentd.type = "stdio"`, command `sh`, and
   args `["-lc", <AGENTD_MCP_STDIO_CMD>]`.
-- The generated MCP config file is excluded from git alongside the launcher
-  script.
+- The generated MCP config file is excluded from git via local `info/exclude`
+  alongside the launcher script, without modifying tracked `.gitignore`.
 - Absence of `AGENTD_MCP_STDIO_CMD` keeps existing tmux launcher behavior.
 
 ## Boundaries
@@ -58,11 +58,12 @@ Scenario: Claude launcher loads a per-spawn agentd MCP config
 Scenario: MCP config artifacts are excluded from git
   Test:
     Package: agentd-tmux
-    Filter: spawn_gitignore_excludes_launcher_and_mcp_config_artifacts
+    Filter: spawn_git_exclude_excludes_launcher_and_mcp_config_artifacts
   Given a Claude Code `SpawnRequest` contains `AGENTD_MCP_STDIO_CMD`
   When `TmuxBackend::spawn` succeeds twice in the same worktree
-  Then `.gitignore` contains exactly one `.agentd-launcher-*.sh` line
-  And `.gitignore` contains exactly one `.agentd-mcp-*.json` line
+  Then git `info/exclude` contains exactly one `.agentd-launcher-*.sh` line
+  And git `info/exclude` contains exactly one `.agentd-mcp-*.json` line
+  And tracked `.gitignore` is not created or modified
 
 Scenario: Existing no-MCP launcher behavior is preserved
   Test:

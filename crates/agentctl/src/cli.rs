@@ -15,18 +15,212 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
+    /// Agent registry and lifecycle operations.
+    #[command(subcommand)]
+    Agent(AgentCmd),
     /// Workflow (`.dot`) operations.
     #[command(subcommand)]
     Flow(FlowCmd),
     /// Run operations (start a standalone Path-B workflow run).
     #[command(subcommand)]
     Run(RunCmd),
+    /// Agent-chat replacement parity operations.
+    #[command(subcommand)]
+    Parity(ParityCmd),
 }
 
 #[derive(Debug, Subcommand)]
 pub enum RunCmd {
     /// Start a workflow run from a local issue/spec (standalone, Path B).
     Start(RunStartArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AgentCmd {
+    /// List registered agents.
+    Ls(AgentListArgs),
+    /// Inspect one registered agent.
+    Inspect(AgentInspectArgs),
+    /// Inspect one registered agent's launch environment profile.
+    LaunchEnv(AgentLaunchEnvArgs),
+    /// Start one registered agent.
+    Start(AgentStartArgs),
+    /// Stop one registered agent runtime and mark it offline.
+    Down(AgentDownArgs),
+    /// Rebind one registered agent from its stored runtime target.
+    Rebind(AgentRebindArgs),
+    /// Record a runtime observation for one agent.
+    Runtime(AgentRuntimeArgs),
+    /// Register or update an agent.
+    Register(AgentRegisterArgs),
+    /// Send an agent heartbeat.
+    Heartbeat(AgentHeartbeatArgs),
+    /// Mark an agent offline.
+    Offline(AgentOfflineArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AgentListArgs {
+    /// The agentd daemon base URL.
+    #[arg(long, default_value = "http://127.0.0.1:8787")]
+    pub daemon_url: String,
+    /// Operator bearer token. Falls back to `AGENTD_API_TOKEN`.
+    #[arg(long)]
+    pub api_token: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct AgentInspectArgs {
+    /// Agent name.
+    pub name: String,
+    /// The agentd daemon base URL.
+    #[arg(long, default_value = "http://127.0.0.1:8787")]
+    pub daemon_url: String,
+    /// Operator bearer token. Falls back to `AGENTD_API_TOKEN`.
+    #[arg(long)]
+    pub api_token: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct AgentLaunchEnvArgs {
+    /// Agent name.
+    pub name: String,
+    /// The agentd daemon base URL.
+    #[arg(long, default_value = "http://127.0.0.1:8787")]
+    pub daemon_url: String,
+    /// Operator bearer token. Falls back to `AGENTD_API_TOKEN`.
+    #[arg(long)]
+    pub api_token: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct AgentStartArgs {
+    /// Agent name.
+    pub name: String,
+    /// The agentd daemon base URL.
+    #[arg(long, default_value = "http://127.0.0.1:8787")]
+    pub daemon_url: String,
+    /// Operator bearer token. Falls back to `AGENTD_API_TOKEN`.
+    #[arg(long)]
+    pub api_token: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct AgentDownArgs {
+    /// Agent name.
+    pub name: String,
+    /// The agentd daemon base URL.
+    #[arg(long, default_value = "http://127.0.0.1:8787")]
+    pub daemon_url: String,
+    /// Operator bearer token. Falls back to `AGENTD_API_TOKEN`.
+    #[arg(long)]
+    pub api_token: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct AgentRebindArgs {
+    /// Agent name.
+    pub name: String,
+    /// The agentd daemon base URL.
+    #[arg(long, default_value = "http://127.0.0.1:8787")]
+    pub daemon_url: String,
+    /// Operator bearer token. Falls back to `AGENTD_API_TOKEN`.
+    #[arg(long)]
+    pub api_token: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct AgentRuntimeArgs {
+    /// Agent name.
+    pub name: String,
+    /// Mark the agent as blocked.
+    #[arg(long)]
+    pub blocked: bool,
+    #[arg(long)]
+    pub reason: Option<String>,
+    #[arg(long)]
+    pub active_now: Option<bool>,
+    #[arg(long)]
+    pub active_duration_sec: Option<i64>,
+    #[arg(long)]
+    pub idle_duration_sec: Option<i64>,
+    #[arg(long)]
+    pub last_tmux_activity_sec: Option<i64>,
+    #[arg(long)]
+    pub workspace_path: Option<String>,
+    #[arg(long)]
+    pub mcp_present: Option<bool>,
+    /// The agentd daemon base URL.
+    #[arg(long, default_value = "http://127.0.0.1:8787")]
+    pub daemon_url: String,
+    /// Per-agent token. Falls back to `AGENTD_AGENT_TOKEN` or `AGENTCHAT_AGENT_TOKEN`.
+    #[arg(long)]
+    pub agent_token: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct AgentRegisterArgs {
+    /// Agent name.
+    pub name: String,
+    #[arg(long)]
+    pub role: Option<String>,
+    #[arg(long)]
+    pub capability: Option<String>,
+    #[arg(long)]
+    pub runtime: Option<String>,
+    #[arg(long)]
+    pub model: Option<String>,
+    #[arg(long)]
+    pub tmux_target: Option<String>,
+    #[arg(long)]
+    pub home_dir: Option<String>,
+    #[arg(long)]
+    pub workdir: Option<String>,
+    #[arg(long)]
+    pub state_dir: Option<String>,
+    #[arg(long)]
+    pub server: Option<String>,
+    /// The agentd daemon base URL.
+    #[arg(long, default_value = "http://127.0.0.1:8787")]
+    pub daemon_url: String,
+    /// Per-agent token. Falls back to `AGENTD_AGENT_TOKEN` or `AGENTCHAT_AGENT_TOKEN`.
+    #[arg(long)]
+    pub agent_token: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct AgentHeartbeatArgs {
+    /// Agent name.
+    pub name: String,
+    #[arg(long)]
+    pub server: Option<String>,
+    #[arg(long)]
+    pub tmux_target: Option<String>,
+    #[arg(long)]
+    pub workspace_path: Option<String>,
+    /// The agentd daemon base URL.
+    #[arg(long, default_value = "http://127.0.0.1:8787")]
+    pub daemon_url: String,
+    /// Per-agent token. Falls back to `AGENTD_AGENT_TOKEN` or `AGENTCHAT_AGENT_TOKEN`.
+    #[arg(long)]
+    pub agent_token: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct AgentOfflineArgs {
+    /// Agent name.
+    pub name: String,
+    #[arg(long)]
+    pub reason: Option<String>,
+    /// Keep the agent's tmux target while marking it offline.
+    #[arg(long)]
+    pub no_clear_tmux: bool,
+    /// The agentd daemon base URL.
+    #[arg(long, default_value = "http://127.0.0.1:8787")]
+    pub daemon_url: String,
+    /// Per-agent token. Falls back to `AGENTD_AGENT_TOKEN` or `AGENTCHAT_AGENT_TOKEN`.
+    #[arg(long)]
+    pub agent_token: Option<String>,
 }
 
 /// Which standalone Path-B workflow to run.
@@ -123,6 +317,103 @@ pub struct RunStartArgs {
     /// Validate + print the resolved plan without launching a live run.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ParityCmd {
+    /// Audit the agent-chat replacement parity map.
+    Audit(ParityAuditArgs),
+    /// Plan or execute an agent-chat agents.json import.
+    ImportAgents(ParityAgentImportArgs),
+    /// Compare agent-chat agents.json against an agentd `SQLite` database.
+    ShadowAgents(ParityAgentShadowArgs),
+    /// Plan or execute an agent-chat messages/groups/cursors import.
+    ImportMessages(ParityMessageImportArgs),
+    /// Compare agent-chat messages.json against an agentd `SQLite` database.
+    ShadowMessages(ParityMessageShadowArgs),
+    /// Plan or execute an agent-chat `tasks/task_graphs` import.
+    ImportTasks(ParityTaskImportArgs),
+    /// Compare agent-chat `tasks/task_graphs` JSON against an agentd `SQLite` database.
+    ShadowTasks(ParityTaskShadowArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ParityAuditArgs {
+    /// Path to the checked-out agent-chat repository.
+    #[arg(long)]
+    pub agent_chat: PathBuf,
+    /// Path to the parity map Markdown file.
+    #[arg(long, default_value = "docs/parity/agent-chat-capability-map.md")]
+    pub map: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct ParityAgentImportArgs {
+    /// Path to the checked-out agent-chat repository.
+    #[arg(long)]
+    pub agent_chat: PathBuf,
+    /// Path to the target agentd `SQLite` database.
+    #[arg(long)]
+    pub db_path: PathBuf,
+    /// Execute the import. Without this flag the command is a dry-run plan.
+    #[arg(long)]
+    pub execute: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ParityAgentShadowArgs {
+    /// Path to the checked-out agent-chat repository.
+    #[arg(long)]
+    pub agent_chat: PathBuf,
+    /// Path to the target agentd `SQLite` database.
+    #[arg(long)]
+    pub db_path: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct ParityMessageImportArgs {
+    /// Path to the checked-out agent-chat repository.
+    #[arg(long)]
+    pub agent_chat: PathBuf,
+    /// Path to the target agentd `SQLite` database.
+    #[arg(long)]
+    pub db_path: PathBuf,
+    /// Execute the import. Without this flag the command is a dry-run plan.
+    #[arg(long)]
+    pub execute: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ParityMessageShadowArgs {
+    /// Path to the checked-out agent-chat repository.
+    #[arg(long)]
+    pub agent_chat: PathBuf,
+    /// Path to the target agentd `SQLite` database.
+    #[arg(long)]
+    pub db_path: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct ParityTaskImportArgs {
+    /// Path to the checked-out agent-chat repository.
+    #[arg(long)]
+    pub agent_chat: PathBuf,
+    /// Path to the target agentd `SQLite` database.
+    #[arg(long)]
+    pub db_path: PathBuf,
+    /// Execute the import. Without this flag the command is a dry-run plan.
+    #[arg(long)]
+    pub execute: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ParityTaskShadowArgs {
+    /// Path to the checked-out agent-chat repository.
+    #[arg(long)]
+    pub agent_chat: PathBuf,
+    /// Path to the target agentd `SQLite` database.
+    #[arg(long)]
+    pub db_path: PathBuf,
 }
 
 #[derive(Debug, Subcommand)]

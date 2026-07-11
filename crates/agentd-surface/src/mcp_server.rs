@@ -8,7 +8,10 @@ use serde_json::Value;
 
 use crate::error::SurfaceError;
 use crate::host::RunHost;
-use crate::tools::{assign_task, check_inbox, query_run, submit_outcome, submit_review};
+use crate::tools::{
+    assign_task, check_group, check_inbox, post, query_run, send_message, submit_outcome,
+    submit_review,
+};
 
 /// One registered MCP tool.
 #[derive(Debug, Clone, Copy)]
@@ -17,7 +20,7 @@ pub struct ToolDescriptor {
     pub description: &'static str,
 }
 
-/// The five agentd MCP tools (design §4.12.1).
+/// The registered agentd MCP tools (design §4.12.1).
 #[must_use]
 pub fn tool_descriptors() -> Vec<ToolDescriptor> {
     vec![
@@ -34,8 +37,20 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
             description: "Submit a reviewer verdict for a review run.",
         },
         ToolDescriptor {
+            name: "send_message",
+            description: "Send a durable direct message to another agent.",
+        },
+        ToolDescriptor {
+            name: "post",
+            description: "Post a durable message to a group.",
+        },
+        ToolDescriptor {
             name: "check_inbox",
-            description: "Pull cowork-bus messages for this agent.",
+            description: "Pull durable direct messages and group mentions for this agent.",
+        },
+        ToolDescriptor {
+            name: "check_group",
+            description: "Read a durable group message history for this agent.",
         },
         ToolDescriptor {
             name: "query_run",
@@ -73,8 +88,16 @@ pub async fn dispatch(host: &dyn RunHost, name: &str, args: Value) -> Result<Val
             submit_review::submit_review(host, serde_json::from_value(args).map_err(bad_args)?)
                 .await?,
         ),
+        "send_message" => encode(
+            send_message::send_message(host, serde_json::from_value(args).map_err(bad_args)?)
+                .await?,
+        ),
+        "post" => encode(post::post(host, serde_json::from_value(args).map_err(bad_args)?).await?),
         "check_inbox" => encode(
             check_inbox::check_inbox(host, serde_json::from_value(args).map_err(bad_args)?).await?,
+        ),
+        "check_group" => encode(
+            check_group::check_group(host, serde_json::from_value(args).map_err(bad_args)?).await?,
         ),
         "query_run" => encode(
             query_run::query_run(host, serde_json::from_value(args).map_err(bad_args)?).await?,

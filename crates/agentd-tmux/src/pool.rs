@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use agentd_core::CoreError;
-use agentd_core::ports::{AgentBackend, WorktreeAllocator};
+use agentd_core::ports::{AgentAllocation, AgentAllocationStatus, AgentBackend, WorktreeAllocator};
 use agentd_core::types::{AgentHandle, SpawnRequest};
 
 /// The git-worktree operations the pool needs, behind a seam so the
@@ -186,6 +186,19 @@ impl<B: AgentBackend> AgentBackend for PooledBackend<B> {
             req.worktree = self.pool.allocate().await?;
         }
         self.inner.spawn(req).await
+    }
+
+    async fn dispatch_allocated(
+        &self,
+        mut req: SpawnRequest,
+        allocation: &AgentAllocation,
+    ) -> Result<AgentHandle, CoreError> {
+        // Routed allocations reuse an existing pane; allocating a new worktree
+        // for the legacy "." sentinel would create an unused side effect.
+        if req.worktree == Path::new(".") && allocation.status != AgentAllocationStatus::Routed {
+            req.worktree = self.pool.allocate().await?;
+        }
+        self.inner.dispatch_allocated(req, allocation).await
     }
 }
 
