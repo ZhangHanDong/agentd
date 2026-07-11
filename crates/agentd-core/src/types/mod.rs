@@ -3,6 +3,7 @@ pub mod enterprise;
 pub mod handle;
 pub mod ids;
 pub mod outcome;
+pub mod project_authority;
 pub mod verdict;
 
 pub use context::RunContext;
@@ -15,4 +16,12 @@ pub use ids::{
     RuntimeAttemptId, RuntimeSessionId, TaskRunId, WorkerId, WorkerIncarnationId,
 };
 pub use outcome::{Artifact, ArtifactKind, MempalWrite, Outcome, Status};
+pub use project_authority::{
+    AuthorityKey, AuthorityResourceRef, CertificationPolicyVersionRef, FrozenSpecVersionRef,
+    IssueRef, MatrixRoomRef, OfflineRecoveryPolicy, OrganizationRef, ProductWorkflowRef,
+    ProjectAuthorityValidationError, ProjectExecutionSnapshot, ProjectExecutionSnapshotRef,
+    ProjectRef, ProjectRoomBindingRef, QuotaPolicyVersionRef, RbacPolicyVersionRef,
+    RepositoryBinding, RepositoryRef, RepositoryRole, RequirementRef, ResourceKind, RoomBinding,
+    RoomBindingRole, TeamRef,
+};
 pub use verdict::{ReviewVerdict, VerdictValue};

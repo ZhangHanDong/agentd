@@ -7,6 +7,7 @@ members = [
     "crates/agentd-mempal",
     "crates/agentd-github",
     "crates/agentd-matrix",
+    "crates/agentd-project-authority",
     "crates/agentd-surface",
     "crates/agentd-bin",
     "crates/agentctl",
