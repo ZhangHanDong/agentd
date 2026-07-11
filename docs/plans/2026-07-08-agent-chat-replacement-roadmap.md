@@ -1,6 +1,9 @@
 # agentd — agent-chat replacement roadmap
 
-> Status: planning. Goal: make agentd a practical replacement for
+> Status: subordinate historical/FSF-0 compatibility roadmap. The canonical
+> execution order is `2026-07-09-agentd-native-runtime-roadmap.md`; Phase I and
+> its P-number list are no longer an independent executable sequence. Goal:
+> make agentd a practical replacement for
 > `/Users/zhangalex/Work/Projects/consult/agent-chat`, without losing the parts
 > agent-chat already solves in daily use.
 >
@@ -781,7 +784,14 @@ in execution reliability, registry/lifecycle semantics, messaging, and scheduler
 parity. Those form the minimum product surface that agent-chat users actually
 depend on.
 
-## 11. Phase I — reconciled enterprise execution control plane
+## 11. Phase I — subordinate enterprise candidate history
+
+Subordination decision (2026-07-12): the canonical single-line roadmap is
+`2026-07-09-agentd-native-runtime-roadmap.md`. Phases A-H and P272-P275 are
+retained as FSF-0 transitional agent-chat parity evidence. This Phase I section
+records P263-P271 candidate history and old task-number traceability; it does
+not authorize implementation, promotion, or integration outside the AD-E and
+FSF gates. In particular, P272 is design-complete but paused.
 
 Purpose: continue from the verified P200-P262 base without merging the sibling
 worktree's conflicting P202-P228 ids or migration versions. P263 records the
@@ -872,7 +882,7 @@ artifact/usage reports. Stale, terminal, expired, and superseded reports append
 storage, OpenFab network transport, authenticated worker transport, policy
 enforcement, dual-write, cutover, and delivery gating remain pending.
 
-Planned spec sequence:
+Historical traceability sequence:
 
 - P263 — worktree namespace, capability, and migration reconciliation.
 - P264 — SpecifyProjectAuthority, AgentdControlPlane, AgentdWorker,
@@ -885,14 +895,19 @@ Planned spec sequence:
 - P269 — control-plane ProjectAuthorityPort API and standalone/Specify adapters.
 - P270 — control-plane dispatch, lease, and fencing API.
 - P271 — control-plane artifact, audit, usage, and certification-reference API.
-- P272 — runtime status/capture/shutdown/rebind compatibility port.
-- P273 — scheduler provision-registration reconciliation and Codex auto-spawn.
-- P274 — relay unread backfill, push-delivered acknowledgement, and delivery lookup.
-- P275 — durable direct-message suppression.
-- P276 — agentd-owned native PTY/process runtime.
-- P277 — native logical session persistence and provider resume.
-- P278 — authenticated worker fleet pull protocol and durable lease recovery.
-- P279 — enterprise RBAC/quota enforcement plus operator doctor diagnostics.
+- P272 — runtime status/capture/shutdown/rebind compatibility port; paused FSF-0
+  transitional parity candidate.
+- P273 — scheduler provision-registration reconciliation and Codex auto-spawn;
+  paused FSF-0 transitional parity candidate.
+- P274 — relay unread backfill, push-delivered acknowledgement, and delivery
+  lookup; paused FSF-0 transitional parity candidate.
+- P275 — durable direct-message suppression; paused FSF-0 transitional parity
+  candidate.
+- P276 — historical native PTY/process label; maps to AD-E5 after AD-E2.
+- P277 — historical native logical-session label; maps to AD-E5 after AD-E2.
+- P278 — historical authenticated worker-fleet label; maps to AD-E2 after AD-E1.
+- P279 — historical RBAC/quota/doctor label; security enforcement is governed by
+  AD-E1 and later operational phases.
 
 Migration authority follows the base chain: P267 uses migration `0013` after
 `0012_matrix_bridge_contract.sql`; P268 uses migration `0014` after P267.
@@ -905,10 +920,15 @@ base tables with fresh and backcompat tests.
 
 Phase I does not erase Phase C-H compatibility work. The P263 manifest leaves
 P205, P210, P211, P219, and P220 source behavior in an explicit port queue
-represented by P272-P275. Enterprise contracts cannot be used to mark those
+represented by P272-P275. Those items are FSF-0 transitional parity candidates,
+not the active AD-E sequence. Enterprise contracts cannot be used to mark those
 behaviors covered.
 
 ## Immediate Next Step
+
+The following paragraph is retained as the historical P263-P271 completion
+record so earlier artifact contracts remain auditable; it is not an executable
+queue after the 2026-07-12 subordination decision.
 
 P263 reconciled the two same-HEAD dirty worktrees and reserved a collision-free
 base sequence. P264 ownership now names exactly one authority for project,
@@ -930,5 +950,11 @@ validation, and serialized dispatch without reusing scheduler tickets. P271
 now implements `p271-control-plane-artifact-audit-api.spec.md` with
 `ArtifactIndexPort`, `ExecutionAuditPort`, `UsageLedgerPort`,
 `CertificationReferencePort`, typed `usage.measured` events, and fenced worker
-rejection audit. Next implement `p272-runtime-compatibility-port.spec.md` as
-the runtime status, capture, shutdown, and rebind compatibility port.
+rejection audit. `p272-runtime-compatibility-port.spec.md` defines the runtime
+status, capture, shutdown, and rebind compatibility port, but P272 is paused as
+FSF-0 transitional work.
+
+The executable next step is the AD-E1 minimum security baseline in the canonical
+07-09 roadmap: sandbox, workload identity/mTLS, secret broker, tenant isolation,
+and lease/fencing-scoped capabilities. Main integration still requires FSF-0
+acceptance plus the OpenFab PRD/ADR gate.
