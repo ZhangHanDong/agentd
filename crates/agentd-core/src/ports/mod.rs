@@ -7,6 +7,7 @@ pub mod agent_allocator;
 pub mod backend;
 pub mod clock;
 pub mod command_runner;
+pub mod execution_evidence;
 pub mod mempal;
 pub mod project_authority;
 pub mod store;
@@ -20,6 +21,16 @@ pub use agent_allocator::{
 pub use backend::AgentBackend;
 pub use clock::Clock;
 pub use command_runner::{CommandError, CommandOutput, CommandRunner, RunOpts};
+pub use execution_evidence::{
+    ArtifactCursor, ArtifactIndexPort, ArtifactListRequest, ArtifactPage, AuditActorKind,
+    AuditPage, AuditReadRequest, CertificationReferenceAppend, CertificationReferenceKind,
+    CertificationReferencePort, CertificationReferenceRecord, ExecutionArtifactKind,
+    ExecutionArtifactPublish, ExecutionArtifactRecord, ExecutionAuditAppend, ExecutionAuditPort,
+    ExecutionAuditRecord, ExecutionEvidenceError, ExecutionEvidenceLinks,
+    ExecutionEvidenceValidationError, ExecutionSnapshotLink, PageLimit, UsageLedgerPort,
+    UsageMeasurement, UsageMetric, UsagePage, UsageReadRequest, UsageRecord, UsageTotal,
+    UsageTotals, WorkerArtifactReport, WorkerUsageReport,
+};
 pub use mempal::{DrawerHit, MempalClient};
 pub use project_authority::{
     ProjectAuthorityAvailability, ProjectAuthorityError, ProjectAuthorityHealth,

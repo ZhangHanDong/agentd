@@ -229,6 +229,87 @@ pub async fn read_from(
     rows.iter().map(row_to_event).collect()
 }
 
+/// Replay a bounded page of one run's audit rows after a database sequence.
+///
+/// # Errors
+/// Returns [`StoreError`] when the cursor/limit is invalid or rows cannot be
+/// queried or decoded.
+pub async fn read_page(
+    pool: &SqlitePool,
+    run_id: &RunId,
+    after_sequence: i64,
+    limit: u16,
+) -> Result<Vec<AuditEventRecord>, StoreError> {
+    if after_sequence < 0 {
+        return Err(StoreError::Invariant(
+            "audit sequence cursor must be non-negative".to_string(),
+        ));
+    }
+    if limit == 0 || limit > 201 {
+        return Err(StoreError::Invariant(
+            "audit page limit must be in 1..=201".to_string(),
+        ));
+    }
+    let rows = sqlx::query(
+        "SELECT sequence, id, idempotency_scope, idempotency_key, event_type, actor_kind, \
+         actor_ref, payload_sha256, payload_json, execution_run_id, execution_task_id, \
+         runtime_session_id, runtime_attempt_id, execution_artifact_id, \
+         worker_incarnation_id, snapshot_authority_key, snapshot_resource_kind, \
+         snapshot_resource_id, snapshot_resource_version, snapshot_content_sha256, \
+         target_repository_id, target_base_commit, occurred_at, recorded_at \
+         FROM execution_audit_events \
+         WHERE execution_run_id = ? AND sequence > ? ORDER BY sequence ASC LIMIT ?",
+    )
+    .bind(run_id.as_str())
+    .bind(after_sequence)
+    .bind(i64::from(limit))
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_event).collect()
+}
+
+/// Replay a bounded page filtered to one exact audit event type.
+///
+/// # Errors
+/// Returns [`StoreError`] when input is invalid or rows cannot be queried or
+/// decoded.
+pub async fn read_event_type_page(
+    pool: &SqlitePool,
+    run_id: &RunId,
+    event_type: &str,
+    after_sequence: i64,
+    limit: u16,
+) -> Result<Vec<AuditEventRecord>, StoreError> {
+    validate_text(event_type, "audit event type")?;
+    if after_sequence < 0 {
+        return Err(StoreError::Invariant(
+            "audit sequence cursor must be non-negative".to_string(),
+        ));
+    }
+    if limit == 0 || limit > 201 {
+        return Err(StoreError::Invariant(
+            "audit page limit must be in 1..=201".to_string(),
+        ));
+    }
+    let rows = sqlx::query(
+        "SELECT sequence, id, idempotency_scope, idempotency_key, event_type, actor_kind, \
+         actor_ref, payload_sha256, payload_json, execution_run_id, execution_task_id, \
+         runtime_session_id, runtime_attempt_id, execution_artifact_id, \
+         worker_incarnation_id, snapshot_authority_key, snapshot_resource_kind, \
+         snapshot_resource_id, snapshot_resource_version, snapshot_content_sha256, \
+         target_repository_id, target_base_commit, occurred_at, recorded_at \
+         FROM execution_audit_events \
+         WHERE execution_run_id = ? AND event_type = ? AND sequence > ? \
+         ORDER BY sequence ASC LIMIT ?",
+    )
+    .bind(run_id.as_str())
+    .bind(event_type)
+    .bind(after_sequence)
+    .bind(i64::from(limit))
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_event).collect()
+}
 
 async fn load_by_idempotency(
     tx: &mut Transaction<'_, Sqlite>,

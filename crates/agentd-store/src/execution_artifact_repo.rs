@@ -243,6 +243,54 @@ pub async fn get_artifact(
     row.as_ref().map(row_to_artifact).transpose()
 }
 
+/// List immutable artifact metadata for one run after a stable tuple cursor.
+///
+/// # Errors
+/// Returns [`StoreError`] when rows cannot be queried or decoded.
+pub async fn list_artifacts_by_run(
+    pool: &SqlitePool,
+    run_id: &RunId,
+    cursor: Option<(i64, &ExecutionArtifactId)>,
+    limit: u16,
+) -> Result<Vec<ExecutionArtifactRecord>, StoreError> {
+    let rows = if let Some((created_at, id)) = cursor {
+        sqlx::query(
+            "SELECT id, kind, content_sha256, size_bytes, media_type, storage_ref, \
+                    provenance_json, execution_run_id, execution_task_id, runtime_session_id, \
+                    runtime_attempt_id, snapshot_authority_key, snapshot_resource_kind, \
+                    snapshot_resource_id, snapshot_resource_version, snapshot_content_sha256, \
+                    target_repository_id, target_base_commit, producer_worker_incarnation_id, \
+                    created_at \
+             FROM execution_artifacts \
+             WHERE execution_run_id = ? \
+               AND (created_at > ? OR (created_at = ? AND id > ?)) \
+             ORDER BY created_at, id LIMIT ?",
+        )
+        .bind(run_id.as_str())
+        .bind(created_at)
+        .bind(created_at)
+        .bind(id.as_str())
+        .bind(i64::from(limit))
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query(
+            "SELECT id, kind, content_sha256, size_bytes, media_type, storage_ref, \
+                    provenance_json, execution_run_id, execution_task_id, runtime_session_id, \
+                    runtime_attempt_id, snapshot_authority_key, snapshot_resource_kind, \
+                    snapshot_resource_id, snapshot_resource_version, snapshot_content_sha256, \
+                    target_repository_id, target_base_commit, producer_worker_incarnation_id, \
+                    created_at \
+             FROM execution_artifacts WHERE execution_run_id = ? \
+             ORDER BY created_at, id LIMIT ?",
+        )
+        .bind(run_id.as_str())
+        .bind(i64::from(limit))
+        .fetch_all(pool)
+        .await?
+    };
+    rows.iter().map(row_to_artifact).collect()
+}
 
 /// Map one legacy content-addressed artifact to one enterprise artifact.
 ///
@@ -410,6 +458,41 @@ pub async fn append_certification_ref(
     })
 }
 
+/// List immutable certification references for one artifact in database order.
+///
+/// # Errors
+/// Returns [`StoreError`] when rows cannot be queried or decoded.
+pub async fn list_certification_refs(
+    pool: &SqlitePool,
+    artifact_id: &ExecutionArtifactId,
+) -> Result<Vec<CertificationRefRecord>, StoreError> {
+    validate_id(artifact_id.as_str(), "ar_", "ExecutionArtifactId")?;
+    let rows = sqlx::query(
+        "SELECT id, execution_artifact_id, authority_key, ref_kind, external_ref, recorded_at \
+         FROM artifact_certification_refs WHERE execution_artifact_id = ? ORDER BY id",
+    )
+    .bind(artifact_id.as_str())
+    .fetch_all(pool)
+    .await?;
+    rows.iter()
+        .map(|row| {
+            let kind_text: String = row.get("ref_kind");
+            let kind = CertificationRefKind::try_from(kind_text.as_str()).map_err(|()| {
+                StoreError::Invariant(format!("unknown certification reference kind: {kind_text}"))
+            })?;
+            Ok(CertificationRefRecord {
+                id: row.get("id"),
+                execution_artifact_id: ExecutionArtifactId::from_string(
+                    row.get::<String, _>("execution_artifact_id"),
+                ),
+                authority_key: row.get("authority_key"),
+                kind,
+                external_ref: row.get("external_ref"),
+                recorded_at: row.get("recorded_at"),
+            })
+        })
+        .collect()
+}
 
 async fn validate_parent_graph(
     tx: &mut Transaction<'_, Sqlite>,
