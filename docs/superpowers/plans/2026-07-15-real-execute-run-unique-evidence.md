@@ -29,7 +29,7 @@
 - Consumes: CLI `RUN_ID`, `STATE_DIR`, optional `--spec-file`.
 - Produces: `FROZEN_SPEC_COPY`, `PLAN_COPY`, `SMOKE_EXECUTE_WORKFLOW`, `REPORT`, run-specific document/test paths, filters, and marker.
 
-- [ ] **Step 1: Write failing dry-run, prepare-only, and unsafe-id tests**
+- [x] **Step 1: Write failing dry-run, prepare-only, and unsafe-id tests**
 
 Add tests that invoke:
 
@@ -50,7 +50,7 @@ verify_task_delta
 
 Assert prepare-only renders all harness files under the Rust test's temporary `state_dir` and unsafe input creates no state directory.
 
-- [ ] **Step 2: Run the new selectors and confirm RED**
+- [x] **Step 2: Run the new selectors and confirm RED**
 
 ```bash
 cargo test -p agentd-bin real_execute_smoke_dry_run_prints_run_unique_contract
@@ -60,7 +60,7 @@ cargo test -p agentd-bin real_execute_smoke_rejects_unsafe_run_id_before_state_c
 
 Expected: FAIL because `--prepare-only` and run-unique rendering do not exist.
 
-- [ ] **Step 3: Add the versioned template**
+- [x] **Step 3: Add the versioned template**
 
 The template uses these literal tokens:
 
@@ -76,7 +76,7 @@ __AGENTD_REAL_EXECUTE_MARKER_FILTER__
 
 Its allowed changes are the rendered document and Rust integration test only. The generated Rust test reads `../../../docs/real-execute-smoke/__AGENTD_REAL_EXECUTE_RUN_ID__.md` and exposes both run-specific filters.
 
-- [ ] **Step 4: Implement validation, rendering, and isolated paths**
+- [x] **Step 4: Implement validation, rendering, and isolated paths**
 
 In `agentd_real_execute_smoke.sh`:
 
@@ -96,7 +96,7 @@ SMOKE_MARKER="AGENTD_REAL_EXECUTE_SMOKE_READY:$RUN_ID"
 
 Render to `$STATE_DIR/frozen.spec.md`, generate `$STATE_DIR/plan.md`, place the workflow and report in the same state directory, and add `--prepare-only` without daemon, agent, or GitHub side effects.
 
-- [ ] **Step 5: Run Task 1 tests and contract validation**
+- [x] **Step 5: Run Task 1 tests and contract validation**
 
 ```bash
 cargo test -p agentd-bin real_execute_smoke
@@ -106,7 +106,7 @@ agent-spec lint specs/e2e/real-execute-smoke-template.spec.md --min-score 0.7
 
 Expected: all selected tests pass and the rendered-template structure has non-zero scenarios.
 
-- [ ] **Step 6: Commit Task 1**
+- [x] **Step 6: Commit Task 1**
 
 ```bash
 git add specs/e2e/real-execute-smoke-template.spec.md scripts/agentd_real_execute_smoke.sh crates/agentd-bin/tests/real_execute_smoke.rs
@@ -124,7 +124,7 @@ git commit -m "feat(smoke): render run-unique execute contracts"
 - Consumes: `agentd_verify_task_delta.sh "$WORKTREE" "$BASE_COMMIT"`.
 - Produces: exit 0 only for committed, staged, unstaged, or untracked task output relative to an ancestor base commit.
 
-- [ ] **Step 1: Write failing verifier tests**
+- [x] **Step 1: Write failing verifier tests**
 
 Create temporary Git repositories and bind these exact test names:
 
@@ -135,7 +135,7 @@ real_execute_task_delta_accepts_committed_change
 real_execute_task_delta_rejects_invalid_base
 ```
 
-- [ ] **Step 2: Run verifier tests and confirm RED**
+- [x] **Step 2: Run verifier tests and confirm RED**
 
 ```bash
 cargo test -p agentd-bin --test real_execute_task_delta
@@ -143,7 +143,7 @@ cargo test -p agentd-bin --test real_execute_task_delta
 
 Expected: compile or execution failure because the verifier script is absent.
 
-- [ ] **Step 3: Implement exact-base verification**
+- [x] **Step 3: Implement exact-base verification**
 
 The script must validate the Git root and commit object, require the base to be an ancestor of `HEAD`, then pass when either command reports a delta:
 
@@ -154,7 +154,7 @@ git -C "$worktree" status --porcelain --untracked-files=all
 
 An unchanged worktree prints `no task delta relative to $BASE_COMMIT` to stderr and exits non-zero.
 
-- [ ] **Step 4: Inject the smoke-local gate**
+- [x] **Step 4: Inject the smoke-local gate**
 
 Capture `TASK_BASE_SHA=$(git -C "$ROOT" rev-parse HEAD)` before agents start. In the copied workflow only, insert:
 
@@ -164,7 +164,7 @@ Capture `TASK_BASE_SHA=$(git -C "$ROOT" rev-parse HEAD)` before agents start. In
 "verify_task_delta" -> "verify_lifecycle";
 ```
 
-- [ ] **Step 5: Run verifier and workflow tests**
+- [x] **Step 5: Run verifier and workflow tests**
 
 ```bash
 cargo test -p agentd-bin --test real_execute_task_delta
@@ -173,7 +173,7 @@ cargo test -p agentd-bin real_execute_smoke_prepare_only_renders_isolated_contra
 
 Expected: all tests pass and the generated workflow references the exact 40-hex task base.
 
-- [ ] **Step 6: Commit Task 2**
+- [x] **Step 6: Commit Task 2**
 
 ```bash
 git add scripts/agentd_verify_task_delta.sh crates/agentd-bin/tests/real_execute_task_delta.rs scripts/agentd_real_execute_smoke.sh
@@ -191,11 +191,11 @@ git commit -m "feat(smoke): reject execute runs without a task delta"
 - Consumes: `agentd_publish_worktree.sh "$WORKTREE" "$TASK_RUN_ID" "$BASE_COMMIT" "$REPORT_PATH"`.
 - Produces: a pushed `agentd/$TASK_RUN_ID` containing a delta from the optional exact base and a report at the selected path.
 
-- [ ] **Step 1: Write failing no-op and run-local report tests**
+- [x] **Step 1: Write failing no-op and run-local report tests**
 
 Add `publish_worktree_rejects_empty_delta_before_push`. Update the successful publication test to pass the seed commit and a temporary report path, then assert the remote branch is ahead of the seed and the default repository report was not written.
 
-- [ ] **Step 2: Run publication tests and confirm RED**
+- [x] **Step 2: Run publication tests and confirm RED**
 
 ```bash
 cargo test -p agentd-bin --test publish_worktree
@@ -203,7 +203,7 @@ cargo test -p agentd-bin --test publish_worktree
 
 Expected: the no-op publication currently succeeds and the custom report argument is unsupported.
 
-- [ ] **Step 3: Implement base-aware publication**
+- [x] **Step 3: Implement base-aware publication**
 
 After `git add -A`:
 
@@ -218,11 +218,11 @@ fi
 
 Validate an optional base as an ancestor commit and write the report only after push succeeds.
 
-- [ ] **Step 4: Pass base and report through the smoke-local workflow**
+- [x] **Step 4: Pass base and report through the smoke-local workflow**
 
 Render the publish node with the exact base and `$STATE_DIR/report.md`; render `report_acceptance` to read that same path.
 
-- [ ] **Step 5: Run publication and prepare-only tests**
+- [x] **Step 5: Run publication and prepare-only tests**
 
 ```bash
 cargo test -p agentd-bin --test publish_worktree
@@ -231,7 +231,7 @@ cargo test -p agentd-bin real_execute_smoke_prepare_only_renders_isolated_contra
 
 Expected: all tests pass, no-op push is absent from the bare remote, and report state is isolated.
 
-- [ ] **Step 6: Commit Task 3**
+- [x] **Step 6: Commit Task 3**
 
 ```bash
 git add scripts/agentd_publish_worktree.sh crates/agentd-bin/tests/publish_worktree.rs scripts/agentd_real_execute_smoke.sh
@@ -249,7 +249,7 @@ git commit -m "fix(publish): require an exact task delta"
 - Consumes: Tasks 1-3 and runtime matrix `codex,codex,codex,codex`.
 - Produces: P153 lifecycle evidence and one finished real smoke with a task branch and PR.
 
-- [ ] **Step 1: Run the complete mechanical gate**
+- [x] **Step 1: Run the complete mechanical gate**
 
 ```bash
 cargo fmt --all --check
@@ -259,9 +259,9 @@ agent-spec lifecycle specs/e2e/p153-real-execute-run-unique-evidence.spec.md --c
 git diff --check
 ```
 
-Expected: all commands exit 0; P153 has 10 passing scenarios and no skipped or uncertain result.
+Expected: all commands exit 0; P153 has 11 passing scenarios and no skipped or uncertain result.
 
-- [ ] **Step 2: Run Codex-only preflight**
+- [x] **Step 2: Run Codex-only preflight**
 
 ```bash
 AGENTD_REAL_EXECUTE_RUNTIMES=codex,codex,codex,codex \
@@ -270,17 +270,18 @@ AGENTD_REAL_EXECUTE_RUNTIMES=codex,codex,codex,codex \
 
 Expected: preflight exits 0 without requiring a Claude executable.
 
-- [ ] **Step 3: Run the authorized real smoke**
+- [x] **Step 3: Run the authorized real smoke**
 
 ```bash
 AGENTD_REAL_EXECUTE_SMOKE=1 \
 AGENTD_REAL_EXECUTE_RUNTIMES=codex,codex,codex,codex \
-  bash scripts/agentd_real_execute_smoke.sh --execute --wait-seconds 900
+  bash scripts/agentd_real_execute_smoke.sh --execute \
+    --run-id ad-e0-p153-20260715-r3 --wait-seconds 1200
 ```
 
 Expected: run status `finished`; three reviewer verdicts are recorded; the task branch contains the two run-specific files; `summary.txt` and `report.md` are under the run state directory; a real PR URL is present in evidence.
 
-- [ ] **Step 4: Record exact evidence and commit**
+- [x] **Step 4: Record exact evidence and commit**
 
 Update the design and plan with the final run id, task branch, PR URL, test counts, and P153 lifecycle result. Then:
 
@@ -288,3 +289,19 @@ Update the design and plan with the final run id, task branch, PR URL, test coun
 git add specs/e2e/p153-real-execute-run-unique-evidence.spec.md docs/superpowers/specs/2026-07-15-real-execute-run-unique-evidence-design.md docs/superpowers/plans/2026-07-15-real-execute-run-unique-evidence.md
 git commit -m "test(smoke): record run-unique execute acceptance"
 ```
+
+**Recorded result:** complete on 2026-07-15.
+
+- Candidate base: `92860d8c1eb165981de756a6ea639987320703d0`.
+- P153 lifecycle: 11/11 passed at quality 1.0.
+- Real run: `ad-e0-p153-20260715-r3`, status `finished`, terminal `done`.
+- Task run/branch: `tr_01KXJ2JEWED6YYR1DJZEPEB631` /
+  `agentd/tr_01KXJ2JEWED6YYR1DJZEPEB631`.
+- Task head: `da1a2d706a44862b03bdfb39d7589dd9134d7ff2` with exactly the two
+  run-specific files.
+- Review: security, performance, and readability all passed with no findings.
+- PR: <https://github.com/ZhangHanDong/agentd/pull/20>.
+- Evidence directory:
+  `.agentd/real-execute-smoke/ad-e0-p153-20260715-r3/`.
+- r2 cancellation root cause is covered by P154 and fixed in `92860d8` before
+  the successful r3 run.

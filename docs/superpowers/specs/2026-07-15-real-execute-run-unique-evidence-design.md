@@ -2,7 +2,7 @@
 
 - Date: 2026-07-15
 - Scope: `agentd_real_execute_smoke.sh` default artifact task and publication safety
-- Status: approved under the operator's standing authorization to continue the roadmap
+- Status: accepted by Codex-only real execution on 2026-07-15
 
 ## Problem
 
@@ -116,3 +116,29 @@ The implementation is complete only when automated tests prove:
   branch, and opens a real PR from the run-specific change.
 
 No Claude runtime is used in the real acceptance run.
+
+## Acceptance Evidence
+
+The completed acceptance run is `ad-e0-p153-20260715-r3`, based exactly on
+candidate commit `92860d8c1eb165981de756a6ea639987320703d0`.
+
+- P153 lifecycle: 11 passed, 0 failed, 0 skipped, 0 uncertain; quality 1.0.
+- Runtime matrix: `codex,codex,codex,codex`; no Claude runtime was invoked.
+- Task run: `tr_01KXJ2JEWED6YYR1DJZEPEB631`.
+- Published branch: `agentd/tr_01KXJ2JEWED6YYR1DJZEPEB631`.
+- Task head: `da1a2d706a44862b03bdfb39d7589dd9134d7ff2`, a direct descendant of the
+  exact task base with only the run-specific document and Rust test added.
+- Review verdicts: `codex-sec`, `codex-perf`, and `codex-readability` all
+  returned `pass` with no findings.
+- Pull request: <https://github.com/ZhangHanDong/agentd/pull/20>.
+- Run-local evidence:
+  `.agentd/real-execute-smoke/ad-e0-p153-20260715-r3/summary.txt`,
+  `report.md`, `run_snapshot.json`, `events.snapshot`, and `agentd.db`.
+
+The preceding r2 attempt exposed a cancellation defect rather than a contract
+failure: closing the pending `submit_outcome` HTTP request after the implement
+outcome had been persisted cancelled the synchronous lifecycle tool and left
+the checkpoint stranded. P154 fixed `/tools/call` dispatch ownership in commit
+`92860d8c1eb165981de756a6ea639987320703d0`. The r3 implement submission then
+advanced through task-delta and lifecycle verification to review in the same
+request, providing real-path confirmation of that fix.
