@@ -670,6 +670,53 @@ fn real_execute_smoke_runtime_matrix_dry_run_prints_codex_roles() {
 }
 
 #[test]
+fn real_execute_smoke_codex_only_success_requires_run_unique_branch_and_pr() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let state_dir = temp.path().join("state");
+    let state_dir_arg = state_dir.to_string_lossy().to_string();
+    let run_id = "p153-codex-only-01";
+    let out = run_script_with_env(
+        &[
+            "--dry-run",
+            "--run-id",
+            run_id,
+            "--state-dir",
+            &state_dir_arg,
+        ],
+        &[("AGENTD_REAL_EXECUTE_RUNTIMES", "codex,codex,codex,codex")],
+    );
+
+    assert!(
+        out.status.success(),
+        "Codex-only dry-run exits 0; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for expected in [
+        "runtime_matrix: codex,codex,codex,codex",
+        "implementer_role: codex-impl",
+        "reviewers: codex-sec,codex-perf,codex-readability",
+        "docs/real-execute-smoke/p153-codex-only-01.md",
+        "crates/agentd-bin/tests/real_execute_smoke_p153_codex_only_01.rs",
+        "publish_branch pushes agentd/<task_run_id>",
+        "open_pr opens a real PR",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "Codex-only plan should require {expected}: {stdout}"
+        );
+    }
+    assert!(
+        !stdout.contains("implementer_role: claude") && !stdout.contains("reviewers: claude"),
+        "Codex-only plan must not select a Claude role: {stdout}"
+    );
+    assert!(
+        !state_dir.exists(),
+        "Codex-only dry-run should not create state"
+    );
+}
+
+#[test]
 fn real_execute_smoke_runtime_matrix_codex_only_preflight_does_not_require_claude() {
     let temp = tempfile::tempdir().expect("tempdir");
     let fakebin = temp.path().join("bin");
