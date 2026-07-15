@@ -58,10 +58,10 @@
 - Modify: `Cargo.toml`
 - Modify: `Cargo.lock`
 
-- [ ] Write trusted/current and untrusted/expired/revoked/stale certificate tests using generated test CAs; verify RED.
-- [ ] Implement chain/time/SPIFFE URI verification through reviewed TLS/X.509 libraries and exact current-incarnation binding lookup.
-- [ ] Write secret admission, expiry cap, redacted Debug, serialization exclusion, wrong-scope nondisclosure, and zeroize-on-drop tests; verify RED.
-- [ ] Implement the injected broker adapter without a production local-secret default and run identity/secret selectors GREEN.
+- [x] Write trusted/current and untrusted/expired/revoked/stale certificate tests using generated test CAs; verify RED.
+- [x] Implement chain/time/SPIFFE URI verification through reviewed TLS/X.509 libraries and exact current-incarnation binding lookup.
+- [x] Write secret admission, expiry cap, redacted Debug, serialization exclusion, wrong-scope nondisclosure, and zeroize-on-drop tests; verify RED.
+- [x] Implement the injected broker adapter without a production local-secret default and run identity/secret selectors GREEN.
 
 ### Task 4: OCI Sandbox Profile and Cleanup
 

@@ -5,7 +5,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::{
     AuthorityKey, OrganizationRef, ProjectExecutionSnapshotRef, ProjectRef, RbacPolicyVersionRef,
@@ -272,6 +272,10 @@ impl SecretMaterial {
     pub fn expose_secret(&self) -> &[u8] {
         &self.0
     }
+
+    pub fn zeroize(&mut self) {
+        self.0.zeroize();
+    }
 }
 
 impl fmt::Debug for SecretMaterial {
@@ -300,6 +304,7 @@ impl fmt::Debug for SecretLease {
 pub struct SecretCheckoutRequest {
     pub admission: CapabilityAdmission,
     pub selector: SecretSelector,
+    pub observed_at: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

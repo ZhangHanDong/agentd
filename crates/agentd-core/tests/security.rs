@@ -228,6 +228,7 @@ impl SecretBrokerPort for RecordingSecurityPorts {
     ) -> Result<SecretLease, SecurityError> {
         assert_eq!(request.admission, admission());
         assert_eq!(request.selector.as_str(), "repository/app-token");
+        assert_eq!(request.observed_at, 200);
         self.record("secret");
         Ok(SecretLease {
             selector: request.selector.clone(),
@@ -336,6 +337,7 @@ async fn security_ports_preserve_separate_ordered_boundaries() {
     let checkout = SecretCheckoutRequest {
         admission: admission(),
         selector: SecretSelector::new("repository/app-token").expect("secret selector"),
+        observed_at: 200,
     };
     let secret = ports
         .checkout_secret(&checkout)

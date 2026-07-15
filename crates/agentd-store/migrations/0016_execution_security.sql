@@ -8,7 +8,7 @@ CREATE TABLE workload_identity_bindings (
                                length(certificate_sha256) = 64
                                AND certificate_sha256 NOT GLOB '*[^0123456789abcdef]*'
                            ),
-    spiffe_uri             TEXT NOT NULL UNIQUE CHECK (length(trim(spiffe_uri)) > 0),
+    spiffe_uri             TEXT NOT NULL CHECK (length(trim(spiffe_uri)) > 0),
     role                   TEXT NOT NULL CHECK (role IN ('control_plane', 'gateway', 'worker')),
     trust_domain           TEXT NOT NULL CHECK (length(trim(trust_domain)) > 0),
     worker_id              TEXT REFERENCES workers(id) ON DELETE RESTRICT,
@@ -31,6 +31,9 @@ CREATE TABLE workload_identity_bindings (
 CREATE INDEX idx_workload_identity_bindings_worker
     ON workload_identity_bindings(worker_incarnation_id, revoked_at, not_after)
     WHERE worker_incarnation_id IS NOT NULL;
+
+CREATE INDEX idx_workload_identity_bindings_spiffe
+    ON workload_identity_bindings(spiffe_uri, revoked_at, not_after);
 
 CREATE TABLE execution_security_policy_epochs (
     authority_key          TEXT NOT NULL CHECK (length(trim(authority_key)) > 0),

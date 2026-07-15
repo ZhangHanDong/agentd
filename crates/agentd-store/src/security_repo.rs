@@ -20,6 +20,126 @@ use crate::worker_repo;
 
 const DENIAL_EVENT_TYPE: &str = "execution.security_denied";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkloadIdentityBindingCreate {
+    pub certificate_sha256: String,
+    pub spiffe_uri: String,
+    pub role: WorkloadRole,
+    pub trust_domain: String,
+    pub worker_id: Option<WorkerId>,
+    pub worker_incarnation_id: Option<WorkerIncarnationId>,
+    pub not_before: i64,
+    pub not_after: i64,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkloadIdentityBindingRecord {
+    pub binding: WorkloadIdentityBindingCreate,
+    pub revoked_at: Option<i64>,
+    pub revocation_reason: Option<String>,
+}
+
+/// Bind one public certificate fingerprint and SPIFFE URI to a current worker
+/// incarnation. Exact retries are idempotent; changed retries fail closed.
+pub async fn bind_workload_identity(
+    pool: &SqlitePool,
+    request: WorkloadIdentityBindingCreate,
+) -> Result<WorkloadIdentityBindingRecord, SecurityError> {
+    validate_identity_binding(pool, &request).await?;
+    if let Some(existing) = get_workload_identity_binding(pool, &request.certificate_sha256).await?
+    {
+        if existing.binding == request && existing.revoked_at.is_none() {
+            return Ok(existing);
+        }
+        return Err(SecurityError::Invalid(
+            "certificate fingerprint was reused with a changed or revoked binding".to_string(),
+        ));
+    }
+    sqlx::query(
+        "INSERT INTO workload_identity_bindings \
+         (certificate_sha256, spiffe_uri, role, trust_domain, worker_id, \
+          worker_incarnation_id, not_before, not_after, revoked_at, \
+          revocation_reason, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)",
+    )
+    .bind(&request.certificate_sha256)
+    .bind(&request.spiffe_uri)
+    .bind(workload_role_text(request.role))
+    .bind(&request.trust_domain)
+    .bind(request.worker_id.as_ref().map(WorkerId::as_str))
+    .bind(
+        request
+            .worker_incarnation_id
+            .as_ref()
+            .map(WorkerIncarnationId::as_str),
+    )
+    .bind(request.not_before)
+    .bind(request.not_after)
+    .bind(request.created_at)
+    .execute(pool)
+    .await
+    .map_err(storage_unavailable)?;
+    get_workload_identity_binding(pool, &request.certificate_sha256)
+        .await?
+        .ok_or_else(|| {
+            SecurityError::Unavailable("identity binding disappeared after insert".to_string())
+        })
+}
+
+pub async fn get_workload_identity_binding(
+    pool: &SqlitePool,
+    certificate_sha256: &str,
+) -> Result<Option<WorkloadIdentityBindingRecord>, SecurityError> {
+    let row = sqlx::query(
+        "SELECT certificate_sha256, spiffe_uri, role, trust_domain, worker_id, \
+                worker_incarnation_id, not_before, not_after, revoked_at, \
+                revocation_reason, created_at \
+         FROM workload_identity_bindings WHERE certificate_sha256 = ?",
+    )
+    .bind(certificate_sha256)
+    .fetch_optional(pool)
+    .await
+    .map_err(storage_unavailable)?;
+    row.as_ref().map(identity_binding_from_row).transpose()
+}
+
+/// Revoke an identity binding without deleting its audit-relevant metadata.
+pub async fn revoke_workload_identity(
+    pool: &SqlitePool,
+    certificate_sha256: &str,
+    revoked_at: i64,
+    reason: &str,
+) -> Result<WorkloadIdentityBindingRecord, SecurityError> {
+    if revoked_at < 0 || reason.trim().is_empty() {
+        return Err(SecurityError::Invalid(
+            "identity revocation requires a non-negative time and reason".to_string(),
+        ));
+    }
+    let result = sqlx::query(
+        "UPDATE workload_identity_bindings \
+         SET revoked_at = COALESCE(revoked_at, ?), \
+             revocation_reason = COALESCE(revocation_reason, ?) \
+         WHERE certificate_sha256 = ?",
+    )
+    .bind(revoked_at)
+    .bind(reason)
+    .bind(certificate_sha256)
+    .execute(pool)
+    .await
+    .map_err(storage_unavailable)?;
+    if result.rows_affected() != 1 {
+        return Err(SecurityError::Denied(
+            SecurityDenialReason::IdentityUntrusted,
+        ));
+    }
+    get_workload_identity_binding(pool, certificate_sha256)
+        .await?
+        .ok_or_else(|| {
+            SecurityError::Unavailable("identity binding disappeared after revocation".to_string())
+        })
+}
+
 #[derive(Debug, Clone)]
 pub struct SqliteAttemptCapabilityRepository<L, A> {
     pool: SqlitePool,
@@ -703,6 +823,84 @@ fn workload_role(value: &str) -> Result<WorkloadRole, SecurityError> {
             "stored capability has an invalid workload role".to_string(),
         )),
     }
+}
+
+async fn validate_identity_binding(
+    pool: &SqlitePool,
+    request: &WorkloadIdentityBindingCreate,
+) -> Result<(), SecurityError> {
+    if request.certificate_sha256.len() != 64
+        || !request
+            .certificate_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || request.spiffe_uri.trim().is_empty()
+        || request.trust_domain.trim().is_empty()
+        || request.not_before < 0
+        || request.not_after <= request.not_before
+        || request.created_at < 0
+    {
+        return Err(SecurityError::Invalid(
+            "invalid workload identity binding".to_string(),
+        ));
+    }
+    match request.role {
+        WorkloadRole::Worker => {
+            let worker_id = request.worker_id.as_ref().ok_or(SecurityError::Denied(
+                SecurityDenialReason::IncarnationStale,
+            ))?;
+            let incarnation_id =
+                request
+                    .worker_incarnation_id
+                    .as_ref()
+                    .ok_or(SecurityError::Denied(
+                        SecurityDenialReason::IncarnationStale,
+                    ))?;
+            let incarnation = worker_repo::get_incarnation(pool, incarnation_id)
+                .await
+                .map_err(storage_unavailable)?
+                .ok_or(SecurityError::Denied(
+                    SecurityDenialReason::IncarnationStale,
+                ))?;
+            if !incarnation.is_current || &incarnation.worker_id != worker_id {
+                return Err(SecurityError::Denied(
+                    SecurityDenialReason::IncarnationStale,
+                ));
+            }
+        }
+        WorkloadRole::ControlPlane | WorkloadRole::Gateway => {
+            if request.worker_id.is_some() || request.worker_incarnation_id.is_some() {
+                return Err(SecurityError::Invalid(
+                    "non-worker identity cannot bind a worker incarnation".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn identity_binding_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<WorkloadIdentityBindingRecord, SecurityError> {
+    Ok(WorkloadIdentityBindingRecord {
+        binding: WorkloadIdentityBindingCreate {
+            certificate_sha256: row.get("certificate_sha256"),
+            spiffe_uri: row.get("spiffe_uri"),
+            role: workload_role(row.get::<String, _>("role").as_str())?,
+            trust_domain: row.get("trust_domain"),
+            worker_id: row
+                .get::<Option<String>, _>("worker_id")
+                .map(WorkerId::from_string),
+            worker_incarnation_id: row
+                .get::<Option<String>, _>("worker_incarnation_id")
+                .map(WorkerIncarnationId::from_string),
+            not_before: row.get("not_before"),
+            not_after: row.get("not_after"),
+            created_at: row.get("created_at"),
+        },
+        revoked_at: row.get("revoked_at"),
+        revocation_reason: row.get("revocation_reason"),
+    })
 }
 
 fn protected_action(value: &str) -> Result<ProtectedAction, SecurityError> {
