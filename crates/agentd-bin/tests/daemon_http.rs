@@ -4,15 +4,16 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use agentd_bin::{
     ProductionRunHost, SystemClock, daemon,
     host::{AgentLifecycle, AgentLifecycleShutdown, AgentLifecycleShutdownReport},
 };
 use agentd_core::CoreError;
-use agentd_core::ports::AgentBackend;
+use agentd_core::ports::{AgentBackend, CommandError, CommandOutput, CommandRunner, RunOpts};
 use agentd_core::test_support::{FakeBackend, MempalStub, RecordingCommandRunner};
 use agentd_core::types::{AgentHandle, AgentId, BackendKind, CliKind, RunId, SpawnRequest};
 use agentd_store::{SqliteStore, run_repo};
@@ -22,6 +23,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use http_body_util::BodyExt;
+use tokio::sync::Semaphore;
 use tower::ServiceExt;
 
 fn workflows_dir() -> PathBuf {
@@ -35,6 +37,37 @@ struct SharedBackend(Arc<FakeBackend>);
 impl AgentBackend for SharedBackend {
     async fn spawn(&self, req: SpawnRequest) -> Result<AgentHandle, CoreError> {
         self.0.spawn(req).await
+    }
+}
+
+#[derive(Clone, Debug)]
+struct BlockingCommandRunner {
+    started: Arc<Semaphore>,
+    release: Arc<Semaphore>,
+    completed: Arc<AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl CommandRunner for BlockingCommandRunner {
+    async fn run(
+        &self,
+        program: &str,
+        _args: &[String],
+        _opts: RunOpts,
+    ) -> Result<CommandOutput, CommandError> {
+        assert_eq!(program, "blocking-tool");
+        self.started.add_permits(1);
+        self.release
+            .acquire()
+            .await
+            .expect("release semaphore remains open")
+            .forget();
+        self.completed.store(true, Ordering::SeqCst);
+        Ok(CommandOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            status: 0,
+        })
     }
 }
 
@@ -355,6 +388,112 @@ async fn daemon_router_tools_call_routes_to_dispatch() {
     assert_eq!(status, StatusCode::OK, "body: {body}");
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert_eq!(v["current_node"], "propose_spec", "body: {body}");
+}
+
+#[tokio::test]
+async fn http_tool_call_continues_after_client_cancellation() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let workflow_dir = dir.path().join("workflows");
+    std::fs::create_dir(&workflow_dir).expect("workflow dir");
+    std::fs::write(
+        workflow_dir.join("cancel-safe.dot"),
+        r#"digraph cancel_safe {
+            "start" [shape=Mdiamond];
+            "implement" [handler="codergen", role="codex-impl"];
+            "verify" [handler="tool", cmd="blocking-tool", timeout_secs="30"];
+            "done" [shape=Msquare];
+            "start" -> "implement";
+            "implement" -> "verify";
+            "verify" -> "done";
+        }"#,
+    )
+    .expect("workflow");
+
+    let started = Arc::new(Semaphore::new(0));
+    let release = Arc::new(Semaphore::new(0));
+    let completed = Arc::new(AtomicBool::new(false));
+    let store = SqliteStore::connect(&dir.path().join("agentd.db"))
+        .await
+        .expect("connect");
+    let host = Arc::new(ProductionRunHost::new(
+        store,
+        Box::new(FakeBackend::new()),
+        Box::new(BlockingCommandRunner {
+            started: Arc::clone(&started),
+            release: Arc::clone(&release),
+            completed: Arc::clone(&completed),
+        }),
+        Box::new(MempalStub::new()),
+        Box::new(SystemClock),
+        &workflow_dir,
+    ));
+    let run = RunId::from_string("cancel-safe-r1");
+    run_repo::record_run(
+        host.store().pool(),
+        &run,
+        "cancel-safe.dot",
+        "cancel-safe-sha",
+    )
+    .await
+    .expect("record run");
+    host.start_run(&run).await.expect("park at implement");
+
+    let app = daemon::build_router(host);
+    let request_app = app.clone();
+    let request = tokio::spawn(async move {
+        post(
+            request_app,
+            "/tools/call",
+            serde_json::json!({
+                "name": "submit_outcome",
+                "arguments": {
+                    "run_id": "cancel-safe-r1",
+                    "node_id": "implement",
+                    "attempt": 1,
+                    "status": "success",
+                    "context_updates": {}
+                }
+            }),
+        )
+        .await
+    });
+
+    started
+        .acquire()
+        .await
+        .expect("verify tool starts")
+        .forget();
+    request.abort();
+    assert!(
+        request
+            .await
+            .expect_err("request is cancelled")
+            .is_cancelled()
+    );
+    release.add_permits(1);
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !completed.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("daemon-owned tool dispatch survives request cancellation");
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let (status, body) = get(app.clone(), "/runs/cancel-safe-r1").await;
+            assert_eq!(status, StatusCode::OK, "body: {body}");
+            let snapshot: serde_json::Value = serde_json::from_str(&body).expect("json");
+            if snapshot["status"] == "finished" {
+                assert_eq!(snapshot["current_node"], "done", "snapshot: {body}");
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("run reaches done without resubmitting the outcome");
 }
 
 #[tokio::test]

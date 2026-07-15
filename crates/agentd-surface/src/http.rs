@@ -327,11 +327,21 @@ struct MediaFetchQuery {
 
 /// `POST /tools/call` — agent-facing tool dispatch through the central daemon.
 async fn tool_call(State(state): State<AppState>, Json(req): Json<ToolCallReq>) -> Response {
-    match dispatch(state.host.as_ref(), &req.name, req.arguments).await {
-        Ok(out) => Json(out).into_response(),
-        Err(e) => (
+    // Once accepted by the daemon, workflow advancement must outlive the
+    // client request that triggered it. Dropping a JoinHandle detaches its task.
+    let host = Arc::clone(&state.host);
+    let dispatch_task =
+        tokio::spawn(async move { dispatch(host.as_ref(), &req.name, req.arguments).await });
+    match dispatch_task.await {
+        Ok(Ok(out)) => Json(out).into_response(),
+        Ok(Err(e)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.code() })),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "internal" })),
         )
             .into_response(),
     }
