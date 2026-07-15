@@ -11,6 +11,7 @@ PORT="18789"
 WAIT_SECONDS="600"
 STATE_DIR=""
 SPEC_FILE="$ROOT/specs/e2e/real-execute-smoke-template.spec.md"
+SPEC_FILE_EXPLICIT="0"
 IMPLEMENTER_ROLE="implementer"
 REVIEWERS="claude-sec,codex-perf,gemini-readability"
 RUNTIME_MATRIX="${AGENTD_REAL_EXECUTE_RUNTIMES:-}"
@@ -80,6 +81,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --spec-file)
             SPEC_FILE="${2:?missing --spec-file value}"
+            SPEC_FILE_EXPLICIT="1"
             shift 2
             ;;
         --implementer-role)
@@ -164,6 +166,21 @@ RUN_SNAPSHOT="$STATE_DIR/run_snapshot.json"
 EVENTS_SNAPSHOT="$STATE_DIR/events.snapshot"
 SUMMARY="$STATE_DIR/summary.txt"
 DAEMON_PID=""
+
+validate_default_targets_absent() {
+    if [[ "$SPEC_FILE_EXPLICIT" == "1" ]]; then
+        return 0
+    fi
+
+    local target
+    for target in "$SMOKE_DOC_REL" "$SMOKE_TEST_REL"; do
+        if git -C "$ROOT" cat-file -e "$TASK_BASE_SHA:$target" 2>/dev/null ||
+            [[ -e "$ROOT/$target" ]]; then
+            echo "default smoke target already exists: $target" >&2
+            return 65
+        fi
+    done
+}
 
 validate_role_name() {
     local role="$1"
@@ -546,11 +563,13 @@ case "$MODE" in
     dry-run)
         apply_runtime_matrix
         validate_runtime_roles
+        validate_default_targets_absent
         print_plan
         ;;
     prepare-only)
         apply_runtime_matrix
         validate_runtime_roles
+        validate_default_targets_absent
         prepare_runtime_spec_and_plan
         prepare_smoke_workflow
         echo "real execute smoke prepared; state: $STATE_DIR"
@@ -563,6 +582,7 @@ case "$MODE" in
     execute)
         apply_runtime_matrix
         validate_runtime_roles
+        validate_default_targets_absent
         run_execute
         ;;
     *)

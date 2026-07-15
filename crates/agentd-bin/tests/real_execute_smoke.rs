@@ -33,6 +33,29 @@ fn run_script_with_env(args: &[&str], envs: &[(&str, &str)]) -> Output {
     command.output().expect("run execute smoke script")
 }
 
+fn run_script_in(script: &Path, cwd: &Path, args: &[&str]) -> Output {
+    Command::new("bash")
+        .arg(script)
+        .args(args)
+        .current_dir(cwd)
+        .env_remove("AGENTD_REAL_EXECUTE_SMOKE")
+        .env_remove("AGENTD_REAL_EXECUTE_RUNTIMES")
+        .output()
+        .expect("run execute smoke script in fixture repository")
+}
+
+fn run_ok(command: &mut Command, label: &str) {
+    let output = command
+        .output()
+        .unwrap_or_else(|err| panic!("{label}: {err}"));
+    assert!(
+        output.status.success(),
+        "{label} failed; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn script_command() -> Command {
     let mut command = Command::new("bash");
     command
@@ -234,6 +257,78 @@ fn real_execute_smoke_rejects_unsafe_run_id_before_state_creation() {
     assert!(
         !state_dir.exists(),
         "unsafe run id must fail before creating state"
+    );
+}
+
+#[test]
+fn real_execute_smoke_rejects_existing_default_target_before_state_creation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("repo");
+    let scripts = root.join("scripts");
+    let specs = root.join("specs/e2e");
+    let workflows = root.join("workflows");
+    let existing_doc = root.join("docs/real-execute-smoke/p153-existing-target.md");
+    fs::create_dir_all(&scripts).expect("create scripts directory");
+    fs::create_dir_all(&specs).expect("create specs directory");
+    fs::create_dir_all(&workflows).expect("create workflows directory");
+    fs::create_dir_all(existing_doc.parent().unwrap()).expect("create docs directory");
+    fs::copy(script_path(), scripts.join("agentd_real_execute_smoke.sh"))
+        .expect("copy smoke script");
+    fs::copy(
+        repo_root().join("scripts/agentd_write_plan.sh"),
+        scripts.join("agentd_write_plan.sh"),
+    )
+    .expect("copy plan helper");
+    fs::copy(
+        repo_root().join("specs/e2e/real-execute-smoke-template.spec.md"),
+        specs.join("real-execute-smoke-template.spec.md"),
+    )
+    .expect("copy smoke template");
+    fs::copy(
+        repo_root().join("workflows/execute.dot"),
+        workflows.join("execute.dot"),
+    )
+    .expect("copy execute workflow");
+    fs::write(&existing_doc, "already present at task base\n").expect("write existing target");
+
+    let mut git_init = Command::new("git");
+    git_init.current_dir(&root).args(["init"]);
+    run_ok(&mut git_init, "git init");
+    for args in [
+        vec!["config", "user.email", "agentd@example.invalid"],
+        vec!["config", "user.name", "agentd test"],
+        vec!["add", "."],
+        vec!["commit", "-m", "seed fixture"],
+    ] {
+        let mut git = Command::new("git");
+        git.current_dir(&root).args(args);
+        run_ok(&mut git, "prepare fixture repository");
+    }
+
+    let state_dir = root.join("state");
+    let script = scripts.join("agentd_real_execute_smoke.sh");
+    let out = run_script_in(
+        &script,
+        &root,
+        &[
+            "--prepare-only",
+            "--run-id",
+            "p153-existing-target",
+            "--state-dir",
+            state_dir.to_str().unwrap(),
+        ],
+    );
+
+    assert!(!out.status.success(), "existing default target must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("default smoke target already exists")
+            && stderr.contains("docs/real-execute-smoke/p153-existing-target.md"),
+        "stderr names the conflicting target: {stderr}"
+    );
+    assert!(
+        !state_dir.exists(),
+        "existing target must fail before creating state"
     );
 }
 

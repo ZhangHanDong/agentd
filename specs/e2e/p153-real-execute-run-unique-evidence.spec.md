@@ -79,6 +79,16 @@ Scenario: invalid run ids fail before creating state
   When dry-run or prepare-only validation runs
   Then the command exits non-zero and the state directory does not exist
 
+Scenario: existing default targets fail before creating state
+  Test:
+    Package: agentd-bin
+    Filter: real_execute_smoke_rejects_existing_default_target_before_state_creation
+  Level: integration test
+  Test Double: temporary Git repository containing a run-specific target at its exact base
+  Given the default template and a run-specific document already present at the exact task base
+  When the real execute smoke runs with `--prepare-only`
+  Then the command exits non-zero, names the conflicting target, and does not create the state directory
+
 Scenario: unchanged task worktree is rejected
   Test:
     Package: agentd-bin
