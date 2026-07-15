@@ -26,6 +26,7 @@ async-trait = "0.1"
 futures = "0.3"
 sha2 = "0.10"
 ulid = { version = "1", features = ["serde"] }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 # Self dev-dependency enabling `test-support`: makes the in-memory fakes visible

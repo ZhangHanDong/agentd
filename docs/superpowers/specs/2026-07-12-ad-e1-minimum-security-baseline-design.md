@@ -1,6 +1,6 @@
 # AD-E1 Minimum Execution Security Baseline Design
 
-- Status: scope approved; design recorded; implementation blocked on AD-E0 gates
+- Status: isolated candidate implementation approved 2026-07-15; integration and promotion blocked on AD-E0 gates
 - Date: 2026-07-12
 - Canonical roadmap: `docs/plans/2026-07-09-agentd-native-runtime-roadmap.md`
 - Factory mapping: AD-E1 / FSF-2 minimum worker-side prerequisite
@@ -216,6 +216,10 @@ Passing this baseline means the AD-E2 worker protocol may be designed against a
 real security boundary. It does not mean AD-E0, AD-E1, FSF-0, or FSF-2 has
 passed, and it does not authorize main integration without their acceptance
 records and human sign-off.
+
+The 2026-07-15 authorization permits implementation and verification only on an
+isolated candidate branch. It does not relax any factory gate, acceptance
+record, immutable-candidate, or human-sign-off requirement.
 
 ## 10. Deferred AD-E1 Work
 

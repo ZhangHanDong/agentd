@@ -12,8 +12,10 @@ checkout, and isolated execution sandboxing. Preserve Specify authority and the
 P267/P270/P271 identity, lease, and audit contracts while failing closed before
 any protected side effect.
 
-Implementation remains blocked until AD-E0's FSF-0 and OpenFab PRD/ADR gates
-are satisfied and the feature-branch baseline is approved for integration.
+Isolated candidate implementation was approved on 2026-07-15. Integration,
+promotion, and any AD-E1/FSF-2 completion claim remain blocked until AD-E0's
+FSF-0 and OpenFab PRD/ADR gates are satisfied and the candidate baseline is
+approved for integration.
 
 ## Decisions
 
@@ -68,16 +70,19 @@ are satisfied and the feature-branch baseline is approved for integration.
 - docs/parity/agent-chat-capability-map.md
 - Cargo.toml
 - Cargo.lock
+- crates/agentd-core/Cargo.toml
 - crates/agentd-core/src/ports/security.rs
 - crates/agentd-core/src/ports/mod.rs
 - crates/agentd-core/src/types/security.rs
 - crates/agentd-core/src/types/mod.rs
 - crates/agentd-core/tests/security.rs
 - crates/agentd-security/**
+- crates/agentd-store/Cargo.toml
 - crates/agentd-store/migrations/0016_execution_security.sql
 - crates/agentd-store/src/security_repo.rs
 - crates/agentd-store/src/lib.rs
 - crates/agentd-store/tests/execution_security.rs
+- crates/agentd-bin/Cargo.toml
 - crates/agentd-bin/src/**
 - crates/agentd-bin/tests/**
 - crates/agentctl/tests/execution_security_contract.rs

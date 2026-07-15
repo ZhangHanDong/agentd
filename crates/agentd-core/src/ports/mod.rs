@@ -10,6 +10,7 @@ pub mod command_runner;
 pub mod execution_evidence;
 pub mod mempal;
 pub mod project_authority;
+pub mod security;
 pub mod store;
 pub mod task_lease;
 pub mod worktree_allocator;
@@ -35,6 +36,10 @@ pub use mempal::{DrawerHit, MempalClient};
 pub use project_authority::{
     ProjectAuthorityAvailability, ProjectAuthorityError, ProjectAuthorityHealth,
     ProjectAuthorityMode, ProjectAuthorityPort, ProjectSnapshotResolveRequest,
+};
+pub use security::{
+    AttemptCapabilityPort, ExecutionSandboxPort, SecretBrokerPort, SecurityError,
+    TenantAuthorizationPort, WorkloadIdentityPort,
 };
 pub use store::{RunStatus, Store};
 pub use task_lease::{
