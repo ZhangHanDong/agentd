@@ -3,16 +3,42 @@
 //! (tmux backend, sqlite store, mempal client) live in other crates, and
 //! in-memory fakes live in [`crate::test_support`].
 
+pub mod agent_allocator;
 pub mod backend;
 pub mod clock;
 pub mod command_runner;
+pub mod execution_evidence;
 pub mod mempal;
+pub mod project_authority;
 pub mod store;
+pub mod task_lease;
 pub mod worktree_allocator;
 
+pub use agent_allocator::{
+    AgentAllocation, AgentAllocationRequest, AgentAllocationStatus, AgentAllocator,
+    DirectAgentAllocator,
+};
 pub use backend::AgentBackend;
 pub use clock::Clock;
 pub use command_runner::{CommandError, CommandOutput, CommandRunner, RunOpts};
+pub use execution_evidence::{
+    ArtifactCursor, ArtifactIndexPort, ArtifactListRequest, ArtifactPage, AuditActorKind,
+    AuditPage, AuditReadRequest, CertificationReferenceAppend, CertificationReferenceKind,
+    CertificationReferencePort, CertificationReferenceRecord, ExecutionArtifactKind,
+    ExecutionArtifactPublish, ExecutionArtifactRecord, ExecutionAuditAppend, ExecutionAuditPort,
+    ExecutionAuditRecord, ExecutionEvidenceError, ExecutionEvidenceLinks,
+    ExecutionEvidenceValidationError, ExecutionSnapshotLink, PageLimit, UsageLedgerPort,
+    UsageMeasurement, UsageMetric, UsagePage, UsageReadRequest, UsageRecord, UsageTotal,
+    UsageTotals, WorkerArtifactReport, WorkerUsageReport,
+};
 pub use mempal::{DrawerHit, MempalClient};
+pub use project_authority::{
+    ProjectAuthorityAvailability, ProjectAuthorityError, ProjectAuthorityHealth,
+    ProjectAuthorityMode, ProjectAuthorityPort, ProjectSnapshotResolveRequest,
+};
 pub use store::{RunStatus, Store};
+pub use task_lease::{
+    TaskLeaseCloseRequest, TaskLeaseDispatchRequest, TaskLeaseError, TaskLeasePort,
+    TaskLeaseRejectionReason, TaskLeaseRenewRequest,
+};
 pub use worktree_allocator::WorktreeAllocator;

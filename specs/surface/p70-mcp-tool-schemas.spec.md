@@ -9,10 +9,10 @@ tags: [surface, mvp, p0, mcp]
 tool is a pure function over an injected `RunHost` seam — the agent↔engine/store
 boundary — so the tools are testable against a `FakeRunHost` with no real engine,
 MCP client, or socket. This task lands the seam, the error taxonomy, and the
-first two tools: `query_run` (read) and `submit_outcome` (write). The remaining
-tools (`submit_review`, `assign_task`, `check_inbox`) extend this spec in 7a
-Tasks 2–3; the production `RunHost` (real `Engine` + store) is the daemon's job,
-wired in P0.9.
+first two tools: `query_run` (read) and `submit_outcome` (write). Later tasks
+extended the same registry with review, human answer, direct/group messaging,
+and task assignment tools. The production `RunHost` (real `Engine` + store) is
+wired by the daemon.
 
 ## Decisions
 
@@ -21,8 +21,8 @@ wired in P0.9.
 - `submit_outcome { run_id, node_id, attempt, status, context_updates, preferred_label?, suggested_next? }` → resolve the open task via `open_task` (the inputs carry `(run, node)` but `deliver` routes by `task_run_id`), build an `Outcome`, then `deliver(AgentOutcomeSubmitted { task_run_id, outcome })`. Returns `{ recorded, next_node? }` from the `RunProgress`.
 - `submit_outcome` error mapping: no open task → `not_assigned`; `RunProgress::Ignored` (the park already moved) → `stale_attempt`. The two `Ignored` causes are not collapsed — a missing task is distinguished by the `open_task` miss.
 - `SurfaceError` maps to the §4.12.1 MCP codes (`not_assigned` / `already_submitted` / `stale_attempt` / `not_found`) via `code()`; a `CoreError` becomes `Internal`.
-- A transport-agnostic dispatcher registers the six tools: `tool_descriptors()` returns the six names, and `dispatch(host, name, args)` deserializes `args` into the tool's input, calls it, and serializes the output to JSON. An unknown tool name is an error. P141 adds `submit_human_answer` to expose the existing `HumanAnswered` engine event over the same seam. The rmcp stdio binding that hosts this dispatcher is deferred to the P0.9 daemon-wiring (it needs a real MCP client/agent to exercise), the same defer-real-transport call as the mempal rmcp client.
-- `check_inbox { agent_id, drain }` returns an empty `{ messages: [] }` in v0: the cowork-bus pull is not on the frozen `MempalClient` port and the standalone MVP tolerates no peer messages (D5) — no core widening.
+- A transport-agnostic dispatcher registers nine tools: `assign_task`, `submit_outcome`, `submit_review`, `submit_human_answer`, `send_message`, `post`, `check_inbox`, `check_group`, and `query_run`. `dispatch(host, name, args)` deserializes `args` into the tool's input, calls it, and serializes the output to JSON. An unknown tool name is an error.
+- `check_inbox { agent_id, drain }` returns durable direct and mention messages for the agent. `drain=true` advances the inbox read state so those messages are not returned again.
 
 ## Boundaries
 
@@ -39,7 +39,7 @@ wired in P0.9.
 
 ## Out of Scope
 
-- `submit_review` / `assign_task` / `check_inbox` (7a Tasks 2–3); the rmcp server wiring (Task 3); HTTP+SSE (7b); the production `RunHost` (P0.9).
+- Adding further MCP tools, changing HTTP+SSE behavior, or adding a second agent-facing dispatcher.
 
 ## Completion Criteria
 
@@ -67,17 +67,17 @@ Scenario: submit_outcome with no open task is not_assigned
   When submit_outcome runs
   Then it returns Err whose code is "not_assigned" and the host received no delivered event
 
-Scenario: check_inbox returns an empty inbox in v0
-  Test: check_inbox_returns_empty_v0
-  Given a RunHost and a check_inbox call for agent "impl-a"
-  When check_inbox runs
-  Then it returns an empty messages list
+Scenario: check_inbox returns and drains durable direct messages
+  Test: check_inbox_returns_durable_direct_messages_and_drains
+  Given a RunHost with one unread direct message for agent "codex-worker"
+  When check_inbox runs with drain enabled
+  Then it returns the durable message and a later inbox read does not return it again
 
-Scenario: the dispatcher lists the six tools
-  Test: dispatch_lists_six_tools_with_submit_human_answer
+Scenario: the dispatcher lists the nine tools
+  Test: dispatch_lists_nine_tools_with_submit_human_answer
   Given the tool dispatcher
   When the tool descriptors are listed
-  Then there are exactly six: assign_task, submit_outcome, submit_review, submit_human_answer, check_inbox, query_run
+  Then there are exactly nine: assign_task, submit_outcome, submit_review, submit_human_answer, send_message, post, check_inbox, check_group, query_run
 
 Scenario: the dispatcher routes a call to its tool handler
   Test: dispatch_routes_to_handler

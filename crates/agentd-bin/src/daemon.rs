@@ -2,26 +2,122 @@
 //! HTTP/SSE router, discover in-flight parked runs on boot, and serve.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agentd_core::CoreError;
-use agentd_core::ports::WorktreeAllocator;
+use agentd_core::ports::{AgentAllocation, AgentBackend, WorktreeAllocator};
+use agentd_core::types::{AgentHandle, SpawnRequest};
 use agentd_store::{FailedWorktreeCleanupCandidate, SqliteStore};
 use agentd_surface::host::RunHost;
-use agentd_surface::http::{AppState, router};
-use agentd_tmux::{Config, GitWorktreeProvider, TmuxBackend, TokioCommandRunner, WorktreePool};
+use agentd_surface::http::{AppState, AuthConfig, MediaConfig, SchedulerConfig, router};
+use agentd_tmux::{
+    Config, GitWorktreeProvider, ShutdownMethod, ShutdownOpts, TmuxBackend, TokioCommandRunner,
+    WorktreePool,
+};
 use axum::Router;
 
 use crate::agent_mcp_context::{McpStdioContextBackend, mcp_stdio_command_from_current_process};
 use crate::cli::DaemonConfig;
 use crate::clock::SystemClock;
-use crate::host::ProductionRunHost;
+use crate::host::{
+    AgentLifecycle, AgentLifecycleShutdown, AgentLifecycleShutdownReport, ProductionRunHost,
+};
 use crate::mempal::OfflineMempal;
 
 /// Build the HTTP/SSE router over a host (testable via `tower::oneshot`).
 pub fn build_router(host: Arc<dyn RunHost>) -> Router {
-    router(AppState { host })
+    build_router_with_auth(host, AuthConfig::open())
+}
+
+/// Build the HTTP/SSE router with explicit API auth configuration.
+pub fn build_router_with_auth(host: Arc<dyn RunHost>, auth: AuthConfig) -> Router {
+    build_router_with_auth_and_media(host, auth, MediaConfig::default_local())
+}
+
+/// Build the HTTP/SSE router with an explicit local media staging root.
+pub fn build_router_with_media_dir(
+    host: Arc<dyn RunHost>,
+    media_dir: impl Into<PathBuf>,
+) -> Router {
+    build_router_with_auth_and_media(host, AuthConfig::open(), MediaConfig::new(media_dir))
+}
+
+/// Build the HTTP/SSE router with explicit API auth and media staging settings.
+pub fn build_router_with_auth_and_media(
+    host: Arc<dyn RunHost>,
+    auth: AuthConfig,
+    media: MediaConfig,
+) -> Router {
+    router(AppState {
+        host,
+        auth,
+        media,
+        scheduler: SchedulerConfig::default(),
+    })
+}
+
+/// Production media root colocated with the daemon database.
+#[must_use]
+pub fn media_dir_for_db(db_path: &Path) -> PathBuf {
+    db_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .join("media")
+}
+
+#[derive(Clone)]
+struct SharedTmuxBackend(Arc<TmuxBackend>);
+
+#[async_trait::async_trait]
+impl AgentBackend for SharedTmuxBackend {
+    async fn spawn(&self, req: SpawnRequest) -> Result<AgentHandle, CoreError> {
+        self.0.spawn(req).await
+    }
+
+    async fn dispatch_allocated(
+        &self,
+        req: SpawnRequest,
+        allocation: &AgentAllocation,
+    ) -> Result<AgentHandle, CoreError> {
+        self.0.dispatch_allocated(req, allocation).await
+    }
+}
+
+#[derive(Clone)]
+struct TmuxAgentLifecycle(Arc<TmuxBackend>);
+
+#[async_trait::async_trait]
+impl AgentLifecycle for TmuxAgentLifecycle {
+    async fn shutdown(
+        &self,
+        handle: &AgentHandle,
+        opts: AgentLifecycleShutdown,
+    ) -> Result<AgentLifecycleShutdownReport, CoreError> {
+        let report = self
+            .0
+            .shutdown(
+                handle,
+                ShutdownOpts {
+                    archive_to: opts.archive_to,
+                },
+            )
+            .await?;
+        Ok(AgentLifecycleShutdownReport {
+            method: match report.method {
+                ShutdownMethod::Graceful => "graceful",
+                ShutdownMethod::Interrupt => "interrupt",
+                ShutdownMethod::Kill => "kill",
+            }
+            .to_string(),
+            final_capture_sha: report.final_capture_sha,
+        })
+    }
+
+    async fn rebind(&self, target: &str) -> Result<Option<AgentHandle>, CoreError> {
+        self.0.rebind(target).await.map_err(Into::into)
+    }
 }
 
 /// Construct the production host from a real `SqliteStore`, the real
@@ -38,13 +134,16 @@ pub async fn build_production_host(config: &DaemonConfig) -> Result<ProductionRu
         config.worktree_base.clone(),
     )));
     gc_worktrees_on_boot(&store, &worktree_pool).await?;
-    let backend = TmuxBackend::new(
+    let tmux_backend = Arc::new(TmuxBackend::new(
         Arc::new(TokioCommandRunner::new()),
         PathBuf::from("tmux"),
         Config::default(),
-    );
+    ));
     let mcp_stdio_command = mcp_stdio_command_from_current_process(config)?;
-    let backend = McpStdioContextBackend::new(Box::new(backend), mcp_stdio_command);
+    let backend = McpStdioContextBackend::new(
+        Box::new(SharedTmuxBackend(Arc::clone(&tmux_backend))),
+        mcp_stdio_command,
+    );
     Ok(ProductionRunHost::new(
         store,
         Box::new(backend),
@@ -53,7 +152,9 @@ pub async fn build_production_host(config: &DaemonConfig) -> Result<ProductionRu
         Box::new(SystemClock),
         config.workflows_dir.clone(),
     )
+    .with_agent_lifecycle(Box::new(TmuxAgentLifecycle(Arc::clone(&tmux_backend))))
     .with_accept_workflow_change(config.accept_workflow_change)
+    .with_tool_cwd(config.repo_dir.clone())
     .with_worktree_allocator(Some(Box::new(worktree_pool))))
 }
 
@@ -164,7 +265,12 @@ pub async fn serve(config: DaemonConfig) -> Result<(), Box<dyn std::error::Error
             "in-flight runs awaiting events (resumable from checkpoint)"
         );
     }
-    let app = build_router(Arc::new(host));
+    let media_dir = media_dir_for_db(&config.db_path);
+    let app = build_router_with_auth_and_media(
+        Arc::new(host),
+        config.auth_config(),
+        MediaConfig::new(media_dir),
+    );
     axum::serve(listener, app).await?;
     Ok(())
 }

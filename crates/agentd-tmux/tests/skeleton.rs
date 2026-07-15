@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use agentd_core::CoreError;
 use agentd_core::ports::{CommandRunner, RunOpts};
@@ -91,6 +92,30 @@ fn config_ready_patterns_default_and_override() {
     assert!(
         !cfg.main_prompt_visible("nothing relevant here", CliKind::ClaudeCode),
         "a buffer without the pattern is not the main prompt"
+    );
+}
+
+#[test]
+fn config_default_ready_deadline_covers_slow_codex_mcp_startup() {
+    let cfg = Config::default();
+    assert!(
+        cfg.ready_deadline >= Duration::from_secs(45),
+        "default ready deadline should cover 30s Codex MCP startup timeouts, got {:?}",
+        cfg.ready_deadline
+    );
+}
+
+#[test]
+fn config_codex_ready_patterns_do_not_match_banner_only() {
+    let cfg = Config::default();
+    assert!(
+        !cfg.main_prompt_visible(
+            "╭──────────────────────────────────────────────────────╮\n\
+             │ >_ OpenAI Codex (v0.143.0)                           │\n\
+             ╰──────────────────────────────────────────────────────╯\n",
+            CliKind::Codex
+        ),
+        "Codex banner alone is not enough; wait for the idle prompt marker"
     );
 }
 

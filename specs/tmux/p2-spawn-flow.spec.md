@@ -16,7 +16,7 @@ exercised against a `RecordingCommandRunner` with no real tmux server.
 
 - Naming (§4.3): `session_name = "agentd-<agent_id>"`, `address = "<session_name>:0.0"`. `AgentHandle.backend` is `BackendKind::Tmux`.
 - Step order is fixed (§4.5): `has-session -t <session>` probe FIRST; if it exits zero the session exists and `spawn` returns `BackendError::Recoverable` (mapped to `CoreError::Backend`) telling the caller to `rebind`, BEFORE any launcher is written or any `new-session` is run.
-- The launcher `<worktree>/.agentd-launcher-<agent_id>.sh` (shebang, `cd` to the worktree, exported env, `exec` the CLI) is written before launch, and `<worktree>/.gitignore` is amended idempotently with `.agentd-launcher-*.sh`.
+- The launcher `<worktree>/.agentd-launcher-<agent_id>.sh` (shebang, `cd` to the worktree, exported env, `exec` the CLI) is written before launch, and git `info/exclude` is amended idempotently with `.agentd-launcher-*.sh` without changing the tracked worktree `.gitignore`.
 - Launch argv: Direct runs `tmux new-session -d -s <session> -c <worktree> bash <launcher>`; Systemd wraps it as `systemd-run --user --scope --unit=<scope_name> --collect --quiet tmux new-session …`.
 - The pane is probed with `display-message -p -t <address> "#{pane_id} #{pane_pid}"`; the first whitespace token is the `pane_id` and the second (if present and numeric) is the pid. Output with no `pane_id` token is `BackendError::Invariant`.
 - A non-zero `new-session` exit (the launch failed) is surfaced as an error, before the pane is probed.
@@ -48,11 +48,11 @@ Scenario: spawn returns a handle with the parsed pane id and address
   When spawn runs for agent "claude-impl-a" with the Direct strategy and no initial prompt
   Then the handle session_name is "agentd-claude-impl-a", its address is "agentd-claude-impl-a:0.0", its pane_id is "%3", its pid is 12345, and the recorded calls run has-session then new-session then display-message in that order
 
-Scenario: spawn writes the launcher script and amends gitignore
-  Test: spawn_writes_launcher_and_amends_gitignore
+Scenario: spawn writes the launcher script and amends git exclude
+  Test: spawn_writes_launcher_and_amends_git_exclude
   Given a backend whose runner scripts a successful Direct launch
   When spawn runs against a temporary worktree
-  Then a file ".agentd-launcher-claude-impl-a.sh" exists in the worktree and the worktree ".gitignore" contains ".agentd-launcher-*.sh"
+  Then a file ".agentd-launcher-claude-impl-a.sh" exists in the worktree and git "info/exclude" contains ".agentd-launcher-*.sh"
 
 Scenario: spawn with the Systemd strategy wraps the launch in systemd-run
   Test: spawn_systemd_strategy_wraps_launch

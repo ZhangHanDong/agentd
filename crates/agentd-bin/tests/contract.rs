@@ -14,12 +14,14 @@ use agentd_bin::{
 use agentd_core::CoreError;
 use agentd_core::engine::{Checkpoint, RunProgress};
 use agentd_core::ports::{
-    AgentBackend, CommandError, CommandOutput, CommandRunner, RunOpts, RunStatus, Store,
-    WorktreeAllocator,
+    AgentAllocation, AgentAllocationStatus, AgentBackend, CommandError, CommandOutput,
+    CommandRunner, RunOpts, RunStatus, Store, WorktreeAllocator,
 };
 use agentd_core::test_support::{FakeBackend, MempalStub, RecordingCommandRunner};
 use agentd_core::types::{AgentHandle, AgentId, NodeId, RunContext, RunId, SpawnRequest};
-use agentd_store::{SqliteStore, review_repo, run_repo, task_repo};
+use agentd_store::{
+    SqliteStore, agent_repo, agent_scheduler_repo, review_repo, run_repo, task_repo,
+};
 use agentd_surface::host::RunHost;
 use agentd_surface::mcp_server::dispatch;
 use agentd_tmux::{WorktreePool, WorktreeProvider};
@@ -29,6 +31,10 @@ fn workflows_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workflows")
 }
 
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
 #[derive(Clone, Debug)]
 struct SharedBackend(Arc<FakeBackend>);
 
@@ -36,6 +42,72 @@ struct SharedBackend(Arc<FakeBackend>);
 impl AgentBackend for SharedBackend {
     async fn spawn(&self, req: SpawnRequest) -> Result<AgentHandle, CoreError> {
         self.0.spawn(req).await
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct RecordingAllocationBackend {
+    spawns: Arc<Mutex<Vec<SpawnRequest>>>,
+    dispatches: Arc<Mutex<Vec<(SpawnRequest, AgentAllocation)>>>,
+}
+
+impl RecordingAllocationBackend {
+    fn spawns(&self) -> Vec<SpawnRequest> {
+        self.spawns.lock().expect("spawn lock").clone()
+    }
+
+    fn dispatches(&self) -> Vec<(SpawnRequest, AgentAllocation)> {
+        self.dispatches.lock().expect("dispatch lock").clone()
+    }
+
+    fn handle(req: SpawnRequest, address: String) -> AgentHandle {
+        AgentHandle {
+            agent_id: req.agent_id,
+            backend: agentd_core::types::BackendKind::Tmux,
+            address,
+            pane_id: Some("%42".to_string()),
+            pid: Some(4242),
+            session_name: "agentd-codex-coding-1".to_string(),
+            spawned_at: std::time::SystemTime::UNIX_EPOCH,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentBackend for RecordingAllocationBackend {
+    async fn spawn(&self, req: SpawnRequest) -> Result<AgentHandle, CoreError> {
+        self.spawns.lock().expect("spawn lock").push(req.clone());
+        Ok(Self::handle(req, "fake://spawn".to_string()))
+    }
+
+    async fn dispatch_allocated(
+        &self,
+        req: SpawnRequest,
+        allocation: &AgentAllocation,
+    ) -> Result<AgentHandle, CoreError> {
+        self.dispatches
+            .lock()
+            .expect("dispatch lock")
+            .push((req.clone(), allocation.clone()));
+        let address = allocation
+            .runtime
+            .get("tmuxTarget")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("fake://dispatch")
+            .to_string();
+        Ok(Self::handle(req, address))
+    }
+}
+
+#[derive(Debug)]
+struct FailingBackend;
+
+#[async_trait::async_trait]
+impl AgentBackend for FailingBackend {
+    async fn spawn(&self, _req: SpawnRequest) -> Result<AgentHandle, CoreError> {
+        Err(CoreError::Backend(
+            "injected backend spawn failure".to_string(),
+        ))
     }
 }
 
@@ -127,7 +199,7 @@ struct ObservedHost {
     host: ProductionRunHost,
     backend: Arc<FakeBackend>,
     runner: Arc<RecordingCommandRunner>,
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
 }
 
 async fn production_host() -> (ProductionRunHost, tempfile::TempDir) {
@@ -143,34 +215,9 @@ async fn production_host() -> (ProductionRunHost, tempfile::TempDir) {
         Box::new(SystemClock),
         workflows_dir(),
     )
+    .with_tool_cwd(repo_root())
     .with_worktree_allocator(Some(Box::new(StaticAllocator::new("/tmp/agentd-task-wt"))));
     (host, dir)
-}
-
-async fn production_host_with_allocator(
-    allocator: Option<Box<dyn WorktreeAllocator>>,
-) -> ObservedHost {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let store = SqliteStore::connect(&dir.path().join("agentd.db"))
-        .await
-        .expect("connect");
-    let backend = Arc::new(FakeBackend::new());
-    let runner = Arc::new(RecordingCommandRunner::new());
-    let host = ProductionRunHost::new(
-        store,
-        Box::new(SharedBackend(backend.clone())),
-        Box::new(SharedRunner(runner.clone())),
-        Box::new(MempalStub::new()),
-        Box::new(SystemClock),
-        workflows_dir(),
-    )
-    .with_worktree_allocator(allocator);
-    ObservedHost {
-        host,
-        backend,
-        runner,
-        _dir: dir,
-    }
 }
 
 async fn seed_open_task_checkpoint(host: &ProductionRunHost, run: &str, context: RunContext) {
@@ -205,6 +252,122 @@ async fn seed_open_task_checkpoint(host: &ProductionRunHost, run: &str, context:
         .expect("write checkpoint");
 }
 
+async fn production_host_with_allocator(
+    allocator: Option<Box<dyn WorktreeAllocator>>,
+) -> ObservedHost {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteStore::connect(&dir.path().join("agentd.db"))
+        .await
+        .expect("connect");
+    let backend = Arc::new(FakeBackend::new());
+    let runner = Arc::new(RecordingCommandRunner::new());
+    let host = ProductionRunHost::new(
+        store,
+        Box::new(SharedBackend(backend.clone())),
+        Box::new(SharedRunner(runner.clone())),
+        Box::new(MempalStub::new()),
+        Box::new(SystemClock),
+        workflows_dir(),
+    )
+    .with_tool_cwd(repo_root())
+    .with_worktree_allocator(allocator);
+    ObservedHost {
+        host,
+        backend,
+        runner,
+        dir,
+    }
+}
+
+async fn production_host_with_scheduler_allocator(max_per_cell: i64) -> ObservedHost {
+    let mut observed =
+        production_host_with_allocator(Some(Box::new(StaticAllocator::new("/tmp/agentd-task-wt"))))
+            .await;
+    observed.host = observed.host.with_scheduler_allocator(max_per_cell);
+    observed
+}
+
+async fn production_host_with_recording_allocation_backend(
+    max_per_cell: i64,
+) -> (
+    ProductionRunHost,
+    RecordingAllocationBackend,
+    tempfile::TempDir,
+) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteStore::connect(&dir.path().join("agentd.db"))
+        .await
+        .expect("connect");
+    let backend = RecordingAllocationBackend::default();
+    let host = ProductionRunHost::new(
+        store,
+        Box::new(backend.clone()),
+        Box::new(SharedRunner(Arc::new(RecordingCommandRunner::new()))),
+        Box::new(MempalStub::new()),
+        Box::new(SystemClock),
+        workflows_dir(),
+    )
+    .with_tool_cwd(repo_root())
+    .with_worktree_allocator(Some(Box::new(StaticAllocator::new("/tmp/agentd-task-wt"))))
+    .with_scheduler_allocator(max_per_cell);
+    (host, backend, dir)
+}
+
+async fn register_online_agent(host: &ProductionRunHost, name: &str, role: &str, capability: &str) {
+    agent_repo::register_agent(
+        host.store().pool(),
+        agent_repo::RegisterAgent {
+            name: name.to_string(),
+            role: Some(role.to_string()),
+            capability: Some(capability.to_string()),
+            runtime: Some("codex".to_string()),
+            model: None,
+            tmux_target: Some(format!("{name}:0.0")),
+            home_dir: None,
+            workdir: None,
+            state_dir: None,
+            server: Some("local".to_string()),
+            runtime_profile: json!({}),
+        },
+    )
+    .await
+    .expect("register online agent");
+}
+
+fn write_p230_codergen_workflow(dir: &tempfile::TempDir) -> PathBuf {
+    let path = dir.path().join("p230-codergen.dot");
+    std::fs::write(
+        &path,
+        r#"digraph p230 {
+  "start" [shape=Mdiamond];
+  "implement" [handler="codergen", role="coding", capability="medium"];
+  "done" [shape=Msquare];
+  "start" -> "implement";
+  "implement" -> "done" [condition="outcome=success"];
+}
+"#,
+    )
+    .expect("write p230 workflow");
+    path
+}
+
+fn write_p233_fanout_workflow(dir: &tempfile::TempDir) -> PathBuf {
+    let path = dir.path().join("p233-fanout.dot");
+    std::fs::write(
+        &path,
+        r#"digraph p233 {
+  "start" [shape=Mdiamond];
+  "review" [handler="parallel.fan_out", reviewers="review", capability="medium"];
+  "done" [shape=Msquare];
+  "start" -> "review";
+  "review" -> "done";
+}
+"#,
+    )
+    .expect("write p233 fanout workflow");
+    path
+}
+
 #[tokio::test]
 async fn production_run_snapshot_is_none_for_unknown_run() {
     let (host, _dir) = production_host().await;
@@ -213,6 +376,515 @@ async fn production_run_snapshot_is_none_for_unknown_run() {
         .await
         .expect("run_snapshot");
     assert!(snap.is_none(), "an unknown run has no snapshot");
+}
+
+#[tokio::test]
+async fn production_workflow_scheduler_allocation_is_visible_in_run_events() {
+    let observed = production_host_with_scheduler_allocator(0).await;
+    let host = &observed.host;
+    register_online_agent(host, "codex-coding-1", "coding", "medium").await;
+    let workflow = write_p230_codergen_workflow(&observed.dir);
+    let run = RunId::from_string("p230-event");
+    run_repo::record_run(
+        host.store().pool(),
+        &run,
+        workflow.to_string_lossy().as_ref(),
+        "sha",
+    )
+    .await
+    .expect("record");
+
+    let parked = host.start_run(&run).await.expect("start");
+    assert!(
+        matches!(parked, RunProgress::Parked { .. }),
+        "scheduler-backed workflow parks at implement, got {parked:?}"
+    );
+    let spawned = observed.backend.spawned();
+    assert_eq!(spawned.len(), 1, "fake backend records one spawn");
+    assert_eq!(spawned[0].agent_id.as_str(), "codex-coding-1");
+
+    let busy = agent_scheduler_repo::pool_snapshot(
+        host.store().pool(),
+        agent_scheduler_repo::PoolFilters {
+            role: Some("coding".to_string()),
+            capability: Some("medium".to_string()),
+            state: Some("busy".to_string()),
+        },
+    )
+    .await
+    .expect("busy pool snapshot");
+    assert_eq!(
+        busy.total, 1,
+        "workflow allocation creates durable reservation"
+    );
+    assert_eq!(busy.agents[0].name, "codex-coding-1");
+
+    let events = host.events_from(&run, 0).await.expect("events");
+    let parked = events
+        .iter()
+        .find(|event| event.kind == "run_parked")
+        .expect("parked event");
+    let payload: serde_json::Value =
+        serde_json::from_str(&parked.payload).expect("event payload json");
+    let allocation = &payload["scheduler"]["implement"][0];
+    assert_eq!(payload["node"], "implement");
+    assert_eq!(allocation["requestedRole"], "coding");
+    assert_eq!(allocation["agentId"], "codex-coding-1");
+    assert_eq!(allocation["schedulerStatus"], "routed");
+    assert!(
+        allocation["schedulerReservationId"].as_str().is_some(),
+        "event payload includes scheduler reservation metadata: {payload}"
+    );
+}
+
+#[tokio::test]
+async fn production_workflow_scheduler_release_on_agent_completion() {
+    let observed = production_host_with_scheduler_allocator(0).await;
+    let host = &observed.host;
+    register_online_agent(host, "codex-coding-1", "coding", "medium").await;
+    let workflow = write_p230_codergen_workflow(&observed.dir);
+    let run = RunId::from_string("p230-release");
+    run_repo::record_run(
+        host.store().pool(),
+        &run,
+        workflow.to_string_lossy().as_ref(),
+        "sha",
+    )
+    .await
+    .expect("record");
+
+    host.start_run(&run).await.expect("start");
+    let assignment = host
+        .open_task(&run, &NodeId::parsed("implement"))
+        .await
+        .expect("open task")
+        .expect("open implement task");
+    assert_eq!(assignment.agent_id, "codex-coding-1");
+
+    agent_submit_success(host, "p230-release", "implement")
+        .await
+        .expect("submit implement");
+    let busy_after_release = agent_scheduler_repo::pool_snapshot(
+        host.store().pool(),
+        agent_scheduler_repo::PoolFilters {
+            role: Some("coding".to_string()),
+            capability: Some("medium".to_string()),
+            state: Some("busy".to_string()),
+        },
+    )
+    .await
+    .expect("busy pool snapshot after release");
+    assert_eq!(
+        busy_after_release.total, 0,
+        "completion releases the scheduler reservation"
+    );
+
+    let replay = agent_submit_success(host, "p230-release", "implement").await;
+    assert!(replay.is_err(), "replayed outcome is rejected");
+    let busy_after_replay = agent_scheduler_repo::pool_snapshot(
+        host.store().pool(),
+        agent_scheduler_repo::PoolFilters {
+            role: Some("coding".to_string()),
+            capability: Some("medium".to_string()),
+            state: Some("busy".to_string()),
+        },
+    )
+    .await
+    .expect("busy pool snapshot after replay");
+    assert_eq!(
+        busy_after_replay.total, 0,
+        "replay does not make the scheduler busy again"
+    );
+}
+
+#[tokio::test]
+async fn production_workflow_scheduler_reuses_registered_pane_without_spawn() {
+    let (host, backend, dir) = production_host_with_recording_allocation_backend(0).await;
+    agent_repo::register_agent(
+        host.store().pool(),
+        agent_repo::RegisterAgent {
+            name: "codex-coding-1".to_string(),
+            role: Some("coding".to_string()),
+            capability: Some("medium".to_string()),
+            runtime: Some("codex".to_string()),
+            model: Some("codex-test".to_string()),
+            tmux_target: Some("agentd-codex-coding-1:0.0".to_string()),
+            home_dir: None,
+            workdir: Some("/tmp/codex-coding-1".to_string()),
+            state_dir: None,
+            server: Some("local".to_string()),
+            runtime_profile: json!({"profile": "p231"}),
+        },
+    )
+    .await
+    .expect("register online agent");
+    let workflow = write_p230_codergen_workflow(&dir);
+    let run = RunId::from_string("p231-reuse");
+    run_repo::record_run(
+        host.store().pool(),
+        &run,
+        workflow.to_string_lossy().as_ref(),
+        "sha",
+    )
+    .await
+    .expect("record");
+
+    let parked = host.start_run(&run).await.expect("start");
+    assert!(
+        matches!(parked, RunProgress::Parked { .. }),
+        "scheduler-backed workflow parks at implement, got {parked:?}"
+    );
+
+    assert!(
+        backend.spawns().is_empty(),
+        "routed online workflow allocation must not plain-spawn a duplicate session"
+    );
+    let dispatches = backend.dispatches();
+    assert_eq!(dispatches.len(), 1, "one allocation-aware dispatch");
+    assert_eq!(dispatches[0].0.agent_id.as_str(), "codex-coding-1");
+    assert_eq!(
+        dispatches[0].1.runtime["tmuxTarget"],
+        "agentd-codex-coding-1:0.0"
+    );
+    assert_eq!(
+        dispatches[0].1.runtime["tmux_target"],
+        "agentd-codex-coding-1:0.0"
+    );
+    assert_eq!(dispatches[0].1.runtime["runtime"], "codex");
+    assert_eq!(dispatches[0].1.runtime["model"], "codex-test");
+    assert_eq!(dispatches[0].1.runtime["workdir"], "/tmp/codex-coding-1");
+    assert_eq!(dispatches[0].1.runtime["runtimeProfile"]["profile"], "p231");
+
+    let events = host.events_from(&run, 0).await.expect("events");
+    let parked = events
+        .iter()
+        .find(|event| event.kind == "run_parked")
+        .expect("parked event");
+    let payload: serde_json::Value =
+        serde_json::from_str(&parked.payload).expect("event payload json");
+    let allocation = &payload["scheduler"]["implement"][0];
+    assert_eq!(
+        allocation["runtime"]["tmuxTarget"],
+        "agentd-codex-coding-1:0.0"
+    );
+    assert_eq!(
+        allocation["runtime"]["tmux_target"],
+        "agentd-codex-coding-1:0.0"
+    );
+}
+
+#[tokio::test]
+async fn production_workflow_scheduler_drains_queued_codergen_ticket_on_release() {
+    let (host, backend, dir) = production_host_with_recording_allocation_backend(0).await;
+    register_online_agent(&host, "codex-coding-1", "coding", "medium").await;
+    let workflow = write_p230_codergen_workflow(&dir);
+    let busy_run = RunId::from_string("p232-busy");
+    let queued_run = RunId::from_string("p232-queued");
+    for run in [&busy_run, &queued_run] {
+        run_repo::record_run(
+            host.store().pool(),
+            run,
+            workflow.to_string_lossy().as_ref(),
+            "sha",
+        )
+        .await
+        .expect("record run");
+    }
+
+    host.start_run(&busy_run).await.expect("start busy run");
+    assert_eq!(
+        backend.dispatches().len(),
+        1,
+        "first run dispatches the only online coding agent"
+    );
+
+    let queued_progress = host.start_run(&queued_run).await.expect("start queued run");
+    assert!(
+        matches!(queued_progress, RunProgress::Parked { .. }),
+        "queued run parks instead of failing, got {queued_progress:?}"
+    );
+    assert_eq!(
+        backend.dispatches().len(),
+        1,
+        "queued run must not dispatch until scheduler release drains it"
+    );
+    assert_eq!(
+        scheduler_queue_status_count(&host, "queued").await,
+        1,
+        "second run creates one durable queued scheduler ticket"
+    );
+    let queued_assignment = host
+        .open_task(&queued_run, &NodeId::parsed("implement"))
+        .await
+        .expect("open queued task")
+        .expect("queued task is open");
+    assert_eq!(
+        queued_assignment.agent_id, "",
+        "queued task is not owned until drain assigns the freed agent"
+    );
+
+    agent_submit_success(&host, "p232-busy", "implement")
+        .await
+        .expect("submit busy run");
+
+    let dispatches = backend.dispatches();
+    assert_eq!(
+        dispatches.len(),
+        2,
+        "release-drain dispatches the queued run exactly once"
+    );
+    let drained = dispatch_for_run(&dispatches, "p232-queued");
+    assert_eq!(drained.0.agent_id.as_str(), "codex-coding-1");
+    assert_eq!(drained.1.status, AgentAllocationStatus::Drained);
+    assert!(
+        drained.1.ticket.as_deref().is_some(),
+        "drained allocation keeps the scheduler ticket"
+    );
+    assert!(
+        drained
+            .0
+            .initial_prompt
+            .as_deref()
+            .expect("queued prompt")
+            .contains("agentd_scheduler_status: drained"),
+        "queued prompt includes drained scheduler metadata: {:?}",
+        drained.0.initial_prompt
+    );
+
+    let assigned_after_drain = host
+        .open_task(&queued_run, &NodeId::parsed("implement"))
+        .await
+        .expect("open queued task after drain")
+        .expect("queued task remains open");
+    assert_eq!(
+        assigned_after_drain.task_run_id, queued_assignment.task_run_id,
+        "drain reuses the original task-run id"
+    );
+    assert_eq!(assigned_after_drain.agent_id, "codex-coding-1");
+    assert_eq!(
+        scheduler_queue_status_count(&host, "drained").await,
+        1,
+        "queued ticket is marked drained after wakeup"
+    );
+
+    let payload = latest_run_parked_payload(&host, &queued_run).await;
+    let allocations = payload["scheduler"]["implement"]
+        .as_array()
+        .expect("scheduler allocations");
+    assert!(
+        allocations
+            .iter()
+            .any(|allocation| allocation["schedulerStatus"] == "drained"
+                && allocation["agentId"] == "codex-coding-1"
+                && allocation["schedulerReservationId"].as_str().is_some()),
+        "latest queued run park event exposes drained allocation: {payload}"
+    );
+}
+
+#[tokio::test]
+async fn production_workflow_scheduler_queued_codergen_wakeup_is_idempotent() {
+    let (host, backend, dir) = production_host_with_recording_allocation_backend(0).await;
+    register_online_agent(&host, "codex-coding-1", "coding", "medium").await;
+    let workflow = write_p230_codergen_workflow(&dir);
+    let busy_run = RunId::from_string("p232-idem-busy");
+    let queued_run = RunId::from_string("p232-idem-queued");
+    for run in [&busy_run, &queued_run] {
+        run_repo::record_run(
+            host.store().pool(),
+            run,
+            workflow.to_string_lossy().as_ref(),
+            "sha",
+        )
+        .await
+        .expect("record run");
+    }
+
+    host.start_run(&busy_run).await.expect("start busy run");
+    host.start_run(&queued_run).await.expect("start queued run");
+    agent_submit_success(&host, "p232-idem-busy", "implement")
+        .await
+        .expect("submit busy run");
+    let after_first_wakeup = backend.dispatches().len();
+    assert_eq!(
+        after_first_wakeup, 2,
+        "setup produced one original dispatch and one queued wakeup dispatch"
+    );
+
+    let replay = agent_submit_success(&host, "p232-idem-busy", "implement").await;
+    assert!(replay.is_err(), "replayed completion is rejected");
+    assert_eq!(
+        backend.dispatches().len(),
+        after_first_wakeup,
+        "replayed completion must not dispatch the queued run again"
+    );
+    assert_eq!(
+        scheduler_queue_status_count(&host, "queued").await,
+        0,
+        "woken queue does not recreate a queued ticket"
+    );
+    assert_eq!(
+        scheduler_queue_status_count(&host, "drained").await,
+        1,
+        "woken queue keeps one drained ticket"
+    );
+}
+
+#[tokio::test]
+async fn production_workflow_scheduler_drains_queued_fanout_reviewer_ticket_on_release() {
+    let (host, backend, dir) = production_host_with_recording_allocation_backend(0).await;
+    register_online_agent(&host, "codex-review-1", "review", "medium").await;
+    let workflow = write_p233_fanout_workflow(&dir);
+    let busy_run = RunId::from_string("p233-busy-review");
+    let queued_run = RunId::from_string("p233-queued-review");
+    for run in [&busy_run, &queued_run] {
+        run_repo::record_run(
+            host.store().pool(),
+            run,
+            workflow.to_string_lossy().as_ref(),
+            "sha",
+        )
+        .await
+        .expect("record run");
+    }
+
+    host.start_run(&busy_run).await.expect("start busy run");
+    assert_eq!(
+        backend.dispatches().len(),
+        1,
+        "first review run dispatches the only online review agent"
+    );
+
+    let queued_progress = host.start_run(&queued_run).await.expect("start queued run");
+    assert!(
+        matches!(queued_progress, RunProgress::Parked { .. }),
+        "queued review run parks instead of failing, got {queued_progress:?}"
+    );
+    assert!(
+        backend.spawns().is_empty(),
+        "scheduler-routed reviewers use allocation-aware dispatch, not plain spawn"
+    );
+    assert_eq!(
+        backend.dispatches().len(),
+        1,
+        "queued fan_out reviewer must not dispatch until scheduler release drains it"
+    );
+    assert_eq!(
+        scheduler_queue_status_count(&host, "queued").await,
+        1,
+        "second review run creates one durable queued scheduler ticket"
+    );
+
+    let busy_review_run_id = review_repo::find_open_review_run(host.store().pool(), &busy_run)
+        .await
+        .expect("find busy review run")
+        .expect("busy review run is open");
+    let queued_review_run_id = review_repo::find_open_review_run(host.store().pool(), &queued_run)
+        .await
+        .expect("find queued review run")
+        .expect("queued review run is open");
+
+    agent_submit_review(&host, busy_review_run_id.as_str(), "codex-review-1")
+        .await
+        .expect("submit busy reviewer");
+
+    let dispatches = backend.dispatches();
+    assert_eq!(
+        dispatches.len(),
+        2,
+        "release-drain dispatches the queued reviewer exactly once"
+    );
+    let drained = dispatch_for_review_run(&dispatches, queued_review_run_id.as_str());
+    assert_eq!(drained.0.agent_id.as_str(), "codex-review-1");
+    assert_eq!(drained.1.status, AgentAllocationStatus::Drained);
+    assert!(
+        drained.1.ticket.as_deref().is_some(),
+        "drained reviewer allocation keeps the scheduler ticket"
+    );
+    let prompt = drained.0.initial_prompt.as_deref().expect("queued prompt");
+    assert!(
+        prompt.contains("agentd_scheduler_status: drained"),
+        "queued reviewer prompt includes drained scheduler metadata: {prompt}"
+    );
+    assert!(
+        prompt.contains("agentd_reviewer_id: codex-review-1"),
+        "queued reviewer prompt uses the freed agent id: {prompt}"
+    );
+    assert!(
+        prompt.contains(&format!(
+            "agentd_review_run_id: {}",
+            queued_review_run_id.as_str()
+        )),
+        "queued reviewer prompt targets the original review run: {prompt}"
+    );
+    assert_eq!(
+        scheduler_queue_status_count(&host, "drained").await,
+        1,
+        "queued reviewer ticket is marked drained after wakeup"
+    );
+
+    let payload = latest_run_parked_payload(&host, &queued_run).await;
+    let allocations = payload["scheduler"]["review"]
+        .as_array()
+        .expect("scheduler allocations");
+    assert!(
+        allocations
+            .iter()
+            .any(|allocation| allocation["schedulerStatus"] == "drained"
+                && allocation["agentId"] == "codex-review-1"
+                && allocation["schedulerReservationId"].as_str().is_some()),
+        "latest queued review park event exposes drained allocation: {payload}"
+    );
+}
+
+#[tokio::test]
+async fn production_workflow_scheduler_queued_fanout_wakeup_is_idempotent() {
+    let (host, backend, dir) = production_host_with_recording_allocation_backend(0).await;
+    register_online_agent(&host, "codex-review-1", "review", "medium").await;
+    let workflow = write_p233_fanout_workflow(&dir);
+    let busy_run = RunId::from_string("p233-idem-busy-review");
+    let queued_run = RunId::from_string("p233-idem-queued-review");
+    for run in [&busy_run, &queued_run] {
+        run_repo::record_run(
+            host.store().pool(),
+            run,
+            workflow.to_string_lossy().as_ref(),
+            "sha",
+        )
+        .await
+        .expect("record run");
+    }
+
+    host.start_run(&busy_run).await.expect("start busy run");
+    host.start_run(&queued_run).await.expect("start queued run");
+    let busy_review_run_id = review_repo::find_open_review_run(host.store().pool(), &busy_run)
+        .await
+        .expect("find busy review run")
+        .expect("busy review run is open");
+    agent_submit_review(&host, busy_review_run_id.as_str(), "codex-review-1")
+        .await
+        .expect("submit busy reviewer");
+    let after_first_wakeup = backend.dispatches().len();
+    assert_eq!(
+        after_first_wakeup, 2,
+        "setup produced one original review dispatch and one queued reviewer wakeup dispatch"
+    );
+
+    let _ = agent_submit_review(&host, busy_review_run_id.as_str(), "codex-review-1").await;
+    assert_eq!(
+        backend.dispatches().len(),
+        after_first_wakeup,
+        "replayed review completion must not dispatch the queued reviewer again"
+    );
+    assert_eq!(
+        scheduler_queue_status_count(&host, "queued").await,
+        0,
+        "woken reviewer queue does not recreate a queued ticket"
+    );
+    assert_eq!(
+        scheduler_queue_status_count(&host, "drained").await,
+        1,
+        "woken reviewer queue keeps one drained ticket"
+    );
 }
 
 /// The scriptable in-process agent: submit a node's success through the same MCP
@@ -231,6 +903,52 @@ async fn agent_submit_success(
         }),
     )
     .await
+}
+
+async fn scheduler_queue_status_count(host: &ProductionRunHost, status: &str) -> i64 {
+    agent_scheduler_repo::queue_status_count(host.store().pool(), status)
+        .await
+        .expect("scheduler queue status count")
+}
+
+fn dispatch_for_run<'a>(
+    dispatches: &'a [(SpawnRequest, AgentAllocation)],
+    run_id: &str,
+) -> &'a (SpawnRequest, AgentAllocation) {
+    dispatches
+        .iter()
+        .find(|(req, _)| {
+            req.initial_prompt
+                .as_deref()
+                .is_some_and(|prompt| prompt.contains(&format!("agentd_run_id: {run_id}")))
+        })
+        .unwrap_or_else(|| panic!("missing dispatch for run {run_id}: {dispatches:?}"))
+}
+
+fn dispatch_for_review_run<'a>(
+    dispatches: &'a [(SpawnRequest, AgentAllocation)],
+    review_run_id: &str,
+) -> &'a (SpawnRequest, AgentAllocation) {
+    dispatches
+        .iter()
+        .find(|(req, _)| {
+            req.initial_prompt.as_deref().is_some_and(|prompt| {
+                prompt.contains(&format!("agentd_review_run_id: {review_run_id}"))
+            })
+        })
+        .unwrap_or_else(|| {
+            panic!("missing dispatch for review run {review_run_id}: {dispatches:?}")
+        })
+}
+
+async fn latest_run_parked_payload(host: &ProductionRunHost, run: &RunId) -> serde_json::Value {
+    let events = host.events_from(run, 0).await.expect("events");
+    let latest_parked = events
+        .iter()
+        .rev()
+        .find(|event| event.kind == "run_parked")
+        .expect("run has parked events");
+    serde_json::from_str(&latest_parked.payload).expect("parked payload json")
 }
 
 /// Record a `draft.dot` run and start it (parks at `propose_spec`).
@@ -668,7 +1386,7 @@ async fn production_assign_task_accepts_owner_and_rejects_other_agent() {
 }
 
 #[tokio::test]
-async fn production_runhost_execute_publishes_worktree_branch_before_pr() {
+async fn production_runhost_execute_tools_use_stable_repo_cwd_after_review_fan_in() {
     let observed =
         production_host_with_allocator(Some(Box::new(StaticAllocator::new("/tmp/agentd-task-wt"))))
             .await;
@@ -727,6 +1445,11 @@ async fn production_runhost_execute_publishes_worktree_branch_before_pr() {
             task_run_id_arg.clone(),
         ]
     );
+    assert_eq!(
+        calls[publish_idx].cwd,
+        Some(repo_root()),
+        "publish_branch must not inherit a transient reviewer/MCP cwd"
+    );
 
     let open_pr_idx = calls
         .iter()
@@ -745,6 +1468,11 @@ async fn production_runhost_execute_publishes_worktree_branch_before_pr() {
         calls[open_pr_idx].args,
         vec!["scripts/agentd_open_pr.sh".to_string(), task_run_id_arg,]
     );
+    assert_eq!(
+        calls[open_pr_idx].cwd,
+        Some(repo_root()),
+        "open_pr must not inherit a transient reviewer/MCP cwd"
+    );
 }
 
 #[tokio::test]
@@ -756,16 +1484,85 @@ async fn production_runhost_allocator_failure_stops_execute_before_verify() {
         .await
         .expect("record");
 
-    let err = host.start_run(&run).await.expect_err("allocator failure");
+    let progress = host
+        .start_run(&run)
+        .await
+        .expect("allocator failure is recorded as failed progress");
+    match progress {
+        RunProgress::Failed { reason, .. } => assert!(
+            reason.contains("injected allocator failure"),
+            "failed reason should contain allocator error: {reason}"
+        ),
+        other => panic!("expected failed progress, got {other:?}"),
+    }
+
+    let snap = host
+        .run_snapshot(&run)
+        .await
+        .expect("snapshot")
+        .expect("run exists");
+    assert_eq!(snap.status, "failed");
+    let events = host.events_from(&run, 0).await.expect("events");
+    assert_eq!(events.len(), 1, "one terminal failure event: {events:?}");
+    assert_eq!(events[0].kind, "run_failed");
     assert!(
-        format!("{err:?}").contains("injected allocator failure"),
-        "allocator failure is surfaced, got {err:?}"
+        events[0].payload.contains("injected allocator failure"),
+        "event payload includes allocator error: {}",
+        events[0].payload
     );
     assert!(
         observed.runner.calls().iter().all(|c| {
             !(c.program == "agent-spec" && c.args.first().is_some_and(|a| a == "lifecycle"))
         }),
         "verify_lifecycle must not run after allocator failure"
+    );
+}
+
+#[tokio::test]
+async fn production_runhost_backend_failure_marks_run_failed_and_emits_event() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteStore::connect(&dir.path().join("agentd.db"))
+        .await
+        .expect("connect");
+    let host = ProductionRunHost::new(
+        store,
+        Box::new(FailingBackend),
+        Box::new(RecordingCommandRunner::new()),
+        Box::new(MempalStub::new()),
+        Box::new(SystemClock),
+        workflows_dir(),
+    )
+    .with_worktree_allocator(Some(Box::new(StaticAllocator::new("/tmp/agentd-task-wt"))));
+    let run = RunId::from_string("e-backend-fail");
+    run_repo::record_run(host.store().pool(), &run, "execute.dot", "sha")
+        .await
+        .expect("record");
+
+    let progress = host
+        .start_run(&run)
+        .await
+        .expect("backend launch failure is recorded as failed progress");
+    match progress {
+        RunProgress::Failed { reason, .. } => assert!(
+            reason.contains("injected backend spawn failure"),
+            "failed reason should contain backend error: {reason}"
+        ),
+        other => panic!("expected failed progress, got {other:?}"),
+    }
+
+    let snap = host
+        .run_snapshot(&run)
+        .await
+        .expect("snapshot")
+        .expect("run exists");
+    assert_eq!(snap.status, "failed");
+    let events = host.events_from(&run, 0).await.expect("events");
+    assert_eq!(events.len(), 1, "one terminal failure event: {events:?}");
+    assert_eq!(events[0].kind, "run_failed");
+    assert!(
+        events[0].payload.contains("injected backend spawn failure"),
+        "event payload includes backend error: {}",
+        events[0].payload
     );
 }
 

@@ -46,6 +46,14 @@ id_newtype!(TaskRunId, "tr");
 id_newtype!(ReviewRunId, "rv");
 id_newtype!(NodeId, "n"); // not auto-generated typically; parsed from DOT
 id_newtype!(AgentId, "a"); // typically human-set ("claude-impl-a")
+id_newtype!(AgentProfileId, "ap");
+id_newtype!(WorkerId, "wk");
+id_newtype!(WorkerIncarnationId, "wi");
+id_newtype!(RuntimeSessionId, "rs");
+id_newtype!(RuntimeAttemptId, "ra");
+id_newtype!(ExecutionArtifactId, "ar");
+id_newtype!(AuditEventId, "ae");
+id_newtype!(LeaseId, "ls");
 
 impl NodeId {
     /// `NodeId`s in DOT files are operator-authored; preserve as-is.

@@ -84,7 +84,6 @@ This aggregate helper does not run AGENTD_REAL_* --execute gates.
 
 preflight order:
   bash scripts/agentd_pr_history_status.sh HEAD main
-  bash scripts/agentd_real_claude_smoke.sh --preflight-only
   bash scripts/agentd_real_execute_smoke.sh --preflight-only
   bash scripts/agentd_real_sigkill_smoke.sh --preflight-only
 
@@ -112,11 +111,9 @@ run_preflight() {
     (
         cd "$ROOT"
         run_step "git history" bash "$SCRIPTS_DIR/agentd_pr_history_status.sh" HEAD main
-        run_step "real Claude preflight" bash "$SCRIPTS_DIR/agentd_real_claude_smoke.sh" \
-            --preflight-only \
-            --run-id "$RUN_ID-claude" \
-            --state-dir "$STATE_DIR/real-claude"
-        run_step "real execute preflight" bash "$SCRIPTS_DIR/agentd_real_execute_smoke.sh" \
+        run_step "real execute preflight" env \
+            AGENTD_REAL_EXECUTE_RUNTIMES=codex,codex,codex,codex \
+            bash "$SCRIPTS_DIR/agentd_real_execute_smoke.sh" \
             --preflight-only \
             --run-id "$RUN_ID-execute" \
             --state-dir "$STATE_DIR/real-execute"

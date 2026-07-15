@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use agentd_surface::host::RunSummary;
-use agentd_surface::http::{AppState, router};
+use agentd_surface::http::{AppState, AuthConfig, MediaConfig, SchedulerConfig, router};
 use agentd_surface::test_support::FakeRunHost;
 use axum::Router;
 use axum::body::Body;
@@ -17,6 +17,9 @@ use tower::ServiceExt;
 fn app(host: FakeRunHost) -> Router {
     router(AppState {
         host: Arc::new(host),
+        auth: AuthConfig::open(),
+        media: MediaConfig::default_for_tests(),
+        scheduler: SchedulerConfig::default(),
     })
 }
 
