@@ -34,6 +34,23 @@ impl Store for SqliteStore {
         Ok(outcome_repo::insert_node_outcome(self.pool(), run_id, node_id, outcome).await?)
     }
 
+    async fn insert_node_outcome_and_checkpoint(
+        &self,
+        run_id: &RunId,
+        node_id: &NodeId,
+        outcome: &Outcome,
+        checkpoint: &Checkpoint,
+    ) -> Result<(), CoreError> {
+        Ok(outcome_repo::insert_node_outcome_and_checkpoint(
+            self.pool(),
+            run_id,
+            node_id,
+            outcome,
+            checkpoint,
+        )
+        .await?)
+    }
+
     async fn latest_outcome(
         &self,
         run_id: &RunId,

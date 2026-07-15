@@ -148,6 +148,7 @@ fn daemon_config(api_token: Option<&str>) -> DaemonConfig {
         workflows_dir: PathBuf::from("workflows"),
         repo_dir: PathBuf::from("."),
         worktree_base: PathBuf::from(".agentd/worktrees"),
+        accept_workflow_change: false,
         log_level: "info".to_owned(),
         api_token: api_token.map(ToOwned::to_owned),
         agent_tokens: Vec::new(),

@@ -42,6 +42,13 @@ pub trait Store: Send + Sync {
         node_id: &NodeId,
         outcome: &Outcome,
     ) -> Result<(), CoreError>;
+    async fn insert_node_outcome_and_checkpoint(
+        &self,
+        run_id: &RunId,
+        node_id: &NodeId,
+        outcome: &Outcome,
+        checkpoint: &Checkpoint,
+    ) -> Result<(), CoreError>;
     async fn latest_outcome(
         &self,
         run_id: &RunId,

@@ -153,6 +153,7 @@ pub async fn build_production_host(config: &DaemonConfig) -> Result<ProductionRu
         config.workflows_dir.clone(),
     )
     .with_agent_lifecycle(Box::new(TmuxAgentLifecycle(Arc::clone(&tmux_backend))))
+    .with_accept_workflow_change(config.accept_workflow_change)
     .with_tool_cwd(config.repo_dir.clone())
     .with_worktree_allocator(Some(Box::new(worktree_pool))))
 }

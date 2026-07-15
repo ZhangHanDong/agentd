@@ -1,12 +1,14 @@
 # agentd — P1 roadmap plan (§7.3 reconciled with the Specify boundary)
 
-> Status: planning (not committed). Reconciles design-doc
+> Status: as-built plus remaining gates. This began as a planning note and now
+> records the delivered P1 slices as well as the remaining external Specify API
+> gate. Reconciles design-doc
 > [§7.3](../specs/2026-05-29-agentd-design.md) (the "make v1 nice to use" packs,
 > written pre-split) with the authoritative
 > [boundary doc](../specs/2026-05-29-agentd-specify-boundary.md). **Where they
 > conflict, the boundary doc wins.** This plan filters §7.3 by what agentd
-> actually owns, surfaces the one fork the user must decide, and records the
-> cross-cuts that touch what already shipped (the herdr-borrow P1 batch, #1–#6).
+> actually owns, records the fork that drove the early P1 ordering, and keeps the
+> current "what remains" boundary explicit.
 >
 > Naming: the design doc's §7.3 packs are **P1.1–P1.7**. They are NOT the
 > ad-hoc "herdr-borrow P1 batch" (#1–#6) already shipped this cycle. Distinct
@@ -39,6 +41,43 @@ real-work evidence; the tests are not.
 local-file stand-in for a real Specify pull — **not** a prerequisite for
 standalone value. The fork below is genuinely open.
 
+## 0.5 As-built status after P145
+
+Track A is substantially delivered in this repo:
+
+- **P1.3 Worktree pool** — delivered across P99-P107: per-`task_run`
+  allocation, publication, reviewer isolation, boot-GC preservation, failed-run
+  cleanup, and maintenance CLI hardening.
+- **P1.7 More workflows** — delivered by the shipped `bugfix-rapid`,
+  `docs-only`, `refactor-only`, `spike`, and `bootstrap` workflows, with PR
+  publication moved onto the worktree branch convention.
+- **P1.4 Reviewer stance + Delphi** — delivered through P108-P113: round-aware
+  review parks, converge-or fallback, round-loop runtime, reviewer stance packs,
+  prompt profiles, and findings-diff convergence.
+- **P1.5 agent-spec discover** — delivered by `bootstrap.dot` using
+  `agent-spec discover --from-codebase`.
+- **P1.1 Dashboard** — delivered by P114-P118 as a read-mostly local operator
+  shell over `GET /runs`, `GET /runs/:id`, and the SSE event tail.
+
+Specify Track B is delivered through the local no-network seam and runtime hook:
+
+- **P142** adds the private `agentd-specify` crate, object-safe
+  `SpecifyClient`, `OfflineSpecify`, protocol value types, and recording test
+  support.
+- **P143** adds the first pure semantic-event mapping:
+  `run_parked` -> `agent.blocked`, `run_finished` -> `workflow.finished`, and
+  `run_failed` -> `workflow.failed`.
+- **P144** adds `report_agentd_event`, connecting the mapper to
+  `SpecifyClient::report_event` without runtime or network wiring.
+- **P145** adds the runtime `ProductionRunHost` hook that reports newly appended
+  durable events through the injectable client after live broadcast, defaulting
+  to `OfflineSpecify` and treating report failures as best-effort.
+
+What remains is deliberately external-contract gated: **real HTTP/WS transport**,
+**auth**, **endpoint config**, and **canonical external workflow ids** require a
+concrete Specify API contract. Do not infer or invent those endpoint semantics
+from this repo alone.
+
 ## 1. Boundary-filtered pack inventory
 
 | Pack | Source | Owner verdict | One-line scope (agentd's part) |
@@ -48,8 +87,8 @@ standalone value. The fork below is genuinely open.
 | **P1.4 Reviewer stance + Delphi** | §7.3 | ✅ agentd (core) | per-reviewer mempal queries; prompt profiles; Delphi N-round loop |
 | **P1.5 agent-spec discover** | §7.3 | ✅ agentd | `discover --from-codebase` as a bootstrap workflow |
 | **P1.1 Dashboard** | §7.3 | ✅ agentd, **scope-narrowed** | LOCAL operator view (read-mostly); humans use Robrix/Specify, so "write mode" largely overlaps Specify's command authority — trim to a local-ops console |
-| **Δ7 Specify client** (`agentd-specify`) | boundary Δ7 | ✅ agentd, **external-contract risk** | thin reqwest: pull issue / push draft / pull frozen spec / report events; MUST have an `OfflineSpecify` seam (mirror `OfflineMempal`, §7 standalone) |
-| **Δ8 Semantic-event mapping** | boundary Δ8 | ✅ agentd, couples to Δ7 | map EventBus `EventKind` → Specify schema (`workflow.started`/`criterion.passed`/…) |
+| **Δ7 Specify client** (`agentd-specify`) | boundary Δ7 | ✅ agentd, **partly delivered / external-contract risk remains** | as-built through P145: `SpecifyClient`, `OfflineSpecify`, `report_agentd_event`, and a runtime hook; real HTTP/WS transport waits on a concrete Specify API contract |
+| **Δ8 Semantic-event mapping** | boundary Δ8 | ✅ agentd, **first mapping delivered** | P143 maps current durable run events to Specify semantic events; richer facts wait until runtime emits them explicitly |
 | ~~P1.2 wait.human multi-channel~~ | §7.3 | ⚠️ **mostly Specify** | spec-approval wait removed (Δ2); only mid-execution `request_human_decision` stays; the multi-channel relay is Specify's. agentd keeps only the one in-loop park it already has |
 | ~~P1.6 Webhook hardening~~ | §7.3 | ❌ **Specify** | GitHub (issues/repos/PR-status/webhooks) owned by Specify (Δ6); inbound webhooks are not agentd's |
 
@@ -61,19 +100,20 @@ is a **certainty/risk asymmetry**, not "which is the linchpin":
 - **Track A — standalone hardening** (P1.3 → P1.7 → P1.4 → P1.5, optional P1.1):
   high-certainty value, **zero external dependency**. Every pack is pure agentd
   runtime; nothing waits on an API outside this repo.
-- **Track B — Specify integration** (Δ7 + Δ8 first): unlocks the cloud layer,
-  but builds against Specify's HTTP API, which §6 says is a **separate repo, out
-  of scope here, and not yet defined**. So Δ7-now realistically means: define the
-  client trait + `OfflineSpecify` seam + contract-test against a *mock* — real
-  integration stays gated on an external contract this repo can't verify.
+- **Track B — Specify integration** (Δ7 + Δ8): unlocks the cloud layer, but
+  real network transport builds against Specify's HTTP/WS API, which §6 says is
+  a **separate repo, out of scope here, and not yet defined**. As of P145 this
+  repo has the no-network seam, semantic-event mapping, reporting helper, and
+  runtime event hook. The next real integration step is transport/config, and it
+  stays gated on an external contract this repo cannot verify by itself.
 
 That asymmetry is the heart of the decision: Track A is shippable certainty;
 Track B is partly an IOU against an undefined external surface.
 
 ## 3. Recommended sequencing
 
-**Lead with Track A, in this order, and defer Track B until the Specify API
-contract exists:**
+**Historical recommendation:** lead with Track A, then defer real Track B network
+transport until the Specify API contract exists.
 
 1. **P1.3 Worktree pool** (~120) — most load-bearing correctness: without
    per-`task_run` isolation, concurrent runs collide. Foundational, unblocks
@@ -86,9 +126,10 @@ contract exists:**
 5. **P1.1 Dashboard** (~120 trimmed, was ~200) — only after the above; build as
    a local-ops console, not a second human UI.
 
-**Track B (Δ7 + Δ8)** slots in whenever the user has a running/ specced Specify
-to integrate against; until then, scope it to "trait + `OfflineSpecify` seam +
-mock contract test" so standalone is never regressed.
+**Current Track B boundary:** P142-P145 completed the local in-process seam.
+Further Track B work must name the concrete Specify API contract it implements.
+Until then, real HTTP/WS transport, auth, endpoint config, and canonical external
+workflow ids remain future work.
 
 Rationale: Track A is all high-certainty, zero-external-dep value, and P1.3 is
 genuinely foundational (concurrency correctness gates everything else). Track B's
@@ -114,11 +155,12 @@ something it can't control.
   (`GET /runs`, `GET /runs/:id`, the SSE tail). "Write mode" beyond local ops
   overlaps Specify's authority — keep it thin.
 
-## 5. Open question for the user (picks the lead)
+## 5. Resolved fork and remaining gate
 
-Near-term target: **(A) harden agentd standalone** (lead P1.3 worktree pool) or
-**(B) wire agentd to Specify** (lead Δ7 client + `OfflineSpecify` seam)? The plan
-recommends A — higher certainty, zero external dependency, and P1.3 is
-foundational — with B deferred until a defined Specify API exists to build
-against. Either way, each pack runs spec-first + TDD under the frozen-core (D1) /
-store-free-surface (D2) constraints, like #1–#6.
+The early fork is resolved in practice: agentd first hardened standalone P1
+runtime behavior, then advanced Specify Track B through P145 without taking a
+network dependency. The remaining gate is no longer "should we create the seam?"
+but "which concrete Specify API contract should the real transport implement?"
+Until that contract exists, the correct next state is to preserve the
+`OfflineSpecify` default, the local `.agentd/run/` convention, and the
+best-effort runtime reporting hook.

@@ -1,6 +1,6 @@
 # agentd — P2 implementation plan (unfreeze core + targeted unblocks)
 
-> Status: planning (not committed). Reconciles the design-doc
+> Status: as-built plus remaining real-env gates. Reconciles the design-doc
 > [§7.3 P2](../specs/2026-05-29-agentd-design.md) ("architectural cleanup") with
 > what the P1 season actually proved is needed. **The headline P2 item is already
 > done; P2 is smaller and more targeted than the design doc implies.** Successor
@@ -26,6 +26,38 @@ So P2 is NOT a 200–400-round extraction refactor. It is: **lift the D1 freeze 
 make a few targeted, additive core changes that activate the P1 work three walls
 deferred** — with the existing test suite as the regression net that replaces the
 freeze. The optional structural splits are weighed in §5, not the spine.
+
+## 0.5 Current as-built status
+
+Worktree activation is delivered in the local runtime path. The daemon injects `WorktreePool`
+through `ProductionRunHost::with_worktree_allocator`, and `execute.dot` consumes `${worktree}` for `agent-spec lifecycle --code` and for
+`scripts/agentd_publish_worktree.sh ${worktree} ${task_run_id}`. The same
+activation line is covered by the follow-on P99-P104/P106/P107 specs: keyed
+task-run allocation, branch publication from the implementer worktree, release
+after terminal success, reviewer snapshot worktrees, failed-run cleanup, and
+maintenance CLI hardening.
+
+The remaining real execute smoke gate is operator-gated environment coverage,
+not missing local wiring. A 2026-07-07 real attempt
+(`real-execute-smoke-20260707070439`) produced useful partial evidence:
+`partial_execute_chain_verified_publish_ok_pr_blocked`. It reached implement,
+verify_lifecycle, review, aggregate, and publish_branch, then stopped at
+`failed_at_open_pr` because the published branch had no common history with
+`origin/main`; Claude also hit a monthly spend limit, so the operator manually
+submitted implement and review outcomes through agentd MCP stdio. That leaves
+the remaining full real execute smoke gate open: a clean
+`AGENTD_REAL_EXECUTE_SMOKE=1 bash scripts/agentd_real_execute_smoke.sh --execute`
+run where the real agent path and real `open_pr` path complete without manual
+substitution or PR-history repair. Non-destructive dry-run/preflight checks are
+safe local evidence; the opt-in execute run remains the real-environment
+capstone.
+
+Post-P150 safe preflight readiness (2026-07-07, main `0e42750`): `agentd_pr_history_status.sh HEAD main`
+reported `merge_base 0e42750`, and dry-run/preflight-only checks passed for
+`agentd_real_claude_smoke.sh --preflight-only`,
+`agentd_real_execute_smoke.sh --preflight-only`, and
+`agentd_real_sigkill_smoke.sh --preflight-only`. no `AGENTD_REAL_* --execute`
+gate was run, so the real execute, real SIGKILL, and demo gates remain open.
 
 ## 1. The safety model (what replaces D1)
 

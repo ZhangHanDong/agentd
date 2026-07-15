@@ -62,7 +62,7 @@ pub fn mcp_stdio_command(agentd_exe: &Path, config: &DaemonConfig, daemon_cwd: &
     let workflows_dir = absolute_path(daemon_cwd, &config.workflows_dir);
     let repo_dir = absolute_path(daemon_cwd, &config.repo_dir);
     let worktree_base = absolute_path(daemon_cwd, &config.worktree_base);
-    let parts = [
+    let mut parts = vec![
         sh_quote_path(agentd_exe),
         "--db-path".to_string(),
         sh_quote_path(&db_path),
@@ -74,10 +74,15 @@ pub fn mcp_stdio_command(agentd_exe: &Path, config: &DaemonConfig, daemon_cwd: &
         sh_quote_path(&worktree_base),
         "--log-level".to_string(),
         sh_quote("error"),
+    ];
+    if config.accept_workflow_change {
+        parts.push("--accept-workflow-change".to_string());
+    }
+    parts.extend([
         "mcp-stdio".to_string(),
         "--proxy-url".to_string(),
         sh_quote(&format!("http://127.0.0.1:{}", config.port)),
-    ];
+    ]);
     parts.join(" ")
 }
 

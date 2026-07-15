@@ -1,5 +1,9 @@
 # AD-E0 Candidate Integration Review
 
+> Superseded for current status by
+> `docs/governance/2026-07-13-ad-e0-main-reconciliation-rehearsal.md`.
+> This file remains the pre-reconciliation HOLD record.
+
 - Review date: 2026-07-12
 - Candidate branch: `agentd/tr_01KWWTVEK1AC6C836SXSP7Y3Q3`
 - Candidate tip: `3c27424`

@@ -28,6 +28,7 @@ path = "src/main.rs"
 [dependencies]
 agentd-core = { path = "../agentd-core" }
 agentd-matrix = { path = "../agentd-matrix" }
+agentd-specify = { path = "../agentd-specify" }
 agentd-store = { path = "../agentd-store" }
 agentd-surface = { path = "../agentd-surface" }
 agentd-tmux = { path = "../agentd-tmux" }

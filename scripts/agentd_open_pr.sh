@@ -23,6 +23,18 @@ fi
 branch="agentd/$task_run_id"
 base_ref="$remote/$base_branch"
 
+print_no_common_history_repair() {
+  {
+    echo "repair task branch with:"
+    echo "  git switch $branch"
+    echo "  bash scripts/agentd_pr_history_bridge.sh $base_branch"
+    echo "  AGENTD_PR_HISTORY_BRIDGE=1 bash scripts/agentd_pr_history_bridge.sh --execute $base_branch"
+    echo "  git push $remote $branch"
+    echo "then retry:"
+    echo "  bash scripts/agentd_open_pr.sh $task_run_id $base_branch"
+  } >&2
+}
+
 git fetch "$remote" "+refs/heads/$base_branch:refs/remotes/$remote/$base_branch" >&2
 
 if ! git rev-parse --verify --quiet "$branch^{commit}" >/dev/null; then
@@ -42,6 +54,7 @@ fi
 
 if ! git merge-base "$base_ref" "$branch" >/dev/null; then
   echo "cannot open PR: $branch has no common history with $base_ref" >&2
+  print_no_common_history_repair
   exit 65
 fi
 
