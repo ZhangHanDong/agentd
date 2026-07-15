@@ -64,12 +64,23 @@ The gate does not infer the base from `origin/main`, because the AD-E0 candidate
 already differs from main. It uses the exact captured task base so candidate
 history cannot masquerade as task output.
 
+### State Isolation
+
+The rendered spec, generated plan, smoke-local workflow, acceptance report,
+database, and logs all live under the run's `STATE_DIR`. The smoke does not
+overwrite tracked `.agentd/run/frozen.spec.md` or `.agentd/run/plan.md` and does
+not share `.agentd/run/report.md` between runs. Absolute state paths are
+inserted into the smoke-local workflow copy; the shipped workflow remains
+unchanged.
+
 ### Publication Safety
 
 `agentd_publish_worktree.sh` continues validating the worktree root and task
-run id before staging. After staging, it rejects an empty index instead of
-pushing the pre-existing HEAD. A successful report therefore always names a
-branch containing a task commit created by the publication step.
+run id before staging. The smoke passes the exact task base and a run-local
+report path. The helper commits staged task changes, or accepts an agent-created
+commit only when `HEAD` differs from and descends from the exact task base. It
+rejects a clean `HEAD == task base` instead of pushing pre-existing state. A
+successful report therefore always names a branch containing a task delta.
 
 ### Evidence
 
@@ -94,6 +105,8 @@ evidence protocol and remains visible as separate roadmap work.
 The implementation is complete only when automated tests prove:
 
 - default dry-run output contains run-unique paths, filters, marker, and base;
+- prepare-only output keeps the rendered spec, plan, workflow, and report under
+  one run-specific state directory;
 - invalid run ids are rejected without creating state;
 - exact-base delta verification rejects no-op worktrees;
 - exact-base delta verification accepts untracked and committed task changes;
