@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -59,6 +59,7 @@ struct RecordingPorts {
     block_sandbox_execute: bool,
     sandbox_execute_started: Notify,
     teardown_completed: Notify,
+    observations: Mutex<Vec<(&'static str, i64)>>,
 }
 
 impl RecordingPorts {
@@ -76,6 +77,7 @@ impl RecordingPorts {
             block_sandbox_execute: false,
             sandbox_execute_started: Notify::new(),
             teardown_completed: Notify::new(),
+            observations: Mutex::new(Vec::new()),
         }
     }
 
@@ -89,6 +91,7 @@ impl RecordingPorts {
             block_sandbox_execute: false,
             sandbox_execute_started: Notify::new(),
             teardown_completed: Notify::new(),
+            observations: Mutex::new(Vec::new()),
         }
     }
 
@@ -102,6 +105,7 @@ impl RecordingPorts {
             block_sandbox_execute: false,
             sandbox_execute_started: Notify::new(),
             teardown_completed: Notify::new(),
+            observations: Mutex::new(Vec::new()),
         }
     }
 
@@ -115,6 +119,7 @@ impl RecordingPorts {
             block_sandbox_execute: true,
             sandbox_execute_started: Notify::new(),
             teardown_completed: Notify::new(),
+            observations: Mutex::new(Vec::new()),
         }
     }
 
@@ -135,6 +140,17 @@ impl RecordingPorts {
 
     fn audit_payloads(&self) -> Vec<Value> {
         self.audit_payloads.lock().expect("audit payloads").clone()
+    }
+
+    fn observe(&self, stage: &'static str, observed_at: i64) {
+        self.observations
+            .lock()
+            .expect("observations")
+            .push((stage, observed_at));
+    }
+
+    fn observations(&self) -> Vec<(&'static str, i64)> {
+        self.observations.lock().expect("observations").clone()
     }
 
     fn fail_security(&self, stage: FailureStage) -> Result<(), SecurityError> {
@@ -244,6 +260,7 @@ impl TaskLeasePort for RecordingPorts {
         observed_at: i64,
     ) -> Result<TaskLeaseGrant, TaskLeaseError> {
         self.record("lease");
+        self.observe("lease", observed_at);
         if self.fails(FailureStage::Lease) {
             return Err(TaskLeaseError::Rejected {
                 reason: agentd_core::ports::TaskLeaseRejectionReason::StaleFencingToken,
@@ -251,7 +268,6 @@ impl TaskLeasePort for RecordingPorts {
             });
         }
         assert_eq!(requested, &claim());
-        assert_eq!(observed_at, self.observed_at);
         Ok(lease_grant())
     }
 
@@ -278,6 +294,7 @@ impl AttemptCapabilityPort for RecordingPorts {
         request: &CapabilityValidationRequest,
     ) -> Result<CapabilityAdmission, SecurityError> {
         self.record("capability");
+        self.observe("capability", request.observed_at);
         self.fail_security(FailureStage::Capability)?;
         Ok(CapabilityAdmission {
             id: AttemptCapabilityId::new(),
@@ -308,6 +325,7 @@ impl SecretBrokerPort for RecordingPorts {
         request: &SecretCheckoutRequest,
     ) -> Result<SecretLease, SecurityError> {
         self.record("secret");
+        self.observe("secret", request.observed_at);
         self.fail_security(FailureStage::Secret)?;
         Ok(SecretLease {
             selector: request.selector.clone(),
@@ -335,8 +353,9 @@ impl ExecutionSandboxPort for RecordingPorts {
 
     async fn execute_sandbox(
         &self,
-        _request: &SandboxExecuteRequest,
+        request: &SandboxExecuteRequest,
     ) -> Result<SandboxExecution, SecurityError> {
+        self.observe("sandbox_execute", request.observed_at);
         if self.block_sandbox_execute {
             self.sandbox_execute_started.notify_waiters();
             std::future::pending::<()>().await;
@@ -410,6 +429,13 @@ fn providers(ports: &Arc<RecordingPorts>) -> EnterpriseSecurityProviders {
 }
 
 fn providers_at(ports: &Arc<RecordingPorts>, observed_at: i64) -> EnterpriseSecurityProviders {
+    providers_with_clock(ports, Arc::new(FixedClock::new(observed_at)))
+}
+
+fn providers_with_clock(
+    ports: &Arc<RecordingPorts>,
+    clock: Arc<dyn Clock>,
+) -> EnterpriseSecurityProviders {
     EnterpriseSecurityProviders::new(
         Arc::clone(ports) as Arc<dyn WorkloadIdentityPort>,
         Arc::clone(ports) as Arc<dyn ExecutionSecurityScopePort>,
@@ -419,8 +445,37 @@ fn providers_at(ports: &Arc<RecordingPorts>, observed_at: i64) -> EnterpriseSecu
         Arc::clone(ports) as Arc<dyn SecretBrokerPort>,
         Arc::clone(ports) as Arc<dyn ExecutionSandboxPort>,
         Arc::clone(ports) as Arc<dyn ExecutionAuditPort>,
-        Arc::new(FixedClock::new(observed_at)) as Arc<dyn Clock>,
+        clock,
     )
+}
+
+#[derive(Debug)]
+struct SequenceClock {
+    times: Mutex<VecDeque<i64>>,
+    last: Mutex<i64>,
+}
+
+impl SequenceClock {
+    fn new(times: impl IntoIterator<Item = i64>) -> Self {
+        let times = VecDeque::from_iter(times);
+        let last = times.front().copied().unwrap_or(0);
+        Self {
+            times: Mutex::new(times),
+            last: Mutex::new(last),
+        }
+    }
+}
+
+impl Clock for SequenceClock {
+    fn now_unix(&self) -> i64 {
+        let next = self.times.lock().expect("clock times").pop_front();
+        if let Some(next) = next {
+            *self.last.lock().expect("clock last") = next;
+            next
+        } else {
+            *self.last.lock().expect("clock last")
+        }
+    }
 }
 
 fn authority_key() -> AuthorityKey {
@@ -595,28 +650,47 @@ async fn assert_failure_stops(failure: FailureStage, expected_calls: Vec<&'stati
 }
 
 fn expected_failure_calls(failure: FailureStage) -> Vec<&'static str> {
-    let ordered = [
-        "identity",
-        "scope",
-        "authorization",
-        "lease",
-        "capability",
-        "secret",
-        "sandbox",
-    ];
-    let prefix_len = match failure {
-        FailureStage::Identity => 1,
-        FailureStage::Scope => 2,
-        FailureStage::Authorization => 3,
-        FailureStage::Lease => 4,
-        FailureStage::Capability => 5,
-        FailureStage::Secret => 6,
-        FailureStage::SandboxPrepare
-        | FailureStage::SandboxExecute
-        | FailureStage::Audit
-        | FailureStage::Teardown => 7,
+    let mut calls = match failure {
+        FailureStage::Identity => vec!["identity"],
+        FailureStage::Scope => vec!["identity", "scope"],
+        FailureStage::Authorization => vec!["identity", "scope", "authorization"],
+        FailureStage::Lease => vec!["identity", "scope", "authorization", "lease"],
+        FailureStage::Capability => {
+            vec!["identity", "scope", "authorization", "lease", "capability"]
+        }
+        FailureStage::Secret => vec![
+            "identity",
+            "scope",
+            "authorization",
+            "lease",
+            "capability",
+            "secret",
+        ],
+        FailureStage::SandboxPrepare => vec![
+            "identity",
+            "scope",
+            "authorization",
+            "lease",
+            "capability",
+            "secret",
+            "lease",
+            "capability",
+            "sandbox",
+        ],
+        FailureStage::SandboxExecute | FailureStage::Audit | FailureStage::Teardown => vec![
+            "identity",
+            "scope",
+            "authorization",
+            "lease",
+            "capability",
+            "secret",
+            "lease",
+            "capability",
+            "sandbox",
+            "lease",
+            "capability",
+        ],
     };
-    let mut calls = ordered[..prefix_len].to_vec();
     calls.push("audit");
     if matches!(
         failure,
@@ -667,7 +741,11 @@ async fn production_security_gate_orders_checks_and_stops_on_failure() {
             "lease",
             "capability",
             "secret",
+            "lease",
+            "capability",
             "sandbox",
+            "lease",
+            "capability",
             "audit",
             "teardown",
         ]
@@ -762,7 +840,11 @@ async fn production_security_gate_preserves_audit_and_teardown_failures() {
             "lease",
             "capability",
             "secret",
+            "lease",
+            "capability",
             "sandbox",
+            "lease",
+            "capability",
             "audit",
             "teardown",
         ]
@@ -808,12 +890,51 @@ async fn production_security_gate_cleans_up_when_operation_is_cancelled() {
             "lease",
             "capability",
             "secret",
+            "lease",
+            "capability",
             "sandbox",
+            "lease",
+            "capability",
             "audit",
             "teardown",
         ]
     );
     assert_eq!(ports.audit_payloads()[0]["reason"], "operation_cancelled");
+}
+
+#[tokio::test]
+async fn production_security_gate_revalidates_before_each_external_side_effect() {
+    let ports = Arc::new(RecordingPorts::new(None));
+    let clock = Arc::new(SequenceClock::new([150, 150, 150, 300, 300]));
+    let runtime = build_security_runtime(
+        SecurityRuntimeMode::Enterprise,
+        &configured_auth(),
+        Some(providers_with_clock(&ports, clock)),
+    )
+    .expect("enterprise composition");
+    let SecurityRuntime::Enterprise(pipeline) = runtime else {
+        panic!("enterprise mode must build the enterprise pipeline");
+    };
+
+    let error = Box::pin(pipeline.execute(operation()))
+        .await
+        .expect_err("expired lease must stop execution after sandbox prepare");
+    assert_eq!(
+        error,
+        SecurityError::Denied(SecurityDenialReason::LeaseRejected)
+    );
+    assert!(
+        ports.observations().contains(&("lease", 300)),
+        "lease must be revalidated with the advanced trusted clock"
+    );
+    assert!(
+        !ports
+            .observations()
+            .iter()
+            .any(|(stage, _)| *stage == "sandbox_execute"),
+        "expired lease must stop before sandbox execute"
+    );
+    assert_eq!(ports.calls().last(), Some(&"teardown"));
 }
 
 #[tokio::test]

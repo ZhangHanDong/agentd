@@ -290,12 +290,6 @@ pub struct EnterpriseSecurityPipeline {
     trusted_clock: Arc<dyn Clock>,
 }
 
-struct OperationAdmissions {
-    prepare: CapabilityAdmission,
-    execute: CapabilityAdmission,
-    secret: Option<CapabilityAdmission>,
-}
-
 struct SandboxTerminalGuard {
     execution_sandbox: Arc<dyn ExecutionSandboxPort>,
     execution_audit: Arc<dyn ExecutionAuditPort>,
@@ -455,42 +449,17 @@ impl EnterpriseSecurityPipeline {
                 .await,
         )
         .await?;
-        self.run_stage(
-            &workload,
-            &scope,
-            "lease",
-            operation.observed_at,
-            self.validate_lease(&scope, operation.observed_at).await,
-        )
-        .await?;
-        let admissions = match self
-            .admit_operation(&workload, &scope, &operation, secret_resource.as_ref())
-            .await
-        {
-            Ok(admissions) => admissions,
-            Err(error) => {
-                return self
-                    .deny(
-                        &workload,
-                        &scope,
-                        "capability",
-                        error,
-                        operation.observed_at,
-                    )
-                    .await;
-            }
-        };
-        let _secret_lease = match self.checkout_secret(&operation, &admissions).await {
-            Ok(lease) => lease,
-            Err(error) => {
-                return self
-                    .deny(&workload, &scope, "secret", error, operation.observed_at)
-                    .await;
-            }
-        };
-        let observed_at = operation.observed_at;
-        let (mut terminal_guard, execution) = self
-            .run_sandbox(&workload, &scope, operation, admissions)
+        let (_secret_lease, observed_at) = self
+            .checkout_secret(
+                &workload,
+                &scope,
+                &operation,
+                secret_resource.as_ref(),
+                operation.observed_at,
+            )
+            .await?;
+        let (mut terminal_guard, execution, observed_at) = self
+            .run_sandbox(&workload, &scope, operation, observed_at)
             .await?;
         self.finish_success(&workload, &scope, &mut terminal_guard, observed_at)
             .await?;
@@ -533,78 +502,76 @@ impl EnterpriseSecurityPipeline {
         Ok(())
     }
 
-    async fn admit_operation(
+    async fn checkout_secret(
         &self,
         workload: &AuthenticatedWorkload,
         scope: &ExecutionSecurityScope,
         operation: &EnterpriseWorkerOperation,
         secret_resource: Option<&ProtectedResource>,
-    ) -> Result<OperationAdmissions, SecurityError> {
-        let prepare = self
-            .validate_capability(
-                workload,
-                scope,
-                ProtectedAction::SandboxPrepare,
-                &operation.scope_request.resource,
-                operation.sandbox_prepare_token.clone(),
-                operation.observed_at,
-            )
-            .await?;
-        let execute = self
-            .validate_capability(
-                workload,
-                scope,
-                ProtectedAction::SandboxExecute,
-                &operation.scope_request.resource,
-                operation.sandbox_execute_token.clone(),
-                operation.observed_at,
-            )
-            .await?;
-        let secret = match (operation.secret.as_ref(), secret_resource) {
-            (Some(secret), Some(resource)) => Some(
-                self.validate_capability(
+        previous_observed_at: i64,
+    ) -> Result<(Option<SecretLease>, i64), SecurityError> {
+        let (Some(secret), Some(resource)) = (operation.secret.as_ref(), secret_resource) else {
+            if operation.secret.is_none() && secret_resource.is_none() {
+                return Ok((None, previous_observed_at));
+            }
+            return self
+                .deny(
                     workload,
                     scope,
-                    ProtectedAction::SecretCheckout,
-                    resource,
-                    secret.capability_token.clone(),
-                    operation.observed_at,
+                    "secret",
+                    SecurityError::Invalid("secret resource resolution mismatch".to_string()),
+                    previous_observed_at,
                 )
-                .await?,
-            ),
-            (None, None) => None,
-            _ => {
-                return Err(SecurityError::Invalid(
-                    "secret resource resolution mismatch".to_string(),
-                ));
+                .await;
+        };
+        let observed_at = match self.fresh_observed_at(previous_observed_at) {
+            Ok(observed_at) => observed_at,
+            Err(error) => {
+                return self
+                    .deny(workload, scope, "clock", error, previous_observed_at)
+                    .await;
             }
         };
-        Ok(OperationAdmissions {
-            prepare,
-            execute,
-            secret,
-        })
-    }
-
-    async fn checkout_secret(
-        &self,
-        operation: &EnterpriseWorkerOperation,
-        admissions: &OperationAdmissions,
-    ) -> Result<Option<SecretLease>, SecurityError> {
-        match (operation.secret.as_ref(), admissions.secret.as_ref()) {
-            (Some(secret), Some(admission)) => self
-                .secret_broker
-                .checkout_secret(&SecretCheckoutRequest {
-                    admission: admission.clone(),
-                    selector: secret.selector.clone(),
-                    observed_at: operation.observed_at,
-                })
-                .await
-                .map(Some),
-            (None, None) => Ok(None),
-            _ => Err(SecurityError::Invalid(
-                "secret admission mismatch".to_string(),
-            )),
+        self.run_stage(
+            workload,
+            scope,
+            "lease",
+            observed_at,
+            self.validate_lease(scope, observed_at).await,
+        )
+        .await?;
+        let admission = match self
+            .validate_capability(
+                workload,
+                scope,
+                ProtectedAction::SecretCheckout,
+                resource,
+                secret.capability_token.clone(),
+                observed_at,
+            )
+            .await
+        {
+            Ok(admission) => admission,
+            Err(error) => {
+                return self
+                    .deny(workload, scope, "capability", error, observed_at)
+                    .await;
+            }
+        };
+        match self
+            .secret_broker
+            .checkout_secret(&SecretCheckoutRequest {
+                admission,
+                selector: secret.selector.clone(),
+                observed_at,
+            })
+            .await
+        {
+            Ok(lease) => Ok((Some(lease), observed_at)),
+            Err(error) => {
+                self.deny(workload, scope, "secret", error, observed_at)
+                    .await
+            }
         }
     }
 
@@ -613,12 +580,15 @@ impl EnterpriseSecurityPipeline {
         workload: &AuthenticatedWorkload,
         scope: &ExecutionSecurityScope,
         operation: EnterpriseWorkerOperation,
-        admissions: OperationAdmissions,
-    ) -> Result<(SandboxTerminalGuard, SandboxExecution), SecurityError> {
+        previous_observed_at: i64,
+    ) -> Result<(SandboxTerminalGuard, SandboxExecution, i64), SecurityError> {
+        let (prepare_admission, prepare_observed_at) = self
+            .admit_sandbox_prepare(workload, scope, &operation, previous_observed_at)
+            .await?;
         let prepared = match self
             .execution_sandbox
             .prepare_sandbox(&SandboxPrepareRequest {
-                admission: admissions.prepare,
+                admission: prepare_admission,
                 profile: operation.profile,
             })
             .await
@@ -626,7 +596,7 @@ impl EnterpriseSecurityPipeline {
             Ok(prepared) => prepared,
             Err(error) => {
                 return self
-                    .deny(workload, scope, "sandbox", error, operation.observed_at)
+                    .deny(workload, scope, "sandbox", error, prepare_observed_at)
                     .await;
             }
         };
@@ -638,14 +608,24 @@ impl EnterpriseSecurityPipeline {
             scope.clone(),
             prepared.sandbox_id.clone(),
         );
+        let (execute_admission, execute_observed_at) = self
+            .admit_sandbox_execute(
+                workload,
+                scope,
+                &operation.scope_request.resource,
+                operation.sandbox_execute_token,
+                &mut terminal_guard,
+                prepare_observed_at,
+            )
+            .await?;
         let execution = match self
             .execution_sandbox
             .execute_sandbox(&SandboxExecuteRequest {
-                admission: admissions.execute,
+                admission: execute_admission,
                 sandbox: prepared.clone(),
                 argv: operation.argv,
                 env: operation.env,
-                observed_at: operation.observed_at,
+                observed_at: execute_observed_at,
             })
             .await
         {
@@ -658,12 +638,120 @@ impl EnterpriseSecurityPipeline {
                         "sandbox",
                         error,
                         &mut terminal_guard,
-                        operation.observed_at,
+                        execute_observed_at,
                     )
                     .await;
             }
         };
-        Ok((terminal_guard, execution))
+        Ok((terminal_guard, execution, execute_observed_at))
+    }
+
+    async fn admit_sandbox_prepare(
+        &self,
+        workload: &AuthenticatedWorkload,
+        scope: &ExecutionSecurityScope,
+        operation: &EnterpriseWorkerOperation,
+        previous_observed_at: i64,
+    ) -> Result<(CapabilityAdmission, i64), SecurityError> {
+        let observed_at = match self.fresh_observed_at(previous_observed_at) {
+            Ok(observed_at) => observed_at,
+            Err(error) => {
+                return self
+                    .deny(workload, scope, "clock", error, previous_observed_at)
+                    .await;
+            }
+        };
+        self.run_stage(
+            workload,
+            scope,
+            "lease",
+            observed_at,
+            self.validate_lease(scope, observed_at).await,
+        )
+        .await?;
+        match self
+            .validate_capability(
+                workload,
+                scope,
+                ProtectedAction::SandboxPrepare,
+                &operation.scope_request.resource,
+                operation.sandbox_prepare_token.clone(),
+                observed_at,
+            )
+            .await
+        {
+            Ok(admission) => Ok((admission, observed_at)),
+            Err(error) => {
+                self.deny(workload, scope, "capability", error, observed_at)
+                    .await
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn admit_sandbox_execute(
+        &self,
+        workload: &AuthenticatedWorkload,
+        scope: &ExecutionSecurityScope,
+        resource: &ProtectedResource,
+        token: CapabilityToken,
+        terminal_guard: &mut SandboxTerminalGuard,
+        previous_observed_at: i64,
+    ) -> Result<(CapabilityAdmission, i64), SecurityError> {
+        let observed_at = match self.fresh_observed_at(previous_observed_at) {
+            Ok(observed_at) => observed_at,
+            Err(error) => {
+                return self
+                    .deny_and_teardown(
+                        workload,
+                        scope,
+                        "clock",
+                        error,
+                        terminal_guard,
+                        previous_observed_at,
+                    )
+                    .await;
+            }
+        };
+        if let Err(error) = self.validate_lease(scope, observed_at).await {
+            return self
+                .deny_and_teardown(workload, scope, "lease", error, terminal_guard, observed_at)
+                .await;
+        }
+        match self
+            .validate_capability(
+                workload,
+                scope,
+                ProtectedAction::SandboxExecute,
+                resource,
+                token,
+                observed_at,
+            )
+            .await
+        {
+            Ok(admission) => Ok((admission, observed_at)),
+            Err(error) => {
+                self.deny_and_teardown(
+                    workload,
+                    scope,
+                    "capability",
+                    error,
+                    terminal_guard,
+                    observed_at,
+                )
+                .await
+            }
+        }
+    }
+
+    fn fresh_observed_at(&self, previous_observed_at: i64) -> Result<i64, SecurityError> {
+        let observed_at = self.trusted_clock.now_unix();
+        if observed_at < 0 || observed_at < previous_observed_at {
+            return Err(SecurityError::Unavailable(
+                "trusted clock moved backwards or returned invalid time".to_string(),
+            ));
+        }
+        Ok(observed_at)
     }
 
     async fn finish_success(
