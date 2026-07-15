@@ -519,14 +519,13 @@ impl<'a> Engine<'a> {
                 }
             }
         }
-        if let Some((node_id, outcome)) = pending_outcome {
-            if self
+        if let Some((node_id, outcome)) = pending_outcome
+            && self
                 .graph
                 .node(node_id.as_str())
                 .is_some_and(|node| node.goal_gate)
-            {
-                outcomes.insert(node_id.clone(), outcome.clone());
-            }
+        {
+            outcomes.insert(node_id.clone(), outcome.clone());
         }
         Ok(goal_gate::evaluate(self.graph, &outcomes))
     }

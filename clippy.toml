@@ -1,4 +1,4 @@
-msrv = "1.85"
+msrv = "1.94"
 
 # clippy::large_enum_variant threshold for enum sizes we tolerate.
 enum-variant-size-threshold = 200

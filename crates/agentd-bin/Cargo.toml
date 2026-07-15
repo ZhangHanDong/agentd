@@ -13,6 +13,10 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+default = []
+matrix-sdk-adapter = ["agentd-matrix/matrix-sdk-adapter"]
+
 [lib]
 name = "agentd_bin"
 path = "src/lib.rs"
@@ -23,6 +27,7 @@ path = "src/main.rs"
 
 [dependencies]
 agentd-core = { path = "../agentd-core" }
+agentd-matrix = { path = "../agentd-matrix" }
 agentd-specify = { path = "../agentd-specify" }
 agentd-store = { path = "../agentd-store" }
 agentd-surface = { path = "../agentd-surface" }

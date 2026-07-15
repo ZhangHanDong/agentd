@@ -7,7 +7,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use agentd_core::ports::{AgentBackend, CommandError, CommandOutput};
+use agentd_core::ports::{
+    AgentAllocation, AgentAllocationStatus, AgentBackend, CommandError, CommandOutput,
+};
 use agentd_core::test_support::RecordingCommandRunner;
 use agentd_core::types::{
     AgentHandle, AgentId, BackendKind, CliKind, LaunchStrategy, SpawnRequest,
@@ -48,6 +50,31 @@ fn handle(address: &str) -> AgentHandle {
         pid: Some(1),
         session_name: "agentd-claude-impl-a".to_string(),
         spawned_at: SystemTime::UNIX_EPOCH,
+    }
+}
+
+fn routed_allocation(runtime: serde_json::Value) -> AgentAllocation {
+    AgentAllocation {
+        requested_role: "coding".to_string(),
+        agent_id: AgentId::parsed("codex-coding-1"),
+        status: AgentAllocationStatus::Routed,
+        tier: Some("medium".to_string()),
+        reservation_id: Some("sched_res_1".to_string()),
+        ticket: None,
+        provisioned_name: None,
+        runtime,
+    }
+}
+
+fn request(worktree: &std::path::Path, prompt: Option<&str>) -> SpawnRequest {
+    SpawnRequest {
+        agent_id: AgentId::parsed("codex-coding-1"),
+        mxid: None,
+        cli: CliKind::Codex,
+        worktree: worktree.to_path_buf(),
+        initial_prompt: prompt.map(ToString::to_string),
+        env_overrides: HashMap::new(),
+        launch_strategy: LaunchStrategy::Direct,
     }
 }
 
@@ -149,6 +176,105 @@ async fn send_prompt_large_prompt_uses_stdin() {
 }
 
 #[tokio::test]
+async fn routed_allocation_rebinds_existing_pane_and_sends_prompt_without_spawn() {
+    let rec = Arc::new(RecordingCommandRunner::new());
+    rec.push_output(ok("", 0)); // rebind has-session: alive
+    rec.push_output(ok("%5 999\n", 0)); // rebind display-message
+    let dir = tempfile::tempdir().expect("tempdir");
+    let allocation = routed_allocation(serde_json::json!({
+        "tmuxTarget": "agentd-codex-coding-1:0.0",
+        "tmux_target": "agentd-codex-coding-1:0.0"
+    }));
+
+    let handle = backend(&rec, zero_delay_cfg())
+        .dispatch_allocated(request(dir.path(), Some("workflow prompt")), &allocation)
+        .await
+        .expect("dispatch allocated");
+
+    assert_eq!(handle.session_name, "agentd-codex-coding-1");
+    assert_eq!(handle.address, "agentd-codex-coding-1:0.0");
+    let calls = rec.calls();
+    assert_eq!(
+        calls[0].args,
+        vec![
+            "has-session".to_string(),
+            "-t".to_string(),
+            "agentd-codex-coding-1".to_string()
+        ],
+        "rebind probes the existing session"
+    );
+    assert_eq!(calls[1].args[0], "display-message");
+    assert!(
+        calls[1]
+            .args
+            .contains(&"agentd-codex-coding-1:0.0".to_string()),
+        "pane probe targets existing pane: {:?}",
+        calls[1].args
+    );
+    assert_eq!(
+        calls[2].args,
+        vec!["set-buffer".to_string(), "workflow prompt".to_string()],
+        "prompt is staged through the paste buffer"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|call| first_arg(call) == Some("paste-buffer")),
+        "prompt is pasted into the pane: {calls:?}"
+    );
+    assert!(
+        calls.iter().any(|call| call.args
+            == vec![
+                "send-keys".to_string(),
+                "-t".to_string(),
+                "agentd-codex-coding-1:0.0".to_string(),
+                "Enter".to_string()
+            ]),
+        "prompt dispatch ends with bare Enter: {calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|call| call.args[0] == "new-session"),
+        "routed dispatch must not spawn a duplicate tmux session: {calls:?}"
+    );
+    assert!(
+        !dir.path()
+            .join(".agentd-launcher-codex-coding-1.sh")
+            .exists(),
+        "routed dispatch must not write a launcher"
+    );
+}
+
+#[tokio::test]
+async fn routed_allocation_without_tmux_target_does_not_fall_back_to_spawn() {
+    let rec = Arc::new(RecordingCommandRunner::new());
+    let dir = tempfile::tempdir().expect("tempdir");
+    let allocation = routed_allocation(serde_json::json!({}));
+
+    let err = backend(&rec, zero_delay_cfg())
+        .dispatch_allocated(request(dir.path(), Some("workflow prompt")), &allocation)
+        .await
+        .expect_err("missing target is a backend error");
+
+    match err {
+        agentd_core::CoreError::Backend(message) => assert!(
+            message.contains("tmux target"),
+            "error should explain the missing tmux target, got: {message}"
+        ),
+        other => panic!("expected backend error, got {other:?}"),
+    }
+    assert!(
+        rec.calls().is_empty(),
+        "missing routed target must fail before any tmux command"
+    );
+    assert!(
+        !dir.path()
+            .join(".agentd-launcher-codex-coding-1.sh")
+            .exists(),
+        "missing routed target must not fall back to launcher creation"
+    );
+}
+
+#[tokio::test]
 async fn wait_for_ready_returns_ok_when_visible() {
     let rec = Arc::new(RecordingCommandRunner::new());
     rec.push_output(ok("loading...\n? for shortcuts\n", 0)); // default claude_code pattern
@@ -170,6 +296,30 @@ async fn wait_for_ready_accepts_claude_auto_mode_prompt() {
         .wait_for_ready(&handle("agentd-x:0.0"), CliKind::ClaudeCode)
         .await
         .expect("current Claude prompt is ready");
+}
+
+#[tokio::test]
+async fn wait_for_ready_accepts_current_codex_prompt_marker() {
+    let rec = Arc::new(RecordingCommandRunner::new());
+    rec.push_output(ok(
+        "╭──────────────────────────────────────────────────────╮\n\
+         │ >_ OpenAI Codex (v0.143.0)                           │\n\
+         ╰──────────────────────────────────────────────────────╯\n\n\
+         › Implement {feature}\n",
+        0,
+    ));
+    let cfg = Config {
+        ready_deadline: Duration::from_millis(10),
+        ready_probe_initial: Duration::from_millis(1),
+        ready_probe_max: Duration::from_millis(1),
+        ..zero_delay_cfg()
+    };
+    backend(&rec, cfg)
+        .wait_for_ready(&handle("agentd-codex-impl:0.0"), CliKind::Codex)
+        .await
+        .expect("current Codex prompt marker is ready");
+
+    assert_eq!(rec.calls().len(), 1, "matched on the first capture");
 }
 
 #[tokio::test]

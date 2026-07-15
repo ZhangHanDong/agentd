@@ -22,7 +22,10 @@ pub use wait_human::WaitHumanHandler;
 use crate::CoreError;
 use crate::engine::{EngineEvent, HandlerStep};
 use crate::graph::{NodeDef, NodeGraph};
-use crate::ports::{AgentBackend, Clock, CommandRunner, MempalClient, Store, WorktreeAllocator};
+use crate::ports::{
+    AgentAllocation, AgentAllocator, AgentBackend, Clock, CommandRunner, MempalClient, Store,
+    WorktreeAllocator,
+};
 use crate::types::RunId;
 
 /// A borrow bundle of the five ports. The engine builds one of these per run and
@@ -34,6 +37,7 @@ pub struct Ports<'a> {
     pub store: &'a dyn Store,
     pub mempal: &'a dyn MempalClient,
     pub clock: &'a dyn Clock,
+    pub agent_allocator: &'a dyn AgentAllocator,
 }
 
 impl std::fmt::Debug for Ports<'_> {
@@ -159,20 +163,139 @@ pub(crate) fn sha256_hex(data: &[u8]) -> String {
 /// `worktree` from the per-task_run allocation or staged run context, falling
 /// back to `"."` when neither exists.
 #[must_use]
+pub(crate) fn cli_kind_for_role(role: &str) -> crate::types::CliKind {
+    if role.starts_with("codex-") {
+        crate::types::CliKind::Codex
+    } else {
+        crate::types::CliKind::ClaudeCode
+    }
+}
+
+/// Build a `SpawnRequest` for `role` with the default direct launch strategy.
+/// Role-name prefixes select the CLI runtime for the p201 Codex-first smoke
+/// path: `codex-*` uses Codex, while existing unprefixed and `claude-*` roles
+/// remain Claude-compatible.
+#[must_use]
 pub(crate) fn spawn_request(
     role: &str,
     initial_prompt: Option<String>,
     worktree: &std::path::Path,
 ) -> crate::types::SpawnRequest {
-    use crate::types::{AgentId, CliKind, LaunchStrategy, SpawnRequest};
+    use crate::types::{AgentId, LaunchStrategy, SpawnRequest};
     SpawnRequest {
         agent_id: AgentId::parsed(role),
         mxid: None,
-        cli: CliKind::ClaudeCode,
+        cli: cli_kind_for_role(role),
         worktree: worktree.to_path_buf(),
         initial_prompt,
         env_overrides: std::collections::HashMap::new(),
         launch_strategy: LaunchStrategy::Direct,
+    }
+}
+
+pub(crate) fn stage_agent_allocation(ctx: &mut HandlerCtx<'_>, allocation: &AgentAllocation) {
+    let node_id = ctx.node.id.clone();
+    let mut root = ctx
+        .staged_updates()
+        .get("agentd_scheduler_allocations")
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut values = root
+        .remove(&node_id)
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default();
+    values.push(agent_allocation_json(allocation));
+    root.insert(node_id, serde_json::Value::Array(values));
+    ctx.stage(
+        "agentd_scheduler_allocations",
+        serde_json::Value::Object(root),
+    );
+}
+
+#[must_use]
+pub fn agent_allocation_json(allocation: &AgentAllocation) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "requestedRole": allocation.requested_role.as_str(),
+        "agentId": allocation.agent_id.as_str(),
+        "schedulerStatus": allocation.status.as_str(),
+    });
+    let Some(object) = value.as_object_mut() else {
+        return value;
+    };
+    if let Some(tier) = allocation.tier.as_deref() {
+        object.insert(
+            "tier".to_string(),
+            serde_json::Value::String(tier.to_string()),
+        );
+    }
+    if let Some(reservation_id) = allocation.reservation_id.as_deref() {
+        object.insert(
+            "schedulerReservationId".to_string(),
+            serde_json::Value::String(reservation_id.to_string()),
+        );
+    }
+    if let Some(ticket) = allocation.ticket.as_deref() {
+        object.insert(
+            "schedulerTicket".to_string(),
+            serde_json::Value::String(ticket.to_string()),
+        );
+    }
+    if let Some(name) = allocation.provisioned_name.as_deref() {
+        object.insert(
+            "provisionedName".to_string(),
+            serde_json::Value::String(name.to_string()),
+        );
+    }
+    if !allocation.runtime.is_null() {
+        object.insert("runtime".to_string(), allocation.runtime.clone());
+    }
+    value
+}
+
+pub(crate) fn current_node_allocation_agent_ids(
+    ctx: &HandlerCtx<'_>,
+) -> Vec<crate::types::AgentId> {
+    ctx.context
+        .get("agentd_scheduler_allocations")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|allocations| allocations.get(&ctx.node.id))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|allocation| allocation.get("agentId"))
+        .filter_map(serde_json::Value::as_str)
+        .map(crate::types::AgentId::parsed)
+        .collect()
+}
+
+pub fn append_agent_allocation_prompt_context(prompt: &mut String, allocation: &AgentAllocation) {
+    use std::fmt::Write as _;
+
+    if !prompt.is_empty() && !prompt.ends_with('\n') {
+        prompt.push('\n');
+    }
+    let _ = writeln!(
+        prompt,
+        "agentd_scheduler_status: {}",
+        allocation.status.as_str()
+    );
+    let _ = writeln!(
+        prompt,
+        "agentd_scheduler_requested_role: {}",
+        allocation.requested_role
+    );
+    if let Some(tier) = allocation.tier.as_deref() {
+        let _ = writeln!(prompt, "agentd_scheduler_tier: {tier}");
+    }
+    if let Some(reservation_id) = allocation.reservation_id.as_deref() {
+        let _ = writeln!(prompt, "agentd_scheduler_reservation_id: {reservation_id}");
+    }
+    if let Some(ticket) = allocation.ticket.as_deref() {
+        let _ = writeln!(prompt, "agentd_scheduler_ticket: {ticket}");
+    }
+    if let Some(name) = allocation.provisioned_name.as_deref() {
+        let _ = writeln!(prompt, "agentd_scheduler_provisioned_name: {name}");
     }
 }
 

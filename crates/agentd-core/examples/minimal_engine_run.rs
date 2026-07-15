@@ -42,6 +42,7 @@ async fn main() {
         store: &store,
         mempal: &mempal,
         clock: &clock,
+        agent_allocator: &agentd_core::ports::DirectAgentAllocator,
     };
     let engine = Engine::new(&graph, &registry, ports, "demo-sha");
     let run_id = RunId::from_string("demo-run");

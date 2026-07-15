@@ -95,13 +95,13 @@ Scenario: submit_human_answer maps replayed waits to already_submitted
 Scenario: MCP dispatcher lists the human answer tool
   Test:
     Package: agentd-surface
-    Filter: dispatch_lists_six_tools_with_submit_human_answer
+    Filter: dispatch_lists_nine_tools_with_submit_human_answer
   Level: dispatcher contract
   Test Double: pure descriptor list
-  Given the MCP tool registry
+  Given the nine-tool MCP registry
   When tool descriptors are listed
-  Then the six tools include `submit_human_answer`
-  And the P70 tool-count contract is updated from five tools to six tools
+  Then the nine tools include `submit_human_answer`
+  And the P70 tool-count contract records the current nine-tool registry
 
 Scenario: stdio schema exposes submit_human_answer arguments
   Test:

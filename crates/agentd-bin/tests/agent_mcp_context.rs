@@ -8,7 +8,7 @@ use agentd_bin::agent_mcp_context::{
     AGENTD_MCP_STDIO_CMD_ENV, McpStdioContextBackend, mcp_stdio_command,
 };
 use agentd_core::CoreError;
-use agentd_core::ports::AgentBackend;
+use agentd_core::ports::{AgentAllocation, AgentAllocationStatus, AgentBackend};
 use agentd_core::types::{
     AgentHandle, AgentId, BackendKind, CliKind, LaunchStrategy, SpawnRequest,
 };
@@ -16,17 +16,23 @@ use agentd_core::types::{
 #[derive(Debug, Clone)]
 struct RecordingBackend {
     spawned: Arc<Mutex<Vec<SpawnRequest>>>,
+    dispatched: Arc<Mutex<Vec<(SpawnRequest, AgentAllocation)>>>,
 }
 
 impl RecordingBackend {
     fn new() -> Self {
         Self {
             spawned: Arc::new(Mutex::new(Vec::new())),
+            dispatched: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     fn spawned(&self) -> Vec<SpawnRequest> {
         self.spawned.lock().expect("spawned lock").clone()
+    }
+
+    fn dispatched(&self) -> Vec<(SpawnRequest, AgentAllocation)> {
+        self.dispatched.lock().expect("dispatched lock").clone()
     }
 }
 
@@ -44,6 +50,40 @@ impl AgentBackend for RecordingBackend {
             session_name: format!("agentd-{}", agent_id.as_str()),
             spawned_at: SystemTime::UNIX_EPOCH,
         })
+    }
+
+    async fn dispatch_allocated(
+        &self,
+        req: SpawnRequest,
+        allocation: &AgentAllocation,
+    ) -> Result<AgentHandle, CoreError> {
+        let agent_id = req.agent_id.clone();
+        self.dispatched
+            .lock()
+            .expect("dispatched lock")
+            .push((req, allocation.clone()));
+        Ok(AgentHandle {
+            agent_id: agent_id.clone(),
+            backend: BackendKind::Tmux,
+            address: format!("fake://{}", agent_id.as_str()),
+            pane_id: Some("%1".to_string()),
+            pid: Some(120),
+            session_name: format!("agentd-{}", agent_id.as_str()),
+            spawned_at: SystemTime::UNIX_EPOCH,
+        })
+    }
+}
+
+fn routed_allocation() -> AgentAllocation {
+    AgentAllocation {
+        requested_role: "coding".to_string(),
+        agent_id: AgentId::parsed("implementer"),
+        status: AgentAllocationStatus::Routed,
+        tier: Some("medium".to_string()),
+        reservation_id: Some("sched_res_1".to_string()),
+        ticket: None,
+        provisioned_name: None,
+        runtime: serde_json::json!({"tmuxTarget": "agentd-implementer:0.0"}),
     }
 }
 
@@ -70,11 +110,14 @@ fn config_with_relative_paths() -> DaemonConfig {
         worktree_base: PathBuf::from(".agentd/worktrees"),
         accept_workflow_change: false,
         log_level: "debug".to_string(),
+        api_token: None,
+        agent_tokens: Vec::new(),
+        agent_token_mode: "audit".to_string(),
     }
 }
 
 #[test]
-fn mcp_stdio_command_uses_absolute_config_paths_and_shell_quotes() {
+fn mcp_stdio_command_includes_proxy_url_to_daemon() {
     let command = mcp_stdio_command(
         Path::new("/opt/Agent Bin/agentd"),
         &config_with_relative_paths(),
@@ -106,8 +149,8 @@ fn mcp_stdio_command_uses_absolute_config_paths_and_shell_quotes() {
         "stdio command forces quiet stdout logs: {command}"
     );
     assert!(
-        command.ends_with(" mcp-stdio"),
-        "command ends with the stdio subcommand: {command}"
+        command.ends_with(" mcp-stdio --proxy-url 'http://127.0.0.1:8787'"),
+        "command ends with the proxied stdio subcommand: {command}"
     );
 }
 
@@ -154,7 +197,7 @@ async fn mcp_context_backend_exports_command_and_appends_prompt() {
         req.env_overrides
             .get(AGENTD_MCP_STDIO_CMD_ENV)
             .map(String::as_str),
-        Some("agentd --db-path '/tmp/agentd.db' mcp-stdio")
+        Some("agentd --db-path '/tmp/agentd.db' mcp-stdio --agent-id 'implementer'")
     );
     let prompt = req.initial_prompt.as_deref().expect("prompt exists");
     assert!(
@@ -164,6 +207,71 @@ async fn mcp_context_backend_exports_command_and_appends_prompt() {
     assert!(prompt.contains("agentd_mcp_stdio"), "{prompt}");
     assert!(prompt.contains("tools/list"), "{prompt}");
     assert!(prompt.contains("tools/call"), "{prompt}");
+}
+
+#[tokio::test]
+async fn mcp_context_backend_forwards_allocated_dispatch_with_stdio_context() {
+    let inner = RecordingBackend::new();
+    let backend = McpStdioContextBackend::new(
+        Box::new(inner.clone()),
+        "agentd --db-path '/tmp/agentd.db' mcp-stdio",
+    );
+
+    backend
+        .dispatch_allocated(request(Some("existing task prompt")), &routed_allocation())
+        .await
+        .expect("dispatch succeeds");
+
+    assert!(
+        inner.spawned().is_empty(),
+        "allocated dispatch must not fall back to plain spawn"
+    );
+    let dispatched = inner.dispatched();
+    assert_eq!(dispatched.len(), 1);
+    let req = &dispatched[0].0;
+    assert_eq!(
+        req.env_overrides
+            .get(AGENTD_MCP_STDIO_CMD_ENV)
+            .map(String::as_str),
+        Some("agentd --db-path '/tmp/agentd.db' mcp-stdio --agent-id 'implementer'")
+    );
+    let prompt = req.initial_prompt.as_deref().expect("prompt exists");
+    assert!(prompt.contains("existing task prompt"), "{prompt}");
+    assert!(prompt.contains("agentd_mcp_stdio"), "{prompt}");
+    assert_eq!(
+        dispatched[0].1.runtime["tmuxTarget"],
+        "agentd-implementer:0.0"
+    );
+}
+
+#[tokio::test]
+async fn mcp_context_backend_exports_agent_bound_stdio_command() {
+    let inner = RecordingBackend::new();
+    let backend = McpStdioContextBackend::new(
+        Box::new(inner.clone()),
+        "agentd --db-path '/tmp/agentd.db' mcp-stdio --proxy-url 'http://127.0.0.1:8787'",
+    );
+
+    backend
+        .spawn(request(Some("existing task prompt")))
+        .await
+        .expect("spawn succeeds");
+
+    let spawned = inner.spawned();
+    let req = &spawned[0];
+    let command = req
+        .env_overrides
+        .get(AGENTD_MCP_STDIO_CMD_ENV)
+        .expect("stdio command");
+    assert!(
+        command.ends_with("--agent-id 'implementer'"),
+        "command must bind the spawned agent id: {command}"
+    );
+    let prompt = req.initial_prompt.as_deref().expect("prompt exists");
+    assert!(
+        prompt.contains(command),
+        "prompt must show identity-bound command: {prompt}"
+    );
 }
 
 #[tokio::test]

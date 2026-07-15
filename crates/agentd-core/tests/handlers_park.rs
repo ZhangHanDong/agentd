@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use agentd_core::CoreError;
 use agentd_core::dot::parser;
@@ -11,13 +12,18 @@ use agentd_core::graph::NodeGraph;
 use agentd_core::handler::{
     CodergenHandler, FanInHandler, FanOutHandler, Handler, HandlerCtx, Ports, WaitHumanHandler,
 };
-use agentd_core::ports::{DrawerHit, Store, WorktreeAllocator};
+use agentd_core::ports::{
+    AgentAllocation, AgentAllocationRequest, AgentAllocationStatus, AgentAllocator, AgentBackend,
+    DrawerHit, Store, WorktreeAllocator,
+};
 use agentd_core::test_support::{
     FakeBackend, FixedClock, InMemoryStore, MempalStub, RecordingCommandRunner,
 };
 use agentd_core::types::{
-    AgentId, NodeId, Outcome, ReviewVerdict, RunContext, RunId, Status, VerdictValue,
+    AgentHandle, AgentId, BackendKind, CliKind, NodeId, Outcome, ReviewVerdict, RunContext, RunId,
+    SpawnRequest, Status, VerdictValue,
 };
+use std::collections::VecDeque;
 
 struct Deps {
     run_id: RunId,
@@ -26,6 +32,169 @@ struct Deps {
     store: InMemoryStore,
     mempal: MempalStub,
     clock: FixedClock,
+}
+
+#[derive(Debug)]
+struct RecordingAllocator {
+    requests: Mutex<Vec<AgentAllocationRequest>>,
+    releases: Mutex<Vec<String>>,
+    responses: Mutex<VecDeque<AgentAllocation>>,
+}
+
+impl RecordingAllocator {
+    fn new(responses: Vec<AgentAllocation>) -> Self {
+        Self {
+            requests: Mutex::new(Vec::new()),
+            releases: Mutex::new(Vec::new()),
+            responses: Mutex::new(VecDeque::from(responses)),
+        }
+    }
+
+    fn requests(&self) -> Vec<AgentAllocationRequest> {
+        self.requests.lock().expect("request lock").clone()
+    }
+}
+#[async_trait::async_trait]
+impl AgentAllocator for RecordingAllocator {
+    async fn allocate(&self, req: AgentAllocationRequest) -> Result<AgentAllocation, CoreError> {
+        self.requests
+            .lock()
+            .expect("request lock")
+            .push(req.clone());
+        self.responses
+            .lock()
+            .expect("response lock")
+            .pop_front()
+            .ok_or_else(|| CoreError::Backend("missing test allocation response".to_string()))
+    }
+
+    async fn release(&self, agent_id: &AgentId) -> Result<Option<AgentAllocation>, CoreError> {
+        self.releases
+            .lock()
+            .expect("release lock")
+            .push(agent_id.as_str().to_string());
+        Ok(None)
+    }
+}
+
+fn routed_allocation(role: &str, agent_id: &str, reservation_id: &str) -> AgentAllocation {
+    AgentAllocation {
+        requested_role: role.to_string(),
+        agent_id: AgentId::parsed(agent_id),
+        status: AgentAllocationStatus::Routed,
+        tier: Some("medium".to_string()),
+        reservation_id: Some(reservation_id.to_string()),
+        ticket: None,
+        provisioned_name: None,
+        runtime: serde_json::json!({}),
+    }
+}
+
+fn queued_allocation(role: &str, ticket: &str) -> AgentAllocation {
+    AgentAllocation {
+        requested_role: role.to_string(),
+        agent_id: AgentId::parsed(role),
+        status: AgentAllocationStatus::Queued,
+        tier: Some("medium".to_string()),
+        reservation_id: None,
+        ticket: Some(ticket.to_string()),
+        provisioned_name: None,
+        runtime: serde_json::json!({}),
+    }
+}
+
+#[derive(Debug)]
+struct FailingBackend;
+
+#[async_trait::async_trait]
+impl AgentBackend for FailingBackend {
+    async fn spawn(&self, _req: SpawnRequest) -> Result<AgentHandle, CoreError> {
+        Err(CoreError::Backend("injected spawn failure".to_string()))
+    }
+}
+
+#[derive(Debug, Default)]
+struct RecordingDispatchBackend {
+    spawns: Mutex<Vec<SpawnRequest>>,
+    dispatches: Mutex<Vec<(SpawnRequest, AgentAllocation)>>,
+}
+
+impl RecordingDispatchBackend {
+    fn spawns(&self) -> Vec<SpawnRequest> {
+        self.spawns.lock().expect("spawn lock").clone()
+    }
+
+    fn dispatches(&self) -> Vec<(SpawnRequest, AgentAllocation)> {
+        self.dispatches.lock().expect("dispatch lock").clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentBackend for RecordingDispatchBackend {
+    async fn spawn(&self, req: SpawnRequest) -> Result<AgentHandle, CoreError> {
+        self.spawns.lock().expect("spawn lock").push(req);
+        Err(CoreError::Backend(
+            "plain spawn should not be used for routed allocation".to_string(),
+        ))
+    }
+
+    async fn dispatch_allocated(
+        &self,
+        req: SpawnRequest,
+        allocation: &AgentAllocation,
+    ) -> Result<AgentHandle, CoreError> {
+        self.dispatches
+            .lock()
+            .expect("dispatch lock")
+            .push((req.clone(), allocation.clone()));
+        Ok(AgentHandle {
+            agent_id: req.agent_id,
+            backend: BackendKind::Tmux,
+            address: allocation
+                .runtime
+                .get("tmuxTarget")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("fake://allocated")
+                .to_string(),
+            pane_id: Some("%9".to_string()),
+            pid: Some(9001),
+            session_name: "agentd-codex-coding-1".to_string(),
+            spawned_at: SystemTime::UNIX_EPOCH,
+        })
+    }
+}
+
+struct FailingBackendDeps {
+    run_id: RunId,
+    backend: FailingBackend,
+    runner: RecordingCommandRunner,
+    store: InMemoryStore,
+    mempal: MempalStub,
+    clock: FixedClock,
+}
+
+impl FailingBackendDeps {
+    fn new() -> Self {
+        Self {
+            run_id: RunId::from_string("r"),
+            backend: FailingBackend,
+            runner: RecordingCommandRunner::new(),
+            store: InMemoryStore::new(),
+            mempal: MempalStub::new(),
+            clock: FixedClock::new(0),
+        }
+    }
+
+    fn ports(&self) -> Ports<'_> {
+        Ports {
+            backend: &self.backend,
+            runner: &self.runner,
+            store: &self.store,
+            mempal: &self.mempal,
+            clock: &self.clock,
+            agent_allocator: &agentd_core::ports::DirectAgentAllocator,
+        }
+    }
 }
 
 impl Deps {
@@ -47,6 +216,18 @@ impl Deps {
             store: &self.store,
             mempal: &self.mempal,
             clock: &self.clock,
+            agent_allocator: &agentd_core::ports::DirectAgentAllocator,
+        }
+    }
+
+    fn ports_with_allocator<'a>(&'a self, allocator: &'a dyn AgentAllocator) -> Ports<'a> {
+        Ports {
+            backend: &self.backend,
+            runner: &self.runner,
+            store: &self.store,
+            mempal: &self.mempal,
+            clock: &self.clock,
+            agent_allocator: allocator,
         }
     }
 }
@@ -105,6 +286,28 @@ impl WorktreeAllocator for RecordingSnapshotAllocator {
             .lock()
             .expect("release lock")
             .push((key.to_string(), path.to_path_buf()));
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct FixedTaskAllocator {
+    path: PathBuf,
+}
+
+impl FixedTaskAllocator {
+    fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+}
+
+#[async_trait::async_trait]
+impl WorktreeAllocator for FixedTaskAllocator {
+    async fn allocate(&self, _key: &str) -> Result<PathBuf, CoreError> {
+        Ok(self.path.clone())
+    }
+
+    async fn release(&self, _key: &str, _path: &Path) -> Result<(), CoreError> {
         Ok(())
     }
 }
@@ -1229,6 +1432,246 @@ async fn codergen_run_parks_with_agent_outcome_reason_and_assembles_prompt() {
 }
 
 #[tokio::test]
+async fn codex_prefixed_roles_spawn_codex_cli() {
+    let g = graph(
+        r#"digraph m {
+            "implement" [handler="codergen", role="codex-impl"];
+        }"#,
+    );
+    let node = g.node("implement").expect("implement node");
+    let deps = Deps::new();
+    let context = RunContext::new();
+    let mut ctx = HandlerCtx::new(&deps.run_id, &g, node, &context, deps.ports());
+
+    let step = CodergenHandler.run(&mut ctx).await.expect("run");
+    assert!(matches!(
+        step,
+        HandlerStep::Park(ParkReason::AgentOutcome { .. })
+    ));
+    let spawned = deps.backend.spawned();
+    assert_eq!(spawned.len(), 1, "one implementer spawned");
+    assert_eq!(spawned[0].agent_id.as_str(), "codex-impl");
+    assert_eq!(spawned[0].cli, CliKind::Codex);
+
+    let g = graph(
+        r#"digraph m {
+            "implement" [handler="codergen", role="implementer"];
+        }"#,
+    );
+    let node = g.node("implement").expect("implement node");
+    let deps = Deps::new();
+    let mut ctx = HandlerCtx::new(&deps.run_id, &g, node, &context, deps.ports());
+
+    let step = CodergenHandler.run(&mut ctx).await.expect("run");
+    assert!(matches!(
+        step,
+        HandlerStep::Park(ParkReason::AgentOutcome { .. })
+    ));
+    let spawned = deps.backend.spawned();
+    assert_eq!(spawned.len(), 1, "one legacy implementer spawned");
+    assert_eq!(spawned[0].agent_id.as_str(), "implementer");
+    assert_eq!(spawned[0].cli, CliKind::ClaudeCode);
+}
+
+#[tokio::test]
+async fn fan_out_prefixed_reviewers_select_matching_cli() {
+    let g = graph(
+        r#"digraph m {
+            "review" [handler="parallel.fan_out", reviewers="claude-sec,codex-perf,gemini-readability"];
+        }"#,
+    );
+    let node = g.node("review").expect("review node");
+    let deps = Deps::new();
+    let context = RunContext::new();
+    let mut ctx = HandlerCtx::new(&deps.run_id, &g, node, &context, deps.ports());
+
+    let step = FanOutHandler.run(&mut ctx).await.expect("run");
+    assert!(matches!(
+        step,
+        HandlerStep::Park(ParkReason::ReviewVerdicts { .. })
+    ));
+    let spawned = deps.backend.spawned();
+    assert_eq!(spawned.len(), 3, "three reviewers spawned");
+
+    let cli_for = |role: &str| {
+        spawned
+            .iter()
+            .find(|request| request.agent_id.as_str() == role)
+            .unwrap_or_else(|| panic!("missing spawned role {role}: {spawned:?}"))
+            .cli
+    };
+    assert_eq!(cli_for("claude-sec"), CliKind::ClaudeCode);
+    assert_eq!(cli_for("codex-perf"), CliKind::Codex);
+    assert_eq!(cli_for("gemini-readability"), CliKind::ClaudeCode);
+}
+
+#[tokio::test]
+async fn fan_out_allocates_reviewers_and_uses_selected_reviewer_ids() {
+    let g = graph(
+        r#"digraph m {
+            "review" [handler="parallel.fan_out", reviewers="review,testing"];
+        }"#,
+    );
+    let node = g.node("review").expect("review node");
+    let deps = Deps::new();
+    let context = RunContext::new();
+    let allocator = RecordingAllocator::new(vec![
+        routed_allocation("review", "codex-review-1", "sched_res_review"),
+        routed_allocation("testing", "codex-testing-1", "sched_res_testing"),
+    ]);
+    let mut ctx = HandlerCtx::new(
+        &deps.run_id,
+        &g,
+        node,
+        &context,
+        deps.ports_with_allocator(&allocator),
+    );
+
+    let step = FanOutHandler.run(&mut ctx).await.expect("run");
+    assert!(matches!(
+        step,
+        HandlerStep::Park(ParkReason::ReviewVerdicts { .. })
+    ));
+
+    let requests = allocator.requests();
+    assert_eq!(requests.len(), 2, "one allocation per reviewer");
+    assert_eq!(requests[0].role, "review");
+    assert_eq!(requests[1].role, "testing");
+
+    let spawned = deps.backend.spawned();
+    assert_eq!(spawned.len(), 2, "two allocated reviewers spawned");
+    let prompt_for = |agent_id: &str| {
+        spawned
+            .iter()
+            .find(|request| request.agent_id.as_str() == agent_id)
+            .unwrap_or_else(|| panic!("missing spawned reviewer {agent_id}: {spawned:?}"))
+            .initial_prompt
+            .as_deref()
+            .expect("review prompt")
+            .to_string()
+    };
+    let review_prompt = prompt_for("codex-review-1");
+    assert!(
+        review_prompt.contains("agentd_reviewer_id: codex-review-1"),
+        "{review_prompt}"
+    );
+    assert!(
+        review_prompt.contains("agentd_scheduler_reservation_id: sched_res_review"),
+        "{review_prompt}"
+    );
+    let testing_prompt = prompt_for("codex-testing-1");
+    assert!(
+        testing_prompt.contains("agentd_reviewer_id: codex-testing-1"),
+        "{testing_prompt}"
+    );
+    assert!(
+        testing_prompt.contains("agentd_scheduler_reservation_id: sched_res_testing"),
+        "{testing_prompt}"
+    );
+
+    let staged = ctx.staged_updates();
+    let allocations = staged["agentd_scheduler_allocations"]["review"]
+        .as_array()
+        .expect("staged reviewer allocations");
+    assert_eq!(allocations.len(), 2);
+    assert_eq!(allocations[0]["requestedRole"], "review");
+    assert_eq!(allocations[0]["agentId"], "codex-review-1");
+    assert_eq!(allocations[1]["requestedRole"], "testing");
+    assert_eq!(allocations[1]["agentId"], "codex-testing-1");
+}
+
+#[tokio::test]
+async fn fan_out_queues_scheduler_reviewer_without_dispatching_backend() {
+    let g = graph(
+        r#"digraph m {
+            "review" [handler="parallel.fan_out", reviewers="review", capability="medium"];
+        }"#,
+    );
+    let node = g.node("review").expect("review node");
+    let mut context = RunContext::new();
+    context.set(
+        "worktree",
+        serde_json::Value::String("/tmp/agentd-impl-wt".to_string()),
+    );
+    let deps = Deps::new();
+    let backend = RecordingDispatchBackend::default();
+    let allocator = RecordingAllocator::new(vec![queued_allocation("review", "sched_ticket_r1")]);
+    let ports = Ports {
+        backend: &backend,
+        runner: &deps.runner,
+        store: &deps.store,
+        mempal: &deps.mempal,
+        clock: &deps.clock,
+        agent_allocator: &allocator,
+    };
+    let mut ctx = HandlerCtx::new(&deps.run_id, &g, node, &context, ports);
+
+    let step = FanOutHandler.run(&mut ctx).await.expect("run");
+    let review_run_id = match step {
+        HandlerStep::Park(ParkReason::ReviewVerdicts {
+            review_run_id,
+            expected,
+            round,
+        }) => {
+            assert_eq!(expected, 1);
+            assert_eq!(round, 1);
+            review_run_id
+        }
+        other => panic!("expected queued ReviewVerdicts park, got {other:?}"),
+    };
+
+    assert!(
+        backend.spawns().is_empty(),
+        "queued reviewer allocation must not plain-spawn"
+    );
+    assert!(
+        backend.dispatches().is_empty(),
+        "queued reviewer allocation must not dispatch before scheduler release drains it"
+    );
+    let requests = allocator.requests();
+    assert_eq!(requests.len(), 1, "one reviewer allocation request");
+    assert_eq!(requests[0].role, "review");
+    assert_eq!(
+        requests[0].task["kind"], "workflow_fan_out_reviewer",
+        "queued reviewer task carries fan_out wakeup kind"
+    );
+    assert_eq!(
+        requests[0].task["reviewRunId"],
+        review_run_id.as_str(),
+        "scheduler task points at the exact review run"
+    );
+
+    let staged = ctx.staged_updates();
+    let allocations = staged["agentd_scheduler_allocations"]["review"]
+        .as_array()
+        .expect("staged reviewer allocations");
+    assert_eq!(allocations.len(), 1);
+    assert_eq!(allocations[0]["requestedRole"], "review");
+    assert_eq!(allocations[0]["schedulerStatus"], "queued");
+    assert_eq!(allocations[0]["schedulerTicket"], "sched_ticket_r1");
+
+    let queued = &staged["agentd_queued_workflow_dispatches"]["review"]["reviewers"]["review"];
+    assert_eq!(queued["handler"], "parallel.fan_out");
+    assert_eq!(queued["reviewRunId"], review_run_id.as_str());
+    assert_eq!(queued["requestedRole"], "review");
+    assert_eq!(queued["sourceWorktree"], "/tmp/agentd-impl-wt");
+    assert_eq!(queued["round"], 1);
+    assert!(
+        queued["contextSha"]
+            .as_str()
+            .is_some_and(|sha| sha.len() == 64),
+        "queued wakeup stores context sha: {queued:?}"
+    );
+    assert!(
+        queued["basePrompt"]
+            .as_str()
+            .expect("base prompt")
+            .contains("adversarial review"),
+        "queued wakeup stores reviewer prompt base: {queued:?}"
+    );
+}
+
+#[tokio::test]
 async fn codergen_prompt_includes_outcome_submission_context() {
     let g = codergen_graph();
     let node = g.node("implement").expect("implement node");
@@ -1317,6 +1760,241 @@ async fn codergen_run_persists_agent_id_for_task_run() {
             .map(AgentId::as_str),
         Some("implementer"),
         "codergen persists the role as the task-run owner"
+    );
+}
+
+#[tokio::test]
+async fn codergen_allocates_agent_before_spawn_and_task_ownership() {
+    let g = graph(
+        r#"digraph m {
+            "implement" [handler="codergen", role="coding", capability="medium"];
+        }"#,
+    );
+    let node = g.node("implement").expect("implement node");
+    let context = RunContext::new();
+    let deps = Deps::new();
+    let allocator = RecordingAllocator::new(vec![routed_allocation(
+        "coding",
+        "codex-coding-1",
+        "sched_res_1",
+    )]);
+    let mut ctx = HandlerCtx::new(
+        &deps.run_id,
+        &g,
+        node,
+        &context,
+        deps.ports_with_allocator(&allocator),
+    );
+
+    let step = CodergenHandler.run(&mut ctx).await.expect("run");
+    let task_run_id = match step {
+        HandlerStep::Park(ParkReason::AgentOutcome { task_run_id }) => task_run_id,
+        other => panic!("expected AgentOutcome park, got {other:?}"),
+    };
+
+    assert_eq!(
+        deps.store
+            .task_agent(&task_run_id)
+            .as_ref()
+            .map(AgentId::as_str),
+        Some("codex-coding-1"),
+        "codergen persists the allocated agent as task owner"
+    );
+    assert_eq!(allocator.requests().len(), 1, "one allocation request");
+    assert_eq!(allocator.requests()[0].role, "coding");
+    assert_eq!(
+        allocator.requests()[0].capability.as_deref(),
+        Some("medium")
+    );
+
+    let spawned = deps.backend.spawned();
+    assert_eq!(spawned.len(), 1, "one allocated agent spawned");
+    assert_eq!(spawned[0].agent_id.as_str(), "codex-coding-1");
+    assert_eq!(spawned[0].cli, CliKind::Codex);
+    let prompt = spawned[0].initial_prompt.as_deref().expect("agent prompt");
+    assert!(
+        prompt.contains("agentd_agent_id: codex-coding-1"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("agentd_scheduler_status: routed"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("agentd_scheduler_reservation_id: sched_res_1"),
+        "{prompt}"
+    );
+
+    let staged = ctx.staged_updates();
+    let allocations = staged["agentd_scheduler_allocations"]["implement"]
+        .as_array()
+        .expect("staged allocation array");
+    assert_eq!(allocations.len(), 1);
+    assert_eq!(allocations[0]["agentId"], "codex-coding-1");
+    assert_eq!(allocations[0]["requestedRole"], "coding");
+    assert_eq!(allocations[0]["schedulerStatus"], "routed");
+    assert_eq!(allocations[0]["schedulerReservationId"], "sched_res_1");
+}
+
+#[tokio::test]
+async fn codergen_dispatches_allocated_agent_without_calling_plain_spawn() {
+    let g = graph(
+        r#"digraph m {
+            "implement" [handler="codergen", role="coding", capability="medium"];
+        }"#,
+    );
+    let node = g.node("implement").expect("implement node");
+    let context = RunContext::new();
+    let deps = Deps::new();
+    let backend = RecordingDispatchBackend::default();
+    let allocation = AgentAllocation {
+        runtime: serde_json::json!({
+            "tmuxTarget": "agentd-codex-coding-1:0.0",
+            "tmux_target": "agentd-codex-coding-1:0.0"
+        }),
+        ..routed_allocation("coding", "codex-coding-1", "sched_res_1")
+    };
+    let allocator = RecordingAllocator::new(vec![allocation]);
+    let ports = Ports {
+        backend: &backend,
+        runner: &deps.runner,
+        store: &deps.store,
+        mempal: &deps.mempal,
+        clock: &deps.clock,
+        agent_allocator: &allocator,
+    };
+    let mut ctx = HandlerCtx::new(&deps.run_id, &g, node, &context, ports);
+
+    let step = CodergenHandler.run(&mut ctx).await.expect("run");
+    let task_run_id = match step {
+        HandlerStep::Park(ParkReason::AgentOutcome { task_run_id }) => task_run_id,
+        other => panic!("expected AgentOutcome park, got {other:?}"),
+    };
+
+    assert!(backend.spawns().is_empty(), "plain spawn must not be used");
+    let dispatches = backend.dispatches();
+    assert_eq!(dispatches.len(), 1, "one allocation-aware dispatch");
+    assert_eq!(dispatches[0].0.agent_id.as_str(), "codex-coding-1");
+    assert_eq!(dispatches[0].1.agent_id.as_str(), "codex-coding-1");
+    assert_eq!(
+        dispatches[0].1.runtime["tmuxTarget"],
+        "agentd-codex-coding-1:0.0"
+    );
+    assert_eq!(
+        deps.store
+            .task_agent(&task_run_id)
+            .as_ref()
+            .map(AgentId::as_str),
+        Some("codex-coding-1")
+    );
+    let allocations = ctx.staged_updates()["agentd_scheduler_allocations"]["implement"]
+        .as_array()
+        .expect("staged allocation array");
+    assert_eq!(
+        allocations[0]["runtime"]["tmuxTarget"],
+        "agentd-codex-coding-1:0.0"
+    );
+}
+
+#[tokio::test]
+async fn codergen_queues_scheduler_allocation_without_dispatching_backend() {
+    let g = graph(
+        r#"digraph m {
+            "implement" [handler="codergen", role="coding", capability="medium"];
+        }"#,
+    );
+    let node = g.node("implement").expect("implement node");
+    let context = RunContext::new();
+    let deps = Deps::new();
+    let backend = RecordingDispatchBackend::default();
+    let allocator = RecordingAllocator::new(vec![queued_allocation("coding", "sched_ticket_1")]);
+    let worktree_allocator = FixedTaskAllocator::new("/tmp/agentd-queued-codergen");
+    let ports = Ports {
+        backend: &backend,
+        runner: &deps.runner,
+        store: &deps.store,
+        mempal: &deps.mempal,
+        clock: &deps.clock,
+        agent_allocator: &allocator,
+    };
+    let mut ctx = HandlerCtx::new(&deps.run_id, &g, node, &context, ports)
+        .with_worktree_allocator(Some(&worktree_allocator));
+
+    let step = CodergenHandler.run(&mut ctx).await.expect("run");
+    let task_run_id = match step {
+        HandlerStep::Park(ParkReason::AgentOutcome { task_run_id }) => task_run_id,
+        other => panic!("expected queued AgentOutcome park, got {other:?}"),
+    };
+
+    assert!(
+        backend.spawns().is_empty(),
+        "queued allocation must not plain-spawn"
+    );
+    assert!(
+        backend.dispatches().is_empty(),
+        "queued allocation must not dispatch before scheduler release drains it"
+    );
+    assert_eq!(
+        deps.store.task_agent(&task_run_id),
+        None,
+        "queued task-run must not be owned by the requested role before drain"
+    );
+    assert_eq!(
+        deps.store.task_worktree(&task_run_id),
+        Some(PathBuf::from("/tmp/agentd-queued-codergen")),
+        "queued task keeps its allocated worktree for later wakeup"
+    );
+    let staged = ctx.staged_updates();
+    let allocations = staged["agentd_scheduler_allocations"]["implement"]
+        .as_array()
+        .expect("staged allocation array");
+    assert_eq!(allocations.len(), 1);
+    assert_eq!(allocations[0]["requestedRole"], "coding");
+    assert_eq!(allocations[0]["schedulerStatus"], "queued");
+    assert_eq!(allocations[0]["schedulerTicket"], "sched_ticket_1");
+
+    let queued = &staged["agentd_queued_workflow_dispatches"]["implement"];
+    assert_eq!(queued["handler"], "codergen");
+    assert_eq!(queued["taskRunId"], task_run_id.as_str());
+    assert_eq!(queued["worktree"], "/tmp/agentd-queued-codergen");
+    assert!(
+        queued["basePrompt"]
+            .as_str()
+            .expect("base prompt")
+            .contains("agentd_role_task"),
+        "queued wakeup stores the base prompt: {queued:?}"
+    );
+}
+
+#[tokio::test]
+async fn codergen_persists_allocated_worktree_before_spawn() {
+    let g = codergen_graph();
+    let node = g.node("implement").expect("implement node");
+    let context = RunContext::new();
+    let deps = FailingBackendDeps::new();
+    let allocator = FixedTaskAllocator::new("/tmp/agentd-task-before-spawn");
+    let mut ctx = HandlerCtx::new(&deps.run_id, &g, node, &context, deps.ports())
+        .with_worktree_allocator(Some(&allocator));
+
+    let err = CodergenHandler
+        .run(&mut ctx)
+        .await
+        .expect_err("backend spawn fails");
+    assert!(
+        format!("{err:?}").contains("injected spawn failure"),
+        "backend error should be surfaced: {err:?}"
+    );
+
+    let task_run_id = deps
+        .store
+        .task_run_ids()
+        .into_iter()
+        .next()
+        .expect("task run inserted before spawn");
+    assert_eq!(
+        deps.store.task_worktree(&task_run_id),
+        Some(PathBuf::from("/tmp/agentd-task-before-spawn")),
+        "allocated worktree must be persisted before backend spawn so agent-side MCP boot-GC preserves it"
     );
 }
 

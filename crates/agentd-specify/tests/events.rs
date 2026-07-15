@@ -40,10 +40,19 @@ impl SpecifyClient for FailingReportClient {
 }
 
 fn repo_root() -> PathBuf {
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.pop();
-    path.pop();
-    path
+    let mut path = std::env::current_dir().expect("read current test directory");
+    loop {
+        let manifest = path.join("Cargo.toml");
+        if fs::read_to_string(&manifest).is_ok_and(|content| {
+            content.contains("[workspace]") && content.contains("\"crates/agentd-specify\"")
+        }) {
+            return path;
+        }
+        assert!(
+            path.pop(),
+            "find agentd workspace root from current test directory"
+        );
+    }
 }
 
 fn read_repo_file(path: &str) -> String {

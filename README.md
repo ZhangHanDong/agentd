@@ -42,7 +42,7 @@ docs/specs/             # design + spec docs
 
 ## Building
 
-Requires Rust stable (MSRV 1.85), tmux 3.3+, and the `agent-spec` CLI:
+Requires Rust stable (MSRV 1.94), tmux 3.3+, and the `agent-spec` CLI:
 
 ```bash
 cargo build --workspace

@@ -69,7 +69,7 @@ outcomes or reviews.
 ## Completion Criteria
 
 Scenario: stdio command rendering is absolute and shell-safe
-  Test: mcp_stdio_command_uses_absolute_config_paths_and_shell_quotes
+  Test: mcp_stdio_command_includes_proxy_url_to_daemon
   Level: unit command renderer
   Given a daemon config with relative paths and a daemon cwd containing spaces
   When the stdio command is rendered for a known agentd executable path

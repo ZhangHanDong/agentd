@@ -1,0 +1,21 @@
+[package]
+name = "agentd-project-authority"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+# This internal authority boundary is released with agentd, not independently.
+# Keeping it private also makes its version-less workspace path dependency explicit.
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+agentd-core = { path = "../agentd-core" }
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { workspace = true }

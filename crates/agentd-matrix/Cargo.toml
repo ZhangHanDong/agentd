@@ -10,5 +10,17 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+matrix-sdk-adapter = ["dep:matrix-sdk", "dep:tokio"]
+
 [dependencies]
-# crate-specific deps come in later phases
+matrix-sdk = { workspace = true, optional = true, features = ["rustls-tls"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+thiserror = { workspace = true }
+tokio = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -4,7 +4,11 @@ all-features = true
 [advisories]
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
-ignore = []
+ignore = [
+    # Matrix SDK 0.16.1 (and current 0.18.0) uses aquamarine 0.6, whose
+    # compile-time proc-macro dependency has no maintained release to upgrade to.
+    { id = "RUSTSEC-2026-0173", reason = "unavoidable compile-time dependency of supported Matrix SDK releases; no runtime exposure" },
+]
 
 [licenses]
 allow = [
@@ -20,6 +24,12 @@ allow = [
     "MPL-2.0",
 ]
 confidence-threshold = 0.93
+exceptions = [
+    # Mozilla root certificate data distributed by rustls/webpki.
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots@1" },
+    # OSI-approved permissive license used by Matrix SDK's bloom filter.
+    { allow = ["BSL-1.0"], crate = "xxhash-rust@0.8" },
+]
 
 [bans]
 multiple-versions = "warn"

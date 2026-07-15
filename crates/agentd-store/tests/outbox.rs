@@ -19,12 +19,14 @@ fn outcome_with_writes(writes: Vec<MempalWrite>) -> Outcome {
     outcome
 }
 
-async fn count(pool: &sqlx::SqlitePool, table: &str, run: &str) -> i64 {
-    sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table} WHERE run_id = ?"))
-        .bind(run)
-        .fetch_one(pool)
-        .await
-        .expect("count query")
+async fn count(pool: &sqlx::SqlitePool, table: &'static str, run: &str) -> i64 {
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT COUNT(*) FROM {table} WHERE run_id = ?"
+    )))
+    .bind(run)
+    .fetch_one(pool)
+    .await
+    .expect("count query")
 }
 
 #[tokio::test]

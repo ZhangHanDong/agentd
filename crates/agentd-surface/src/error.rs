@@ -7,6 +7,9 @@ use agentd_core::CoreError;
 /// A tool failure. `code()` is the §4.12.1 error code returned to the agent.
 #[derive(Debug, thiserror::Error)]
 pub enum SurfaceError {
+    /// The tool input is malformed or violates a surface-level validation rule.
+    #[error("bad_request: {0}")]
+    BadRequest(String),
     /// The engine has no pending task for this agent/(run,node).
     #[error("not_assigned")]
     NotAssigned,
@@ -19,6 +22,9 @@ pub enum SurfaceError {
     /// The referenced run does not exist.
     #[error("not_found")]
     NotFound,
+    /// The caller is known but is not allowed to access the requested resource.
+    #[error("forbidden")]
+    Forbidden,
     /// Anything else (a host/store failure), surfaced verbatim.
     #[error("internal: {0}")]
     Internal(String),
@@ -29,10 +35,12 @@ impl SurfaceError {
     #[must_use]
     pub fn code(&self) -> &'static str {
         match self {
+            Self::BadRequest(_) => "bad_request",
             Self::NotAssigned => "not_assigned",
             Self::AlreadySubmitted => "already_submitted",
             Self::StaleAttempt => "stale_attempt",
             Self::NotFound => "not_found",
+            Self::Forbidden => "forbidden",
             Self::Internal(_) => "internal",
         }
     }

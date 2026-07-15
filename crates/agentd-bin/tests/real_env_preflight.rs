@@ -45,7 +45,6 @@ fn real_env_preflight_dry_run_prints_plan_without_starting() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     for expected in [
         "agentd_pr_history_status.sh HEAD main",
-        "agentd_real_claude_smoke.sh --preflight-only",
         "agentd_real_execute_smoke.sh --preflight-only",
         "agentd_real_sigkill_smoke.sh --preflight-only",
         "does not run AGENTD_REAL_* --execute",
@@ -104,7 +103,6 @@ fn real_env_preflight_preflight_only_accepts_fake_prereqs() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     for expected in [
         "[ok] git history",
-        "[ok] real Claude preflight",
         "[ok] real execute preflight",
         "[ok] real SIGKILL preflight",
         "real environment preflight ok",
@@ -143,7 +141,6 @@ fn real_env_preflight_history_failure_stops_before_agent_checks() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("[run] git history"), "{stdout}");
     for forbidden in [
-        "[ok] real Claude preflight",
         "[ok] real execute preflight",
         "[ok] real SIGKILL preflight",
         "real environment preflight ok",
@@ -176,11 +173,7 @@ fn write_fake_preflight_tools(dir: &Path, has_common_history: bool) {
     write_fake_tool(dir, "agent-spec", "echo agent-spec 1.0\n");
     write_fake_tool(dir, "curl", "echo curl 8\n");
     write_fake_tool(dir, "sqlite3", "echo sqlite 3\n");
-    write_fake_tool(
-        dir,
-        "claude",
-        "if [[ \"${1:-}\" == \"--help\" ]]; then echo 'Usage: claude --mcp-config cfg'; else echo claude; fi\n",
-    );
+    write_fake_tool(dir, "codex", "echo codex 1.0\n");
     write_fake_tool(
         dir,
         "gh",

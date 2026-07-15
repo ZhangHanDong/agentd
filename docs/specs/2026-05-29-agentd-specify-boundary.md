@@ -1,9 +1,17 @@
 # agentd ↔ Specify — Boundary & Integration Spec
 
 - **Date**: 2026-05-29
-- **Status**: Decided (Path B) — supersedes the implicit "agentd owns everything" framing in the P0 design doc where they conflict
+- **Status**: Decided (Path B), amended by P264 — supersedes the implicit "agentd owns everything" framing in the P0 design doc where they conflict
+- **Enterprise ownership amendment**: `2026-07-10-enterprise-execution-ownership-boundary.md`
 - **Decision**: agentd is the **local execution/orchestration runtime** (the "specify orchestration cli"). **Specify** is a **separate web project** — the cloud collaboration + project-context layer that sits ON TOP of agentd. They connect over an open protocol seam. Specify does NOT duplicate agentd's engine; agentd does NOT own project-context/issues/spec-review/freeze.
 - **Scope of THIS repo (`agentd`)**: only the local runtime. **Specify-web is out of scope here** — it is its own repository/project. This doc records the seam so agentd builds the right hooks and does not over-reach.
+
+P264 refines this boundary for enterprise execution. Where this document uses
+the broad term "agentd" without distinguishing durable execution control from
+worker-local process state, the enterprise ownership amendment is
+authoritative. It also replaces the standalone-mode convenience wording below
+with explicit `ProjectAuthorityPort` selection: a configured Specify authority
+fails closed and never silently falls back to local authority.
 
 ---
 
