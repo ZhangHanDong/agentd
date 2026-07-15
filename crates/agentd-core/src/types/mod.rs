@@ -30,10 +30,12 @@ pub use security::{
     AttemptCapabilityId, AuthenticatedWorkload, AuthorizedResourceScope, CapabilityAdmission,
     CapabilityIssueRequest, CapabilityToken, CapabilityValidationRequest, EgressPolicy,
     ExecutionSandboxProfile, ExecutionSecurityScope, OciSandboxRuntime, PreparedSandbox,
-    ProtectedAction, ProtectedResource, ProtectedResourceKind, SandboxCleanupRequest,
-    SandboxExecuteRequest, SandboxExecution, SandboxLimits, SandboxMount, SandboxMountAccess,
-    SandboxPrepareRequest, SecretCheckoutRequest, SecretLease, SecretMaterial, SecretSelector,
-    SecurityDenialReason, SecurityValueError, TenantAuthorization, TenantAuthorizationRequest,
-    WorkloadIdentityRequest, WorkloadRole,
+    ProtectedAction, ProtectedResource, ProtectedResourceKind, SandboxCacheSharing,
+    SandboxCleanupRequest, SandboxExecuteRequest, SandboxExecution, SandboxLimits,
+    SandboxLinuxCapabilities, SandboxMount, SandboxMountAccess, SandboxPrepareRequest,
+    SandboxPrivilegeEscalation, SandboxRootFilesystem, SandboxWorkspace, SecretCheckoutRequest,
+    SecretLease, SecretMaterial, SecretSelector, SecurityAuditContext, SecurityDenialReason,
+    SecurityValueError, TenantAuthorization, TenantAuthorizationRequest, WorkloadIdentityRequest,
+    WorkloadRole,
 };
 pub use verdict::{ReviewVerdict, VerdictValue};

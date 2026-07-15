@@ -10,11 +10,13 @@ use agentd_core::types::{
     CapabilityIssueRequest, CapabilityToken, CapabilityValidationRequest, EgressPolicy,
     ExecutionSandboxProfile, ExecutionSecurityScope, FencingToken, LeaseId, OciSandboxRuntime,
     OrganizationRef, PreparedSandbox, ProjectExecutionSnapshotRef, ProjectRef, ProtectedAction,
-    ProtectedResource, ProtectedResourceKind, RbacPolicyVersionRef, SandboxCleanupRequest,
-    SandboxExecuteRequest, SandboxExecution, SandboxLimits, SandboxMount, SandboxMountAccess,
-    SandboxPrepareRequest, SecretCheckoutRequest, SecretLease, SecretMaterial, SecretSelector,
-    TaskLeaseClaim, TaskRunId, TenantAuthorization, TenantAuthorizationRequest, WorkerId,
-    WorkerIncarnationId, WorkloadIdentityRequest, WorkloadRole,
+    ProtectedResource, ProtectedResourceKind, RbacPolicyVersionRef, SandboxCacheSharing,
+    SandboxCleanupRequest, SandboxExecuteRequest, SandboxExecution, SandboxLimits,
+    SandboxLinuxCapabilities, SandboxMount, SandboxMountAccess, SandboxPrepareRequest,
+    SandboxPrivilegeEscalation, SandboxRootFilesystem, SandboxWorkspace, SecretCheckoutRequest,
+    SecretLease, SecretMaterial, SecretSelector, SecurityAuditContext, TaskLeaseClaim, TaskRunId,
+    TenantAuthorization, TenantAuthorizationRequest, WorkerId, WorkerIncarnationId,
+    WorkloadIdentityRequest, WorkloadRole,
 };
 
 fn authority_key() -> AuthorityKey {
@@ -73,6 +75,14 @@ fn scope() -> ExecutionSecurityScope {
         egress_profile_id: "deny-all-v1".to_string(),
         policy_revocation_epoch: 11,
         valid_until: 450,
+        audit_context: SecurityAuditContext {
+            execution_run_id: agentd_core::types::RunId::from_string(
+                "r_01ARZ3NDEKTSV4RRFFQ69G5FB0",
+            ),
+            snapshot_content_sha256: "b".repeat(64),
+            target_repository_id: "repository-a".to_string(),
+            target_base_commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
+        },
     }
 }
 
@@ -114,15 +124,15 @@ fn profile() -> ExecutionSandboxProfile {
         runtime: OciSandboxRuntime::Docker,
         image_digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
             .to_string(),
-        read_only_root: true,
-        ephemeral_workspace: true,
+        root_filesystem: SandboxRootFilesystem::ReadOnly,
+        workspace: SandboxWorkspace::Ephemeral,
         mounts: vec![SandboxMount {
             source_id: "input-bundle".to_string(),
             target: "/workspace/input".to_string(),
             access: SandboxMountAccess::ReadOnly,
         }],
-        drop_all_capabilities: true,
-        no_new_privileges: true,
+        linux_capabilities: SandboxLinuxCapabilities::DropAll,
+        privilege_escalation: SandboxPrivilegeEscalation::Denied,
         seccomp_profile: "runtime-default".to_string(),
         limits: SandboxLimits {
             pids: 64,
@@ -130,7 +140,7 @@ fn profile() -> ExecutionSandboxProfile {
             cpu_millis: 1_000,
         },
         tenant_cache_namespace: "specify:security-test/org-a/project-a".to_string(),
-        shared_cache: false,
+        cache_sharing: SandboxCacheSharing::TenantOnly,
         egress: EgressPolicy::DenyAll,
     }
 }

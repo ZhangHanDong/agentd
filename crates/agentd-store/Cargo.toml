@@ -25,6 +25,9 @@ async-trait = "0.1"
 directories = "5"
 ulid = "1"
 sha2 = "0.10"
+getrandom = { workspace = true }
+hex = { workspace = true }
+subtle = { workspace = true }
 
 [dev-dependencies]
 # Self dev-dependency enabling agentd-core's test-support so store tests can

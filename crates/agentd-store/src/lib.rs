@@ -35,6 +35,7 @@ pub mod relay_repo;
 pub mod review_repo;
 pub mod run_repo;
 pub mod runtime_session_repo;
+pub mod security_repo;
 pub mod store;
 mod store_impl;
 pub mod task_lease_control_plane;

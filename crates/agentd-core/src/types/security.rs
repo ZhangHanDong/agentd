@@ -9,7 +9,7 @@ use zeroize::Zeroizing;
 
 use super::{
     AuthorityKey, OrganizationRef, ProjectExecutionSnapshotRef, ProjectRef, RbacPolicyVersionRef,
-    RepositoryRef, TaskLeaseClaim, WorkerId, WorkerIncarnationId,
+    RepositoryRef, RunId, TaskLeaseClaim, WorkerId, WorkerIncarnationId,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -105,6 +105,15 @@ pub struct ExecutionSecurityScope {
     pub egress_profile_id: String,
     pub policy_revocation_epoch: u64,
     pub valid_until: i64,
+    pub audit_context: SecurityAuditContext,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecurityAuditContext {
+    pub execution_run_id: RunId,
+    pub snapshot_content_sha256: String,
+    pub target_repository_id: String,
+    pub target_base_commit: String,
 }
 
 impl ExecutionSecurityScope {
@@ -321,6 +330,36 @@ pub struct SandboxLimits {
     pub cpu_millis: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxRootFilesystem {
+    ReadOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxWorkspace {
+    Ephemeral,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxLinuxCapabilities {
+    DropAll,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxPrivilegeEscalation {
+    Denied,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxCacheSharing {
+    TenantOnly,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", content = "allowlist", rename_all = "snake_case")]
 pub enum EgressPolicy {
@@ -333,15 +372,15 @@ pub struct ExecutionSandboxProfile {
     pub profile_id: String,
     pub runtime: OciSandboxRuntime,
     pub image_digest: String,
-    pub read_only_root: bool,
-    pub ephemeral_workspace: bool,
+    pub root_filesystem: SandboxRootFilesystem,
+    pub workspace: SandboxWorkspace,
     pub mounts: Vec<SandboxMount>,
-    pub drop_all_capabilities: bool,
-    pub no_new_privileges: bool,
+    pub linux_capabilities: SandboxLinuxCapabilities,
+    pub privilege_escalation: SandboxPrivilegeEscalation,
     pub seccomp_profile: String,
     pub limits: SandboxLimits,
     pub tenant_cache_namespace: String,
-    pub shared_cache: bool,
+    pub cache_sharing: SandboxCacheSharing,
     pub egress: EgressPolicy,
 }
 

@@ -41,10 +41,10 @@
 - Modify: `crates/agentd-store/src/lib.rs`
 - Create: `crates/agentd-store/tests/execution_security.rs`
 
-- [ ] Write migration, exact-scope issuance, digest-only persistence, stale lease, expiry, revocation, mismatch, and denial-audit tests; verify RED.
-- [ ] Add workload identity bindings, revocation epoch, capability digest metadata, exact indexes, and constraints without sensitive columns.
-- [ ] Implement capability issue/validation with OS randomness, SHA-256 digests, constant-time comparison, current P267 incarnation, P270 lease validation, revocation epoch, and fail-closed P268 denial audit.
-- [ ] Run security-store selectors plus P267/P268/P270/P271 regressions GREEN.
+- [x] Write migration, exact-scope issuance, digest-only persistence, stale lease, expiry, revocation, mismatch, and denial-audit tests; verify RED.
+- [x] Add workload identity bindings, revocation epoch, capability digest metadata, exact indexes, and constraints without sensitive columns.
+- [x] Implement capability issue/validation with OS randomness, SHA-256 digests, constant-time comparison, current P267 incarnation, P270 lease validation, revocation epoch, and fail-closed P268 denial audit.
+- [x] Run security-store selectors plus P267/P268/P270/P271 regressions GREEN.
 
 ### Task 3: Verified Workload Identity and Scoped Secrets
 

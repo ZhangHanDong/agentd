@@ -82,6 +82,7 @@ approved for integration.
 - crates/agentd-store/src/security_repo.rs
 - crates/agentd-store/src/lib.rs
 - crates/agentd-store/tests/execution_security.rs
+- crates/agentd-store/tests/migration.rs
 - crates/agentd-bin/Cargo.toml
 - crates/agentd-bin/src/**
 - crates/agentd-bin/tests/**
