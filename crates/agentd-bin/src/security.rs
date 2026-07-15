@@ -5,17 +5,17 @@ use std::fmt;
 use std::sync::Arc;
 
 use agentd_core::ports::{
-    AttemptCapabilityPort, AuditActorKind, ExecutionAuditAppend, ExecutionAuditPort,
+    AttemptCapabilityPort, AuditActorKind, Clock, ExecutionAuditAppend, ExecutionAuditPort,
     ExecutionEvidenceLinks, ExecutionSandboxPort, ExecutionSnapshotLink, SecretBrokerPort,
     SecurityError, TaskLeasePort, TenantAuthorizationPort, WorkloadIdentityPort,
 };
 use agentd_core::types::{
     AuthenticatedWorkload, CapabilityAdmission, CapabilityToken, CapabilityValidationRequest,
-    ExecutionSandboxProfile, ExecutionSecurityScope, PreparedSandbox, ProtectedAction,
-    ProtectedResource, ProtectedResourceKind, SandboxCleanupRequest, SandboxExecuteRequest,
-    SandboxExecution, SandboxPrepareRequest, SandboxTerminalReason, SecretCheckoutRequest,
-    SecretLease, SecretSelector, SecurityAuditContext, SecurityDenialReason, TaskRunId,
-    TenantAuthorization, TenantAuthorizationRequest, WorkloadIdentityRequest,
+    ExecutionSandboxProfile, ExecutionSecurityScope, ProtectedAction, ProtectedResource,
+    ProtectedResourceKind, SandboxCleanupRequest, SandboxExecuteRequest, SandboxExecution,
+    SandboxPrepareRequest, SandboxTerminalReason, SecretCheckoutRequest, SecretLease,
+    SecretSelector, SecurityAuditContext, SecurityDenialReason, TaskRunId, TenantAuthorization,
+    TenantAuthorizationRequest, WorkloadIdentityRequest,
 };
 use agentd_surface::http::AuthConfig;
 use clap::ValueEnum;
@@ -41,10 +41,11 @@ pub enum SecurityProviderKind {
     SecretBroker,
     ExecutionSandbox,
     ExecutionAudit,
+    TrustedClock,
 }
 
 impl SecurityProviderKind {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::WorkloadIdentity,
         Self::ExecutionScope,
         Self::TenantAuthorization,
@@ -53,6 +54,7 @@ impl SecurityProviderKind {
         Self::SecretBroker,
         Self::ExecutionSandbox,
         Self::ExecutionAudit,
+        Self::TrustedClock,
     ];
 
     #[must_use]
@@ -66,6 +68,7 @@ impl SecurityProviderKind {
             Self::SecretBroker => "secret_broker",
             Self::ExecutionSandbox => "execution_sandbox",
             Self::ExecutionAudit => "execution_audit",
+            Self::TrustedClock => "trusted_clock",
         }
     }
 }
@@ -122,6 +125,7 @@ pub struct EnterpriseSecurityProviders {
     secret_broker: Option<Arc<dyn SecretBrokerPort>>,
     execution_sandbox: Option<Arc<dyn ExecutionSandboxPort>>,
     execution_audit: Option<Arc<dyn ExecutionAuditPort>>,
+    trusted_clock: Option<Arc<dyn Clock>>,
 }
 
 impl fmt::Debug for EnterpriseSecurityProviders {
@@ -151,6 +155,7 @@ impl EnterpriseSecurityProviders {
         secret_broker: Arc<dyn SecretBrokerPort>,
         execution_sandbox: Arc<dyn ExecutionSandboxPort>,
         execution_audit: Arc<dyn ExecutionAuditPort>,
+        trusted_clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
             workload_identity: Some(workload_identity),
@@ -161,6 +166,7 @@ impl EnterpriseSecurityProviders {
             secret_broker: Some(secret_broker),
             execution_sandbox: Some(execution_sandbox),
             execution_audit: Some(execution_audit),
+            trusted_clock: Some(trusted_clock),
         }
     }
 
@@ -175,6 +181,7 @@ impl EnterpriseSecurityProviders {
             SecurityProviderKind::SecretBroker => self.secret_broker = None,
             SecurityProviderKind::ExecutionSandbox => self.execution_sandbox = None,
             SecurityProviderKind::ExecutionAudit => self.execution_audit = None,
+            SecurityProviderKind::TrustedClock => self.trusted_clock = None,
         }
         self
     }
@@ -189,6 +196,7 @@ impl EnterpriseSecurityProviders {
             SecurityProviderKind::SecretBroker => self.secret_broker.is_some(),
             SecurityProviderKind::ExecutionSandbox => self.execution_sandbox.is_some(),
             SecurityProviderKind::ExecutionAudit => self.execution_audit.is_some(),
+            SecurityProviderKind::TrustedClock => self.trusted_clock.is_some(),
         }
     }
 
@@ -208,6 +216,7 @@ impl EnterpriseSecurityProviders {
             secret_broker: take_provider(&mut self.secret_broker),
             execution_sandbox: take_provider(&mut self.execution_sandbox),
             execution_audit: take_provider(&mut self.execution_audit),
+            trusted_clock: take_provider(&mut self.trusted_clock),
         })
     }
 }
@@ -222,6 +231,8 @@ fn take_provider<T: ?Sized>(provider: &mut Option<Arc<T>>) -> Arc<T> {
 pub enum SecurityStartupError {
     #[error("enterprise security startup rejected open_auth compatibility listener")]
     OpenAuth,
+    #[error("enterprise security startup rejected audit_only_auth compatibility listener")]
+    AuditOnlyAuth,
     #[error("enterprise security startup missing closed provider: {0}")]
     MissingProvider(SecurityProviderKind),
 }
@@ -251,6 +262,9 @@ pub fn build_security_runtime(
             if auth_is_open(auth) {
                 return Err(SecurityStartupError::OpenAuth);
             }
+            if auth.agent_token_mode == agentd_surface::http::AgentTokenMode::Audit {
+                return Err(SecurityStartupError::AuditOnlyAuth);
+            }
             let pipeline = providers.unwrap_or_default().require_all()?;
             Ok(SecurityRuntime::Enterprise(pipeline))
         }
@@ -273,12 +287,106 @@ pub struct EnterpriseSecurityPipeline {
     secret_broker: Arc<dyn SecretBrokerPort>,
     execution_sandbox: Arc<dyn ExecutionSandboxPort>,
     execution_audit: Arc<dyn ExecutionAuditPort>,
+    trusted_clock: Arc<dyn Clock>,
 }
 
 struct OperationAdmissions {
     prepare: CapabilityAdmission,
     execute: CapabilityAdmission,
     secret: Option<CapabilityAdmission>,
+}
+
+struct SandboxTerminalGuard {
+    execution_sandbox: Arc<dyn ExecutionSandboxPort>,
+    execution_audit: Arc<dyn ExecutionAuditPort>,
+    trusted_clock: Arc<dyn Clock>,
+    workload: AuthenticatedWorkload,
+    scope: ExecutionSecurityScope,
+    sandbox_id: Option<String>,
+}
+
+impl SandboxTerminalGuard {
+    fn new(
+        execution_sandbox: Arc<dyn ExecutionSandboxPort>,
+        execution_audit: Arc<dyn ExecutionAuditPort>,
+        trusted_clock: Arc<dyn Clock>,
+        workload: AuthenticatedWorkload,
+        scope: ExecutionSecurityScope,
+        sandbox_id: String,
+    ) -> Self {
+        Self {
+            execution_sandbox,
+            execution_audit,
+            trusted_clock,
+            workload,
+            scope,
+            sandbox_id: Some(sandbox_id),
+        }
+    }
+
+    fn sandbox_id(&self) -> &str {
+        self.sandbox_id
+            .as_deref()
+            .expect("terminal guard is armed until explicit cleanup completes")
+    }
+
+    async fn cleanup(
+        &mut self,
+        observed_at: i64,
+        terminal_reason: SandboxTerminalReason,
+    ) -> Result<(), SecurityError> {
+        let request = SandboxCleanupRequest {
+            sandbox_id: self.sandbox_id().to_string(),
+            observed_at,
+            terminal_reason,
+        };
+        let result = self.execution_sandbox.cleanup_sandbox(&request).await;
+        self.sandbox_id = None;
+        result
+    }
+}
+
+impl Drop for SandboxTerminalGuard {
+    fn drop(&mut self) {
+        let Some(sandbox_id) = self.sandbox_id.take() else {
+            return;
+        };
+        let execution_sandbox = Arc::clone(&self.execution_sandbox);
+        let execution_audit = Arc::clone(&self.execution_audit);
+        let workload = self.workload.clone();
+        let scope = self.scope.clone();
+        let observed_at = self.trusted_clock.now_unix().max(0);
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::error!(%sandbox_id, "cancelled sandbox requires recovery cleanup");
+            return;
+        };
+        runtime.spawn(async move {
+            let audit_result = append_security_decision(
+                execution_audit.as_ref(),
+                &workload,
+                &scope,
+                "cancelled",
+                "sandbox",
+                Some("operation_cancelled"),
+                observed_at,
+            )
+            .await;
+            let teardown_result = execution_sandbox
+                .cleanup_sandbox(&SandboxCleanupRequest {
+                    sandbox_id: sandbox_id.clone(),
+                    observed_at,
+                    terminal_reason: SandboxTerminalReason::Cancelled,
+                })
+                .await;
+            if let Err(error) = terminal_result(None, audit_result, teardown_result) {
+                tracing::error!(
+                    %sandbox_id,
+                    reason = security_error_reason(&error),
+                    "cancelled sandbox terminal handling requires recovery"
+                );
+            }
+        });
+    }
 }
 
 impl fmt::Debug for EnterpriseSecurityPipeline {
@@ -292,9 +400,22 @@ impl fmt::Debug for EnterpriseSecurityPipeline {
 impl EnterpriseSecurityPipeline {
     pub async fn execute(
         &self,
-        operation: EnterpriseWorkerOperation,
+        mut operation: EnterpriseWorkerOperation,
     ) -> Result<SandboxExecution, SecurityError> {
-        validate_operation_times(&operation)?;
+        let observed_at = self.trusted_clock.now_unix();
+        operation.observed_at = observed_at.max(0);
+        operation.identity_request.observed_at = operation.observed_at;
+        operation.scope_request.observed_at = operation.observed_at;
+        if observed_at < 0 {
+            return self
+                .deny_unresolved(
+                    &operation.scope_request,
+                    None,
+                    "clock",
+                    SecurityError::Unavailable("trusted clock returned invalid time".to_string()),
+                )
+                .await;
+        }
         let workload = match self
             .workload_identity
             .authenticate_workload(&operation.identity_request)
@@ -368,10 +489,10 @@ impl EnterpriseSecurityPipeline {
             }
         };
         let observed_at = operation.observed_at;
-        let (prepared, execution) = self
+        let (mut terminal_guard, execution) = self
             .run_sandbox(&workload, &scope, operation, admissions)
             .await?;
-        self.finish_success(&workload, &scope, &prepared, observed_at)
+        self.finish_success(&workload, &scope, &mut terminal_guard, observed_at)
             .await?;
         Ok(execution)
     }
@@ -493,7 +614,7 @@ impl EnterpriseSecurityPipeline {
         scope: &ExecutionSecurityScope,
         operation: EnterpriseWorkerOperation,
         admissions: OperationAdmissions,
-    ) -> Result<(PreparedSandbox, SandboxExecution), SecurityError> {
+    ) -> Result<(SandboxTerminalGuard, SandboxExecution), SecurityError> {
         let prepared = match self
             .execution_sandbox
             .prepare_sandbox(&SandboxPrepareRequest {
@@ -509,6 +630,14 @@ impl EnterpriseSecurityPipeline {
                     .await;
             }
         };
+        let mut terminal_guard = SandboxTerminalGuard::new(
+            Arc::clone(&self.execution_sandbox),
+            Arc::clone(&self.execution_audit),
+            Arc::clone(&self.trusted_clock),
+            workload.clone(),
+            scope.clone(),
+            prepared.sandbox_id.clone(),
+        );
         let execution = match self
             .execution_sandbox
             .execute_sandbox(&SandboxExecuteRequest {
@@ -528,41 +657,34 @@ impl EnterpriseSecurityPipeline {
                         scope,
                         "sandbox",
                         error,
-                        &prepared.sandbox_id,
+                        &mut terminal_guard,
                         operation.observed_at,
                     )
                     .await;
             }
         };
-        Ok((prepared, execution))
+        Ok((terminal_guard, execution))
     }
 
     async fn finish_success(
         &self,
         workload: &AuthenticatedWorkload,
         scope: &ExecutionSecurityScope,
-        prepared: &PreparedSandbox,
+        terminal_guard: &mut SandboxTerminalGuard,
         observed_at: i64,
     ) -> Result<(), SecurityError> {
-        if let Err(error) = self
+        let audit_result = self
             .audit_decision(workload, scope, "accepted", "complete", None, observed_at)
-            .await
-        {
-            let _ = self
-                .cleanup(
-                    &prepared.sandbox_id,
-                    observed_at,
-                    SandboxTerminalReason::Failure,
-                )
-                .await;
-            return Err(error);
-        }
-        self.cleanup(
-            &prepared.sandbox_id,
-            observed_at,
-            SandboxTerminalReason::Success,
-        )
-        .await
+            .await;
+        let terminal_reason = if audit_result.is_ok() {
+            SandboxTerminalReason::Success
+        } else {
+            SandboxTerminalReason::Failure
+        };
+        let teardown_result = self
+            .cleanup(terminal_guard, observed_at, terminal_reason)
+            .await;
+        terminal_result(None, audit_result, teardown_result)
     }
 
     async fn run_stage<T>(
@@ -620,15 +742,9 @@ impl EnterpriseSecurityPipeline {
         error: SecurityError,
         observed_at: i64,
     ) -> Result<T, SecurityError> {
-        self.audit_decision(
-            workload,
-            scope,
-            "denied",
-            stage,
-            error.denial_reason(),
-            observed_at,
-        )
-        .await?;
+        let reason = security_error_reason(&error);
+        self.audit_decision(workload, scope, "denied", stage, Some(reason), observed_at)
+            .await?;
         Err(error)
     }
 
@@ -639,10 +755,11 @@ impl EnterpriseSecurityPipeline {
         stage: &'static str,
         error: SecurityError,
     ) -> Result<T, SecurityError> {
+        let reason = security_error_reason(&error);
         let payload = json!({
             "decision": "denied",
             "stage": stage,
-            "reason": error.denial_reason().map(SecurityDenialReason::as_str),
+            "reason": reason,
             "execution_task_id": request.execution_task_id,
         });
         let audit_id = agentd_core::types::AuditEventId::new();
@@ -679,39 +796,27 @@ impl EnterpriseSecurityPipeline {
         scope: &ExecutionSecurityScope,
         stage: &'static str,
         error: SecurityError,
-        sandbox_id: &str,
+        terminal_guard: &mut SandboxTerminalGuard,
         observed_at: i64,
     ) -> Result<T, SecurityError> {
+        let reason = security_error_reason(&error);
         let audit_result = self
-            .audit_decision(
-                workload,
-                scope,
-                "denied",
-                stage,
-                error.denial_reason(),
-                observed_at,
-            )
+            .audit_decision(workload, scope, "denied", stage, Some(reason), observed_at)
             .await;
-        let _ = self
-            .cleanup(sandbox_id, observed_at, SandboxTerminalReason::Failure)
+        let teardown_result = self
+            .cleanup(terminal_guard, observed_at, SandboxTerminalReason::Failure)
             .await;
-        audit_result?;
-        Err(error)
+        terminal_result(Some(error), audit_result, teardown_result)?;
+        unreachable!("a denied operation always carries a primary error")
     }
 
     async fn cleanup(
         &self,
-        sandbox_id: &str,
+        terminal_guard: &mut SandboxTerminalGuard,
         observed_at: i64,
         terminal_reason: SandboxTerminalReason,
     ) -> Result<(), SecurityError> {
-        self.execution_sandbox
-            .cleanup_sandbox(&SandboxCleanupRequest {
-                sandbox_id: sandbox_id.to_string(),
-                observed_at,
-                terminal_reason,
-            })
-            .await
+        terminal_guard.cleanup(observed_at, terminal_reason).await
     }
 
     async fn audit_decision(
@@ -720,42 +825,64 @@ impl EnterpriseSecurityPipeline {
         scope: &ExecutionSecurityScope,
         decision: &str,
         stage: &str,
-        reason: Option<SecurityDenialReason>,
+        reason: Option<&str>,
         observed_at: i64,
     ) -> Result<(), SecurityError> {
-        let payload = json!({
-            "decision": decision,
-            "stage": stage,
-            "reason": reason.map(SecurityDenialReason::as_str),
-            "execution_task_id": scope.task_lease_claim.execution_task_id,
-            "worker_incarnation_id": scope.worker_incarnation_id,
-            "fencing_token": scope.task_lease_claim.fencing_token,
-        });
-        let audit_id = agentd_core::types::AuditEventId::new();
-        let request = ExecutionAuditAppend {
-            id: audit_id.clone(),
-            idempotency_scope: format!(
-                "enterprise-security:{}",
-                scope.task_lease_claim.execution_task_id
-            ),
-            idempotency_key: audit_id.to_string(),
-            event_type: format!("execution.security_{decision}"),
-            actor_kind: AuditActorKind::Worker,
-            actor_ref: workload.spiffe_uri.clone(),
-            payload_sha256: sha256_json(&payload)?,
-            payload,
-            links: audit_links(scope),
-            execution_artifact_id: None,
-            occurred_at: observed_at,
-        };
-        self.execution_audit
-            .append_audit(&request)
-            .await
-            .map(|_| ())
-            .map_err(|error| {
-                SecurityError::Unavailable(format!("required security audit failed: {error}"))
-            })
+        append_security_decision(
+            self.execution_audit.as_ref(),
+            workload,
+            scope,
+            decision,
+            stage,
+            reason,
+            observed_at,
+        )
+        .await
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn append_security_decision(
+    execution_audit: &dyn ExecutionAuditPort,
+    workload: &AuthenticatedWorkload,
+    scope: &ExecutionSecurityScope,
+    decision: &str,
+    stage: &str,
+    reason: Option<&str>,
+    observed_at: i64,
+) -> Result<(), SecurityError> {
+    let payload = json!({
+        "decision": decision,
+        "stage": stage,
+        "reason": reason,
+        "execution_task_id": scope.task_lease_claim.execution_task_id,
+        "worker_incarnation_id": scope.worker_incarnation_id,
+        "fencing_token": scope.task_lease_claim.fencing_token,
+    });
+    let audit_id = agentd_core::types::AuditEventId::new();
+    let request = ExecutionAuditAppend {
+        id: audit_id.clone(),
+        idempotency_scope: format!(
+            "enterprise-security:{}",
+            scope.task_lease_claim.execution_task_id
+        ),
+        idempotency_key: audit_id.to_string(),
+        event_type: format!("execution.security_{decision}"),
+        actor_kind: AuditActorKind::Worker,
+        actor_ref: workload.spiffe_uri.clone(),
+        payload_sha256: sha256_json(&payload)?,
+        payload,
+        links: audit_links(scope),
+        execution_artifact_id: None,
+        occurred_at: observed_at,
+    };
+    execution_audit
+        .append_audit(&request)
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            SecurityError::Unavailable(format!("required security audit failed: {error}"))
+        })
 }
 
 fn secret_resource(operation: &EnterpriseWorkerOperation) -> Option<ProtectedResource> {
@@ -769,18 +896,6 @@ fn secret_resource(operation: &EnterpriseWorkerOperation) -> Option<ProtectedRes
             .clone(),
         kind: ProtectedResourceKind::Secret(secret.selector.clone()),
     })
-}
-
-fn validate_operation_times(operation: &EnterpriseWorkerOperation) -> Result<(), SecurityError> {
-    if operation.observed_at < 0
-        || operation.identity_request.observed_at != operation.observed_at
-        || operation.scope_request.observed_at != operation.observed_at
-    {
-        return Err(SecurityError::Invalid(
-            "enterprise security operation times must match".to_string(),
-        ));
-    }
-    Ok(())
 }
 
 fn validate_resolved_scope(
@@ -860,6 +975,47 @@ fn lease_security_error(error: &agentd_core::ports::TaskLeaseError) -> SecurityE
         SecurityError::Denied(SecurityDenialReason::LeaseRejected)
     } else {
         SecurityError::Unavailable(format!("task lease validation unavailable: {error}"))
+    }
+}
+
+fn security_error_reason(error: &SecurityError) -> &'static str {
+    match error {
+        SecurityError::Denied(reason) => reason.as_str(),
+        SecurityError::Invalid(_) => "invalid_security_request",
+        SecurityError::Unavailable(_) => "security_provider_unavailable",
+    }
+}
+
+fn terminal_result(
+    primary: Option<SecurityError>,
+    audit_result: Result<(), SecurityError>,
+    teardown_result: Result<(), SecurityError>,
+) -> Result<(), SecurityError> {
+    let audit_error = audit_result.err();
+    let teardown_error = teardown_result.err();
+    let failure_count = usize::from(primary.is_some())
+        + usize::from(audit_error.is_some())
+        + usize::from(teardown_error.is_some());
+    if failure_count > 1 {
+        let mut reasons = Vec::with_capacity(failure_count);
+        if let Some(error) = primary.as_ref() {
+            reasons.push(format!("primary={}", security_error_reason(error)));
+        }
+        if let Some(error) = audit_error.as_ref() {
+            reasons.push(format!("audit={}", security_error_reason(error)));
+        }
+        if let Some(error) = teardown_error.as_ref() {
+            reasons.push(format!("teardown={}", security_error_reason(error)));
+        }
+        return Err(SecurityError::Unavailable(format!(
+            "compound terminal security failure: {}",
+            reasons.join("; ")
+        )));
+    }
+    if let Some(error) = teardown_error.or(audit_error).or(primary) {
+        Err(error)
+    } else {
+        Ok(())
     }
 }
 

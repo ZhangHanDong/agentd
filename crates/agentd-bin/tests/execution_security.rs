@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use agentd_bin::security::{
     EnterpriseSecretRequest, EnterpriseSecurityProviders, EnterpriseWorkerOperation,
@@ -9,11 +10,13 @@ use agentd_bin::security::{
 };
 use agentd_bin::{AgentdCli, DaemonConfig, daemon};
 use agentd_core::ports::{
-    AttemptCapabilityPort, AuditPage, AuditReadRequest, ExecutionAuditAppend, ExecutionAuditPort,
-    ExecutionAuditRecord, ExecutionEvidenceError, ExecutionSandboxPort, SecretBrokerPort,
-    SecurityError, TaskLeaseCloseRequest, TaskLeaseDispatchRequest, TaskLeaseError, TaskLeasePort,
-    TaskLeaseRenewRequest, TenantAuthorizationPort, WorkloadIdentityPort,
+    AttemptCapabilityPort, AuditPage, AuditReadRequest, Clock, ExecutionAuditAppend,
+    ExecutionAuditPort, ExecutionAuditRecord, ExecutionEvidenceError, ExecutionSandboxPort,
+    SecretBrokerPort, SecurityError, TaskLeaseCloseRequest, TaskLeaseDispatchRequest,
+    TaskLeaseError, TaskLeasePort, TaskLeaseRenewRequest, TenantAuthorizationPort,
+    WorkloadIdentityPort,
 };
+use agentd_core::test_support::FixedClock;
 use agentd_core::types::{
     AttemptCapabilityId, AuthenticatedWorkload, AuthorityKey, CapabilityAdmission,
     CapabilityIssueRequest, CapabilityToken, CapabilityValidationRequest, EgressPolicy,
@@ -29,6 +32,8 @@ use agentd_core::types::{
 };
 use agentd_surface::http::{AgentTokenMode, AuthConfig};
 use clap::Parser;
+use serde_json::Value;
+use tokio::sync::Notify;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FailureStage {
@@ -46,16 +51,75 @@ enum FailureStage {
 
 #[derive(Debug)]
 struct RecordingPorts {
-    failure: Option<FailureStage>,
+    failures: Vec<FailureStage>,
+    unavailable: Option<FailureStage>,
     calls: Mutex<Vec<&'static str>>,
+    audit_payloads: Mutex<Vec<Value>>,
+    observed_at: i64,
+    block_sandbox_execute: bool,
+    sandbox_execute_started: Notify,
+    teardown_completed: Notify,
 }
 
 impl RecordingPorts {
     fn new(failure: Option<FailureStage>) -> Self {
+        Self::at(failure, 150)
+    }
+
+    fn at(failure: Option<FailureStage>, observed_at: i64) -> Self {
         Self {
-            failure,
+            failures: failure.into_iter().collect(),
+            unavailable: None,
             calls: Mutex::new(Vec::new()),
+            audit_payloads: Mutex::new(Vec::new()),
+            observed_at,
+            block_sandbox_execute: false,
+            sandbox_execute_started: Notify::new(),
+            teardown_completed: Notify::new(),
         }
+    }
+
+    fn unavailable(stage: FailureStage) -> Self {
+        Self {
+            failures: vec![stage],
+            unavailable: Some(stage),
+            calls: Mutex::new(Vec::new()),
+            audit_payloads: Mutex::new(Vec::new()),
+            observed_at: 150,
+            block_sandbox_execute: false,
+            sandbox_execute_started: Notify::new(),
+            teardown_completed: Notify::new(),
+        }
+    }
+
+    fn with_failures(failures: Vec<FailureStage>) -> Self {
+        Self {
+            failures,
+            unavailable: None,
+            calls: Mutex::new(Vec::new()),
+            audit_payloads: Mutex::new(Vec::new()),
+            observed_at: 150,
+            block_sandbox_execute: false,
+            sandbox_execute_started: Notify::new(),
+            teardown_completed: Notify::new(),
+        }
+    }
+
+    fn blocking_sandbox_execute() -> Self {
+        Self {
+            failures: Vec::new(),
+            unavailable: None,
+            calls: Mutex::new(Vec::new()),
+            audit_payloads: Mutex::new(Vec::new()),
+            observed_at: 150,
+            block_sandbox_execute: true,
+            sandbox_execute_started: Notify::new(),
+            teardown_completed: Notify::new(),
+        }
+    }
+
+    fn fails(&self, stage: FailureStage) -> bool {
+        self.failures.contains(&stage)
     }
 
     fn record(&self, stage: &'static str) {
@@ -69,9 +133,19 @@ impl RecordingPorts {
         self.calls.lock().expect("calls lock").clone()
     }
 
+    fn audit_payloads(&self) -> Vec<Value> {
+        self.audit_payloads.lock().expect("audit payloads").clone()
+    }
+
     fn fail_security(&self, stage: FailureStage) -> Result<(), SecurityError> {
-        if self.failure == Some(stage) {
-            Err(SecurityError::Denied(SecurityDenialReason::ActionDenied))
+        if self.fails(stage) {
+            if self.unavailable == Some(stage) {
+                Err(SecurityError::Unavailable(format!(
+                    "scripted {stage:?} provider outage"
+                )))
+            } else {
+                Err(SecurityError::Denied(SecurityDenialReason::ActionDenied))
+            }
         } else {
             Ok(())
         }
@@ -102,7 +176,7 @@ impl ExecutionSecurityScopePort for RecordingPorts {
         assert_eq!(authenticated, &workload());
         assert_eq!(request.execution_task_id, claim().execution_task_id);
         assert_eq!(request.resource, execution_resource());
-        assert_eq!(request.observed_at, 150);
+        assert_eq!(request.observed_at, self.observed_at);
         Ok(scope())
     }
 }
@@ -170,14 +244,14 @@ impl TaskLeasePort for RecordingPorts {
         observed_at: i64,
     ) -> Result<TaskLeaseGrant, TaskLeaseError> {
         self.record("lease");
-        if self.failure == Some(FailureStage::Lease) {
+        if self.fails(FailureStage::Lease) {
             return Err(TaskLeaseError::Rejected {
                 reason: agentd_core::ports::TaskLeaseRejectionReason::StaleFencingToken,
                 message: "scripted lease failure".to_string(),
             });
         }
         assert_eq!(requested, &claim());
-        assert_eq!(observed_at, 150);
+        assert_eq!(observed_at, self.observed_at);
         Ok(lease_grant())
     }
 
@@ -263,6 +337,10 @@ impl ExecutionSandboxPort for RecordingPorts {
         &self,
         _request: &SandboxExecuteRequest,
     ) -> Result<SandboxExecution, SecurityError> {
+        if self.block_sandbox_execute {
+            self.sandbox_execute_started.notify_waiters();
+            std::future::pending::<()>().await;
+        }
         self.fail_security(FailureStage::SandboxExecute)?;
         Ok(SandboxExecution {
             exit_code: 0,
@@ -274,7 +352,10 @@ impl ExecutionSandboxPort for RecordingPorts {
     async fn cleanup_sandbox(&self, request: &SandboxCleanupRequest) -> Result<(), SecurityError> {
         self.record("teardown");
         assert_eq!(request.sandbox_id, "sb_enterprise");
-        if self.failure == Some(FailureStage::Teardown) {
+        if request.terminal_reason == agentd_core::types::SandboxTerminalReason::Cancelled {
+            self.teardown_completed.notify_waiters();
+        }
+        if self.fails(FailureStage::Teardown) {
             Err(SecurityError::Denied(
                 SecurityDenialReason::SandboxCleanupFailed,
             ))
@@ -291,9 +372,17 @@ impl ExecutionAuditPort for RecordingPorts {
         request: &ExecutionAuditAppend,
     ) -> Result<ExecutionAuditRecord, ExecutionEvidenceError> {
         self.record("audit");
-        assert!(!request.payload.to_string().contains("transient-secret"));
-        assert!(!request.payload.to_string().contains("capability-token"));
-        if self.failure == Some(FailureStage::Audit) {
+        let payload = request.payload.to_string();
+        assert!(!payload.contains("transient-secret"));
+        for byte in [b'A', b'B', b'C'] {
+            assert!(!payload.contains(&String::from_utf8(vec![byte; 32]).expect("ASCII token")));
+            assert!(!payload.contains(&hex::encode([byte; 32])));
+        }
+        self.audit_payloads
+            .lock()
+            .expect("audit payloads")
+            .push(request.payload.clone());
+        if self.fails(FailureStage::Audit) {
             return Err(ExecutionEvidenceError::Unavailable(
                 "scripted audit failure".to_string(),
             ));
@@ -317,6 +406,10 @@ impl ExecutionAuditPort for RecordingPorts {
 }
 
 fn providers(ports: &Arc<RecordingPorts>) -> EnterpriseSecurityProviders {
+    providers_at(ports, 150)
+}
+
+fn providers_at(ports: &Arc<RecordingPorts>, observed_at: i64) -> EnterpriseSecurityProviders {
     EnterpriseSecurityProviders::new(
         Arc::clone(ports) as Arc<dyn WorkloadIdentityPort>,
         Arc::clone(ports) as Arc<dyn ExecutionSecurityScopePort>,
@@ -326,6 +419,7 @@ fn providers(ports: &Arc<RecordingPorts>) -> EnterpriseSecurityProviders {
         Arc::clone(ports) as Arc<dyn SecretBrokerPort>,
         Arc::clone(ports) as Arc<dyn ExecutionSandboxPort>,
         Arc::clone(ports) as Arc<dyn ExecutionAuditPort>,
+        Arc::new(FixedClock::new(observed_at)) as Arc<dyn Clock>,
     )
 }
 
@@ -457,11 +551,11 @@ fn operation() -> EnterpriseWorkerOperation {
             audit_context: scope().audit_context,
             observed_at: 150,
         },
-        sandbox_prepare_token: CapabilityToken::new([1; 32]),
-        sandbox_execute_token: CapabilityToken::new([2; 32]),
+        sandbox_prepare_token: CapabilityToken::new([b'A'; 32]),
+        sandbox_execute_token: CapabilityToken::new([b'B'; 32]),
         secret: Some(EnterpriseSecretRequest {
             selector: SecretSelector::new("repository/app-token").expect("secret selector"),
-            capability_token: CapabilityToken::new([3; 32]),
+            capability_token: CapabilityToken::new([b'C'; 32]),
         }),
         profile: profile(),
         argv: vec!["cargo".to_string(), "test".to_string()],
@@ -581,6 +675,148 @@ async fn production_security_gate_orders_checks_and_stops_on_failure() {
 }
 
 #[tokio::test]
+async fn production_security_gate_uses_trusted_clock_not_request_time() {
+    let ports = Arc::new(RecordingPorts::at(None, 350));
+    let runtime = build_security_runtime(
+        SecurityRuntimeMode::Enterprise,
+        &configured_auth(),
+        Some(providers_at(&ports, 350)),
+    )
+    .expect("enterprise composition");
+    let SecurityRuntime::Enterprise(pipeline) = runtime else {
+        panic!("enterprise mode must build the enterprise pipeline");
+    };
+
+    let error = Box::pin(pipeline.execute(operation()))
+        .await
+        .expect_err("expired workload cannot replay a caller-selected timestamp");
+    assert_eq!(
+        error,
+        SecurityError::Denied(SecurityDenialReason::LeaseRejected)
+    );
+    assert_eq!(ports.calls(), vec!["identity", "scope", "audit"]);
+}
+
+#[tokio::test]
+async fn production_security_gate_audits_provider_unavailability_with_stable_reason() {
+    let ports = Arc::new(RecordingPorts::unavailable(FailureStage::Authorization));
+    let runtime = build_security_runtime(
+        SecurityRuntimeMode::Enterprise,
+        &configured_auth(),
+        Some(providers(&ports)),
+    )
+    .expect("enterprise composition");
+    let SecurityRuntime::Enterprise(pipeline) = runtime else {
+        panic!("enterprise mode must build the enterprise pipeline");
+    };
+
+    let error = Box::pin(pipeline.execute(operation()))
+        .await
+        .expect_err("unavailable authorization provider must fail closed");
+    assert!(matches!(error, SecurityError::Unavailable(_)));
+    assert_eq!(
+        ports.audit_payloads()[0]["reason"],
+        "security_provider_unavailable"
+    );
+    assert_eq!(
+        ports.calls(),
+        vec!["identity", "scope", "authorization", "audit"]
+    );
+}
+
+#[tokio::test]
+async fn production_security_gate_preserves_audit_and_teardown_failures() {
+    let ports = Arc::new(RecordingPorts::with_failures(vec![
+        FailureStage::SandboxExecute,
+        FailureStage::Audit,
+        FailureStage::Teardown,
+    ]));
+    let runtime = build_security_runtime(
+        SecurityRuntimeMode::Enterprise,
+        &configured_auth(),
+        Some(providers(&ports)),
+    )
+    .expect("enterprise composition");
+    let SecurityRuntime::Enterprise(pipeline) = runtime else {
+        panic!("enterprise mode must build the enterprise pipeline");
+    };
+
+    let error = Box::pin(pipeline.execute(operation()))
+        .await
+        .expect_err("compound terminal failures must fail closed");
+    let message = error.to_string();
+    assert!(
+        message.contains("audit"),
+        "missing audit failure: {message}"
+    );
+    assert!(
+        message.contains("teardown"),
+        "missing teardown failure: {message}"
+    );
+    assert_eq!(
+        ports.calls(),
+        vec![
+            "identity",
+            "scope",
+            "authorization",
+            "lease",
+            "capability",
+            "secret",
+            "sandbox",
+            "audit",
+            "teardown",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn production_security_gate_cleans_up_when_operation_is_cancelled() {
+    let ports = Arc::new(RecordingPorts::blocking_sandbox_execute());
+    let execute_started = ports.sandbox_execute_started.notified();
+    let teardown_completed = ports.teardown_completed.notified();
+    let runtime = build_security_runtime(
+        SecurityRuntimeMode::Enterprise,
+        &configured_auth(),
+        Some(providers(&ports)),
+    )
+    .expect("enterprise composition");
+    let SecurityRuntime::Enterprise(pipeline) = runtime else {
+        panic!("enterprise mode must build the enterprise pipeline");
+    };
+
+    let operation_task = tokio::spawn(async move { Box::pin(pipeline.execute(operation())).await });
+    tokio::time::timeout(Duration::from_secs(1), execute_started)
+        .await
+        .expect("sandbox execution must start");
+    operation_task.abort();
+    assert!(
+        operation_task
+            .await
+            .expect_err("operation is cancelled")
+            .is_cancelled(),
+        "operation task must report cancellation"
+    );
+    tokio::time::timeout(Duration::from_secs(1), teardown_completed)
+        .await
+        .expect("cancelled operation must trigger sandbox teardown");
+    assert_eq!(
+        ports.calls(),
+        vec![
+            "identity",
+            "scope",
+            "authorization",
+            "lease",
+            "capability",
+            "secret",
+            "sandbox",
+            "audit",
+            "teardown",
+        ]
+    );
+    assert_eq!(ports.audit_payloads()[0]["reason"], "operation_cancelled");
+}
+
+#[tokio::test]
 async fn enterprise_security_mode_rejects_missing_providers_and_open_auth() {
     let cli = AgentdCli::try_parse_from(["agentd", "--security-mode", "enterprise"])
         .expect("enterprise mode parses");
@@ -595,6 +831,21 @@ async fn enterprise_security_mode_rejects_missing_providers_and_open_auth() {
     .expect_err("enterprise mode rejects open auth before composition");
     assert!(open_error.to_string().contains("open_auth"));
     assert!(open_ports.calls().is_empty());
+
+    let audit_only_auth = AuthConfig {
+        api_token: Some("operator-token".to_string()),
+        agent_token_mode: AgentTokenMode::Audit,
+        agent_tokens: BTreeMap::from([("worker-a".to_string(), "worker-token".to_string())]),
+    };
+    let audit_only_ports = Arc::new(RecordingPorts::new(None));
+    let audit_only_error = build_security_runtime(
+        SecurityRuntimeMode::Enterprise,
+        &audit_only_auth,
+        Some(providers(&audit_only_ports)),
+    )
+    .expect_err("enterprise mode rejects audit-only agent token enforcement");
+    assert!(audit_only_error.to_string().contains("audit_only_auth"));
+    assert!(audit_only_ports.calls().is_empty());
 
     for kind in SecurityProviderKind::ALL {
         let ports = Arc::new(RecordingPorts::new(None));

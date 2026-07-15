@@ -14,6 +14,7 @@
 - Preserve Specify-owned organization, project, snapshot, RBAC, quota, and certification identities. Add no agentd-owned tenant or project source of truth.
 - Persist no raw capability, secret, private key, certificate private material, or sandbox-local path.
 - Keep standalone/FSF-0 routes and behavior unchanged; enterprise composition must reject open authentication and missing providers before binding a listener.
+- In this baseline, provider selection is explicit trait-object injection into the protected-operation composition API. CLI product configuration and an AD-E2 worker transport remain out of scope; `serve --security-mode enterprise` must fail before bind until that transport exists.
 - Do not start Claude, tmux, Matrix, Specify, OpenFab, or remote services in tests. Real OCI execution is opt-in only.
 - Follow RED -> GREEN -> targeted regression for each behavior slice.
 
@@ -86,7 +87,7 @@
 - Create: `crates/agentd-bin/tests/execution_security.rs`
 
 - [ ] Write one recording-pipeline test that injects each stage failure and proves no later protected side effect runs except required denial audit and teardown; verify RED.
-- [ ] Add explicit standalone/enterprise mode and provider selection. Enterprise startup rejects open auth or every missing identity/authorization/lease/capability/secret/sandbox/audit provider before listener creation.
+- [ ] Add explicit standalone/enterprise mode and injected provider selection. Enterprise startup rejects open auth, audit-only auth, or every missing identity/authorization/lease/capability/secret/sandbox/audit/clock provider before listener creation.
 - [ ] Assemble identity -> scope -> authorization -> lease/incarnation -> capability -> optional secret -> sandbox -> audit -> teardown order.
 - [ ] Run enterprise selectors and all existing standalone CLI/daemon tests GREEN.
 
