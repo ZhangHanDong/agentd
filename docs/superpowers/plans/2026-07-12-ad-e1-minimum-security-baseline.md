@@ -86,10 +86,10 @@
 - Modify: `crates/agentd-bin/src/daemon.rs`
 - Create: `crates/agentd-bin/tests/execution_security.rs`
 
-- [ ] Write one recording-pipeline test that injects each stage failure and proves no later protected side effect runs except required denial audit and teardown; verify RED.
-- [ ] Add explicit standalone/enterprise mode and injected provider selection. Enterprise startup rejects open auth, audit-only auth, or every missing identity/authorization/lease/capability/secret/sandbox/audit/clock provider before listener creation.
-- [ ] Assemble identity -> scope -> authorization -> lease/incarnation -> capability -> optional secret -> sandbox -> audit -> teardown order.
-- [ ] Run enterprise selectors and all existing standalone CLI/daemon tests GREEN.
+- [x] Write one recording-pipeline test that injects each stage failure and proves no later protected side effect runs except required denial audit and teardown; verify RED.
+- [x] Add explicit standalone/enterprise mode and injected provider selection. Enterprise startup rejects open auth, audit-only auth, or every missing identity/authorization/lease/capability/secret/sandbox/audit/clock provider before listener creation.
+- [x] Assemble identity -> scope -> authorization -> lease/incarnation -> capability -> optional secret -> sandbox -> audit -> teardown order.
+- [x] Run enterprise selectors and all existing standalone CLI/daemon tests GREEN.
 
 ### Task 6: Repository Evidence and Candidate Verification
 
@@ -100,8 +100,8 @@
 - Modify: `specs/e2e/ad-e1-minimum-security-baseline.spec.md`
 - Modify: `docs/superpowers/specs/2026-07-12-ad-e1-minimum-security-baseline-design.md`
 
-- [ ] Add the repository artifact selector first and verify RED before roadmap/parity updates.
-- [ ] Record candidate implementation evidence while keeping AD-E0, AD-E1, FSF-0, FSF-2, P272-P275, worker fleet, native runtime, Matrix cutover, and OpenFab transport incomplete.
-- [ ] Run format, focused selectors, `cargo test --workspace`, workspace Clippy, `git diff --check`, and secret-pattern inspection.
-- [ ] Run agent-spec lifecycle with `--ai-mode off`, explicit worktree change scope, and run log; require all 13 scenarios passing before candidate review.
-- [ ] Commit reviewable slices on the isolated candidate branch. Do not merge, promote, or mark factory gates complete.
+- [x] Add the repository artifact selector first and verify RED before roadmap/parity updates.
+- [x] Record candidate implementation evidence while keeping AD-E0, AD-E1, FSF-0, FSF-2, P272-P275, worker fleet, native runtime, Matrix cutover, and OpenFab transport incomplete.
+- [x] Run format, focused selectors, `cargo test --workspace`, workspace Clippy, `git diff --check`, and secret-pattern inspection.
+- [x] Run agent-spec lifecycle with `--ai-mode off`, explicit worktree change scope, and run log; require all 13 scenarios passing before candidate review.
+- [x] Commit reviewable slices on the isolated candidate branch. Do not merge, promote, or mark factory gates complete.

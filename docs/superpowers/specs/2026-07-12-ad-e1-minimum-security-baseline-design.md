@@ -112,6 +112,9 @@ The first action set is:
 Capabilities are control-plane mediated. Protected adapters validate
 immediately before each external side effect and propagate the lease/fencing
 identity as idempotency/admission metadata where the external protocol allows.
+Production composition revalidates the current lease and action capability
+immediately before each external side effect using a fresh trusted-clock
+observation.
 
 ### 4.4 Secret Broker
 
@@ -165,6 +168,15 @@ No later stage runs when an earlier stage fails. Existing open/local
 compatibility routes remain available only in explicit standalone/FSF-0 mode.
 Enterprise mode must not expose a second unsecured listener or silently select
 `AuthConfig::open()`.
+
+For this baseline, "production composition" means the public protected-operation
+composition API built from explicitly injected closed providers. It does not
+mean a deployable enterprise daemon transport. The current CLI has no AD-E2
+worker acquisition or authenticated operation transport, so `agentd serve
+--security-mode enterprise` must continue to fail before binding rather than
+fall through to the standalone tmux/HTTP host. Product-specific Specify,
+SPIRE/Vault/KMS, and transport configuration remains a later gate; adding a
+placeholder compatibility listener here would violate the fail-closed boundary.
 
 ## 6. Persistence
 
@@ -221,6 +233,35 @@ The 2026-07-15 authorization permits implementation and verification only on an
 isolated candidate branch. It does not relax any factory gate, acceptance
 record, immutable-candidate, or human-sign-off requirement.
 
+### Candidate Verification Evidence
+
+Current isolated branch: `agentd/ad-e1-security-baseline`.
+
+- `07120fc`: closed core security types and independent ports;
+- `620618c`: digest-only fenced attempt-capability persistence;
+- `57415c8`: verified workload identity and scoped secret checkout;
+- `49e8597`: OCI sandbox profile, cleanup/recovery, and guarded real-smoke entry;
+- `c5130d5`: ordered enterprise composition and listener-before-startup refusal;
+- `0be8baf`: trusted-clock enforcement, audit-only auth refusal, cancellation
+  audit/cleanup guard, compound terminal failure preservation, stable provider
+  unavailable audit reasons, and concrete capability-token redaction checks.
+- `368d8f3`: fresh trusted-clock, current-lease, and action-capability
+  revalidation immediately before secret checkout, sandbox preparation, and
+  sandbox execution.
+
+Focused selectors for Tasks 1-5 and the repository artifact contract passed.
+`cargo fmt --all -- --check`, `cargo test --workspace`,
+`cargo clippy --workspace --all-targets -- -D warnings`, `git diff --check`, and
+the high-confidence secret-pattern inspection passed on the candidate. The
+agent-spec lifecycle ran with `--ai-mode off` and explicit worktree change scope:
+13 business scenarios plus the boundary guard passed (`14/14`) with quality
+score `1.0`, no failure, pending review, or skip. The guarded OCI selector used
+its default no-container path; real-container execution remains an explicit
+local evidence exception until an immutable test image is selected. No test in
+this candidate invokes Claude. The accountable integration owner and human
+sign-off remain part of the later versioned acceptance record, not this
+candidate note.
+
 ## 10. Deferred AD-E1 Work
 
 - Human OIDC and enterprise-principal lifecycle.
@@ -230,3 +271,5 @@ record, immutable-candidate, or human-sign-off requirement.
 - Transcript/log content redaction beyond secret-value exclusion.
 - Cross-tenant enforcement over every legacy FSF-0 compatibility route; those
   routes remain disabled in enterprise mode until separately migrated.
+- AD-E2 worker acquisition/transport wiring that invokes the protected-operation
+  composition API from a deployable enterprise daemon listener.

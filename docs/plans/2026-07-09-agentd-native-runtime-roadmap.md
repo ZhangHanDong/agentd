@@ -302,6 +302,42 @@ integration branch, released, or enterprise-ready.
 - P270 durable leases/fencing: `d9d05dd`.
 - P271 execution-evidence APIs: `9ec92bb`.
 
+As of 2026-07-15, an AD-E1 minimum baseline candidate also exists on isolated
+branch `agentd/ad-e1-security-baseline`. It is not an AD-E1 or FSF-2 exit and is
+not authorized for integration or production deployment:
+
+- core security boundaries: `07120fc`;
+- fenced capability persistence: `620618c`;
+- workload identity and scoped secret checkout: `57415c8`;
+- OCI sandbox and cleanup baseline: `49e8597`;
+- ordered enterprise composition and listener-before-startup rejection:
+  `c5130d5`;
+- trusted-clock, audit-only-auth, cancellation teardown, compound failure, and
+  stable provider-unavailable remediation: `0be8baf`.
+- trusted-clock lease and action-capability revalidation immediately before
+  every external side effect: `368d8f3`.
+
+The candidate exposes a protected-operation composition API through explicit
+provider injection. It does not add an AD-E2 worker listener or product-specific
+provider configuration; enterprise daemon transport remains incomplete and the
+CLI continues to reject enterprise startup before bind rather than use the
+legacy compatibility host.
+
+The composition revalidates the current lease and action capability immediately
+before each external side effect, using a fresh trusted-clock observation for
+secret checkout, sandbox preparation, and sandbox execution.
+
+Focused crate tests, failure injection, formatting, workspace tests, workspace
+strict Clippy, diff/secret inspection, and the `--ai-mode off` agent-spec
+lifecycle have passed. The lifecycle recorded 13 business scenarios plus the
+worktree boundary guard (`14/14`) at quality score `1.0`. The OCI selector used
+its guarded no-container default; real-container evidence is still pending.
+This prose is candidate evidence, not an acceptance record. AD-E0, AD-E1,
+FSF-0, and FSF-2 remain incomplete. AD-E2 worker fleet remains incomplete;
+AD-E3 Matrix cutover remains incomplete; AD-E4 OpenFab transport remains
+incomplete; AD-E5 native runtime remains incomplete; and AD-E7 scale remains
+incomplete.
+
 | Older replacement-worktree candidate | Newer agentd-worktree candidate | AD-E0 disposition |
 | --- | --- | --- |
 | P224 ownership boundary | P264 ownership boundary | P264 is canonical; P224 is retained only as source evidence |
@@ -392,6 +428,16 @@ Exit gate:
 Depends on: AD-E0.
 
 Purpose: make multi-tenant execution safe before expanding the worker fleet.
+
+Current status on 2026-07-15: minimum baseline candidate; not an AD-E1 or FSF-2
+exit. The candidate covers workload mTLS verification, immutable tenant/project
+scope, lease/fencing-bound opaque capabilities, scoped secret checkout, OCI
+sandbox isolation, redacted security audit, cleanup, and fail-closed enterprise
+composition. The work list and exit gate below remain open, including the
+deferred identity, policy, production-provider, placement, and cross-surface
+requirements. The protected-operation composition API is candidate evidence;
+enterprise daemon transport remains incomplete until the later authenticated
+worker protocol is specified and accepted.
 
 Work:
 
@@ -753,13 +799,13 @@ dashboard screenshot is not completion evidence.
    integrate it until FSF-0 and the OpenFab PRD/ADR decomposition gates pass.
 2. Keep P272-P275 paused and classify them as FSF-0 transitional parity work;
    they are not the next AD-E implementation sequence.
-3. Define the minimum AD-E1 security contract: execution sandbox, workload
-   identity/mTLS, secret broker, tenant isolation, and short-lived capabilities
-   bound to the current lease and fencing token.
-4. Obtain human approval for that AD-E1 scope before implementation. After the
-   AD-E1 gate, re-spec the historical P278 worker-fleet scope under AD-E2, then
-   the P276/P277 native-runtime scope under AD-E5; those old numbers are
-   traceability labels until new agent-spec contracts are created.
+3. Review and verify the isolated AD-E1 minimum baseline candidate without
+   treating it as an AD-E1 or FSF-2 exit or integrating it ahead of AD-E0.
+4. Complete the remaining AD-E1 work and its versioned acceptance record. Only
+   after the AD-E1 gate may the historical P278 worker-fleet scope be re-specified
+   under AD-E2, followed by the P276/P277 native-runtime scope under AD-E5;
+   those old numbers remain traceability labels until new agent-spec contracts
+   are created.
 
 The first new design priority is execution sandbox and service/tenant identity,
 not another compatibility endpoint and not Specify-web UI.

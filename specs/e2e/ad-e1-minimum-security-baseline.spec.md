@@ -118,6 +118,8 @@ approved for integration.
 - Full data-classification/region/signed-image placement policy and autoscaling.
 - Worker enrollment/pull/heartbeat/drain wire protocol and offline recovery.
 - Native process/PTY/session ownership and provider resume.
+- AD-E2 worker acquisition or authenticated enterprise transport wiring from a
+  daemon listener into the protected-operation composition API.
 - Retrofitting enterprise authorization into every legacy compatibility route;
   enterprise mode disables those routes until separately migrated.
 
@@ -267,6 +269,11 @@ Scenario: production security admission order stops before every failed stage
   When the protected worker operation is attempted for every script
   Then calls follow identity scope authorization lease capability secret sandbox audit teardown order
   And no call after the failing stage occurs except required redacted denial audit and teardown
+  And a trusted server clock overrides every caller-provided observation time
+  And the current lease and the action capability are revalidated immediately before each external side effect
+  And provider unavailability records a stable non-null reason without a protected side effect
+  And cancellation after sandbox preparation records cancellation and triggers teardown
+  And concurrent audit and teardown failures are both preserved for recovery
   And no legacy spawn backend or compatibility token path is invoked
 
 Scenario: enterprise startup rejects missing security providers or open listener
@@ -275,7 +282,7 @@ Scenario: enterprise startup rejects missing security providers or open listener
     Filter: enterprise_security_mode_rejects_missing_providers_and_open_auth
   Level: daemon configuration contract
   Test Double: temporary configuration and no listening socket
-  Given enterprise mode with each required provider missing or `AuthConfig::open()` selected
+  Given enterprise mode with each required provider missing `AuthConfig::open()` or audit-only agent tokens selected
   When production composition is built
   Then startup fails with the missing closed provider name
   And no HTTP listener worker operation or sandbox starts
@@ -290,7 +297,8 @@ Scenario: roadmap parity and migration record baseline without claiming AD-E1 ex
   Test Double: repository Markdown SQL and Rust files
   Given all minimum security baseline tests pass
   When canonical roadmap parity design migration and composition are inspected
-  Then they reference sandbox workload identity mTLS secret broker tenant isolation and fencing capabilities
+  Then they record candidate-only evidence and do not claim an AD-E1 or FSF-2 exit
+  And they reference sandbox workload identity mTLS secret broker tenant isolation and fencing capabilities
   And migration `0016_execution_security.sql` contains no secret or private-key columns
   And P272-P275 worker fleet native runtime Matrix OpenFab cutover and scale remain unclaimed
   And AD-E0 AD-E1 FSF-0 and FSF-2 remain incomplete without their acceptance records
