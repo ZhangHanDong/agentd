@@ -108,7 +108,7 @@ Scenario: migrated PR workflows use the open PR helper
 Scenario: ProductionRunHost records the helper between publish and report
   Test:
     Package: agentd-bin
-    Filter: production_runhost_execute_publishes_worktree_branch_before_pr
+    Filter: production_runhost_execute_tools_use_stable_repo_cwd_after_review_fan_in
   Level: e2e contract
   Test Double: FakeBackend + RecordingCommandRunner + real SqliteStore + fake WorktreeAllocator
   Given `crates/agentd-bin/tests/contract.rs` verifies ProductionRunHost executes `execute.dot`

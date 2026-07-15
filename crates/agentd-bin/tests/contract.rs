@@ -1473,6 +1473,16 @@ async fn production_runhost_execute_tools_use_stable_repo_cwd_after_review_fan_i
         Some(repo_root()),
         "open_pr must not inherit a transient reviewer/MCP cwd"
     );
+    let report_idx = calls
+        .iter()
+        .position(|call| {
+            call.program == "cat" && call.args == vec![".agentd/run/report.md".to_string()]
+        })
+        .expect("report_acceptance recorded a report read");
+    assert!(
+        open_pr_idx < report_idx,
+        "open_pr must run before report_acceptance: {calls:?}"
+    );
 }
 
 #[tokio::test]

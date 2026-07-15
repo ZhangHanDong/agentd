@@ -98,7 +98,7 @@ Scenario: open_pr failure stops before report_acceptance
   Then the run fails without recording the report_acceptance command
 
 Scenario: ProductionRunHost publishes before opening PR
-  Test: production_runhost_execute_publishes_worktree_branch_before_pr
+  Test: production_runhost_execute_tools_use_stable_repo_cwd_after_review_fan_in
   Level: e2e contract
   Test Double: FakeBackend + RecordingCommandRunner + real SqliteStore + fake WorktreeAllocator
   Given a ProductionRunHost with a fake WorktreeAllocator returning "/tmp/agentd-task-wt"

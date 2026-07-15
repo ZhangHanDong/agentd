@@ -25,33 +25,41 @@ fi
 # True when specs/ exists and holds at least one .spec / .spec.md file.
 have_specs() { [ -d specs ] && find specs -name '*.spec' -o -name '*.spec.md' 2>/dev/null | grep -q .; }
 
-echo "==> [4/7] agent-spec lifecycle"
-# `agent-spec lifecycle` takes ONE spec file (not a glob) and --format is
-# text|json|md (NOT prompt-summary). Loop over every spec; run once per file
-# and fail loudly (printing full output) on the first non-zero exit.
-if command -v agent-spec >/dev/null 2>&1; then
-    if have_specs; then
-        while IFS= read -r spec; do
-            if out=$(agent-spec lifecycle "$spec" --code . --min-score 0.7 --format text 2>&1); then
-                echo "    -- $spec: $(echo "$out" | grep -Eo 'Pass rate: [0-9.]+%' | tail -1)"
-            else
-                echo "    -- $spec: FAILED"
-                echo "$out"
-                exit 1
-            fi
-        done < <(find specs -name '*.spec' -o -name '*.spec.md' | sort)
-    else
-        echo "    no specs/ yet; skipping (specs land in P0.0 Task 7+)"
+require_agent_spec() {
+    if ! command -v agent-spec >/dev/null 2>&1; then
+        echo "ERROR: agent-spec 1.0.0 is required" >&2
+        exit 69
     fi
+    version=$(agent-spec --version)
+    if [ "$version" != "agent-spec 1.0.0" ]; then
+        echo "ERROR: expected agent-spec 1.0.0, found $version" >&2
+        exit 69
+    fi
+}
+
+echo "==> [4/7] agent-spec verification"
+# The shared verifier runs parse + lint for explicitly design-only contracts
+# and the full lifecycle for every implementation contract.
+if have_specs; then
+    require_agent_spec
+    while IFS= read -r spec; do
+        if out=$(scripts/agentd_verify_spec.sh "$spec" 2>&1); then
+            echo "    -- $spec: PASS"
+        else
+            echo "    -- $spec: FAILED"
+            echo "$out"
+            exit 1
+        fi
+    done < <(find specs -name '*.spec' -o -name '*.spec.md' | sort)
 else
-    echo "    agent-spec not installed; skipping (CI will catch this)"
+    echo "    no specs/ yet; skipping (specs land in P0.0 Task 7+)"
 fi
 
-echo "==> [5/7] agent-spec guard"
-if command -v agent-spec >/dev/null 2>&1 && have_specs; then
-    agent-spec guard --code .
+echo "==> [5/7] changed-contract boundary guard"
+if have_specs; then
+    scripts/agentd_guard_changed_contract.sh --staged
 else
-    echo "    skipped (no agent-spec or no specs yet)"
+    echo "    skipped (no specs yet)"
 fi
 
 echo "==> [6/7] dot-validate"

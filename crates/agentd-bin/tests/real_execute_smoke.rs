@@ -163,14 +163,30 @@ fn real_execute_smoke_dry_run_prints_run_unique_contract() {
 fn real_execute_smoke_prepare_only_renders_isolated_contract() {
     let temp = tempfile::tempdir().expect("tempdir");
     let state_dir = temp.path().join("state");
+    let fakebin = temp.path().join("fakebin");
+    fs::create_dir_all(&fakebin).expect("create fake tool directory");
+    write_fake_tool(
+        &fakebin,
+        "agent-spec",
+        r#"if [[ "${1:-}" != "plan" ]]; then
+  echo "unexpected agent-spec command: ${1:-}" >&2
+  exit 64
+fi
+printf '# fixture smoke plan\n'
+"#,
+    );
+    let path = fake_path(&fakebin);
     let state_dir_arg = state_dir.to_string_lossy().to_string();
-    let out = run_script(&[
-        "--prepare-only",
-        "--run-id",
-        "p153-prepare-01",
-        "--state-dir",
-        &state_dir_arg,
-    ]);
+    let out = run_script_with_env(
+        &[
+            "--prepare-only",
+            "--run-id",
+            "p153-prepare-01",
+            "--state-dir",
+            &state_dir_arg,
+        ],
+        &[("PATH", &path)],
+    );
 
     assert!(
         out.status.success(),
@@ -192,7 +208,16 @@ fn real_execute_smoke_prepare_only_renders_isolated_contract() {
         frozen_spec.contains("AGENTD_REAL_EXECUTE_SMOKE_READY:p153-prepare-01"),
         "rendered spec names the run-specific marker: {frozen_spec}"
     );
+    assert!(
+        !frozen_spec.contains("template-only"),
+        "rendered spec must return to lifecycle verification: {frozen_spec}"
+    );
     assert!(state_dir.join("plan.md").is_file(), "plan is run-local");
+    assert_eq!(
+        fs::read_to_string(state_dir.join("plan.md")).expect("read fake-generated plan"),
+        "# fixture smoke plan\n",
+        "prepare-only must use the isolated fake agent-spec planner"
+    );
     assert!(
         state_dir.join("workflows/execute.dot").is_file(),
         "workflow is run-local"

@@ -484,6 +484,7 @@ prepare_runtime_spec_and_plan() {
     fi
     mkdir -p "$STATE_DIR"
     sed \
+        -e "s|, template-only||" \
         -e "s|__AGENTD_REAL_EXECUTE_RUN_ID__|$RUN_ID|g" \
         -e "s|__AGENTD_REAL_EXECUTE_RUST_ID__|$RUST_ID|g" \
         -e "s|__AGENTD_REAL_EXECUTE_DOC_PATH__|$SMOKE_DOC_REL|g" \

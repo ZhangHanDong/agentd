@@ -4,7 +4,6 @@ use std::process::{Command, Output};
 
 use agentd_store::{SqliteStore, message_repo};
 
-const AGENT_CHAT_PATH: &str = "/Users/zhangalex/Work/Projects/consult/agent-chat";
 const REQUIRED_CATEGORIES: &[&str] = &[
     "registry",
     "messaging",
@@ -372,10 +371,14 @@ fn parity_capability_map_has_required_rows_without_unknowns() {
             row.status
         );
         assert_ne!(row.status, "unknown", "unknown status is forbidden");
+        let source = Path::new(&row.source);
         assert!(
-            row.source
-                .starts_with("/Users/zhangalex/Work/Projects/consult/agent-chat/"),
-            "row {} must cite an agent-chat source path: {}",
+            !source.as_os_str().is_empty()
+                && !source.is_absolute()
+                && source
+                    .components()
+                    .all(|component| matches!(component, std::path::Component::Normal(_))),
+            "row {} must cite a safe agent-chat-relative source path: {}",
             row.capability,
             row.source
         );
@@ -3527,9 +3530,11 @@ fn parity_capability_map_records_p262_matrix_joingroup_progress() {
 
 #[test]
 fn parity_audit_reports_required_gaps_from_map() {
-    let before_count = count_entries(Path::new(AGENT_CHAT_PATH));
-    let out = agentctl(&["parity", "audit", "--agent-chat", AGENT_CHAT_PATH]);
-    let after_count = count_entries(Path::new(AGENT_CHAT_PATH));
+    let agent_chat = agent_chat_fixture(&["codex-worker"]);
+    let agent_chat_path = agent_chat.path().to_string_lossy().to_string();
+    let before_count = count_entries(agent_chat.path());
+    let out = agentctl(&["parity", "audit", "--agent-chat", &agent_chat_path]);
+    let after_count = count_entries(agent_chat.path());
 
     assert_eq!(
         out.status.code(),
@@ -3554,6 +3559,51 @@ fn parity_audit_reports_required_gaps_from_map() {
         before_count, after_count,
         "audit must not create or delete files in agent-chat"
     );
+}
+
+#[test]
+fn parity_audit_rejects_unsafe_relative_sources() {
+    let agent_chat = agent_chat_fixture(&["codex-worker"]);
+    let agent_chat_arg = agent_chat.path().to_string_lossy().to_string();
+    let absolute_escape = agent_chat
+        .path()
+        .canonicalize()
+        .expect("canonical agent-chat fixture")
+        .join("..")
+        .join("outside.js")
+        .to_string_lossy()
+        .to_string();
+    for (label, source) in [
+        ("parent", "../outside.js"),
+        ("empty", ""),
+        ("absolute-parent", absolute_escape.as_str()),
+    ] {
+        let map_path = agent_chat.path().join(format!("{label}-map.md"));
+        write_file(
+            &map_path,
+            &format!(
+                "| Capability | Category | Priority | Source | Status | Decision | Phase |\n\
+                 | --- | --- | --- | --- | --- | --- | --- |\n\
+                 | escaping | registry | required | {source} | partial | reject escape | test |\n"
+            ),
+        );
+        let map_arg = map_path.to_string_lossy().to_string();
+        let out = agentctl(&[
+            "parity",
+            "audit",
+            "--agent-chat",
+            &agent_chat_arg,
+            "--map",
+            &map_arg,
+        ]);
+
+        assert_eq!(out.status.code(), Some(2), "{label} source must fail");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("source is outside agent-chat path"),
+            "stderr rejects {label} source: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 }
 
 #[test]

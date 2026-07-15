@@ -18,6 +18,98 @@ fn ci_clippy_known_warning_patterns_are_absent() {
     assert_ci_workflow_markers_absent();
 }
 
+#[test]
+fn ci_and_local_gates_classify_non_implementation_specs() {
+    let ad_e1 = read("specs/e2e/ad-e1-minimum-security-baseline.spec.md");
+    let p272 = read("specs/e2e/p272-runtime-compatibility-port.spec.md");
+    let template = read("specs/e2e/real-execute-smoke-template.spec.md");
+    let verifier = read("scripts/agentd_verify_spec.sh");
+    let changed_guard = read("scripts/agentd_guard_changed_contract.sh");
+    let local_gate = read("scripts/check.sh");
+    let ci_gate = read(".github/workflows/ci.yml");
+
+    for spec in [&ad_e1, &p272] {
+        assert!(
+            spec.lines()
+                .find(|line| line.starts_with("tags:"))
+                .is_some_and(|line| line.contains("design-only")),
+            "blocked implementation contracts must declare the design-only tag"
+        );
+    }
+    assert!(
+        template
+            .lines()
+            .find(|line| line.starts_with("tags:"))
+            .is_some_and(|line| line.contains("template-only")),
+        "unrendered contracts must declare the template-only tag"
+    );
+    for marker in [
+        "agent-spec parse \"$spec\" --format json",
+        "index(\"design-only\")",
+        "index(\"template-only\")",
+        "agent-spec lint \"$spec\" --min-score 0.7 --format text",
+        "agent-spec lifecycle \"$spec\" --code . --min-score 0.7 --format text",
+    ] {
+        assert!(
+            verifier.contains(marker),
+            "spec verifier must contain {marker}"
+        );
+    }
+    for gate in [&local_gate, &ci_gate] {
+        assert!(
+            gate.contains("scripts/agentd_verify_spec.sh \"$spec\""),
+            "every spec gate must use the shared verifier"
+        );
+        assert!(
+            gate.contains("scripts/agentd_guard_changed_contract.sh"),
+            "every spec gate must run the changed-contract boundary guard"
+        );
+    }
+    assert!(
+        ci_gate.contains("scripts/agentd_guard_changed_contract.sh --range")
+            && ci_gate.contains("github.event.pull_request.base.sha")
+            && ci_gate.contains("fetch-depth: 0"),
+        "PR checks must guard the complete base-to-head range after P156 adoption"
+    );
+    assert!(
+        local_gate.contains("agent-spec 1.0.0")
+            && ci_gate.contains("cargo install --locked agent-spec --version 1.0.0")
+            && !ci_gate.contains("cargo install --locked agent-spec || true"),
+        "local and CI gates must require the same pinned agent-spec version"
+    );
+    for marker in [
+        "git diff --cached",
+        "git diff-tree",
+        "agent-spec lifecycle",
+        "--change",
+    ] {
+        assert!(
+            changed_guard.contains(marker),
+            "changed-contract guard must contain {marker}"
+        );
+    }
+
+    for (path, selector) in [
+        (
+            "specs/e2e/p100-worktree-pr-publication.spec.md",
+            "production_runhost_execute_tools_use_stable_repo_cwd_after_review_fan_in",
+        ),
+        (
+            "specs/e2e/p120-agent-mcp-stdio-startup-context.spec.md",
+            "mcp_stdio_command_includes_proxy_url_to_daemon",
+        ),
+        (
+            "specs/e2e/p130-open-pr-preflight.spec.md",
+            "production_runhost_execute_tools_use_stable_repo_cwd_after_review_fan_in",
+        ),
+    ] {
+        assert!(
+            read(path).contains(selector),
+            "implemented contract {path} must use current lifecycle selector {selector}"
+        );
+    }
+}
+
 fn assert_core_markers_absent() {
     let codergen = read("crates/agentd-core/src/handler/codergen.rs");
     assert!(

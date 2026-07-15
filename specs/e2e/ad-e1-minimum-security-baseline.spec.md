@@ -1,6 +1,6 @@
 spec: task
 name: "AD-E1 minimum execution security baseline"
-tags: [e2e, enterprise, security, sandbox, mtls, tenant, fencing, ad-e1, fsf-2]
+tags: [e2e, enterprise, security, sandbox, mtls, tenant, fencing, ad-e1, fsf-2, design-only]
 ---
 
 ## Intent

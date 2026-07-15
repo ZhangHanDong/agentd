@@ -386,7 +386,7 @@ fn validate_rows(rows: &[ParityRow], agent_chat: &Path) -> Result<(), String> {
         if row.decision.trim().is_empty() {
             return Err(format!("{} has no replacement decision", row.capability));
         }
-        if !row.source.starts_with(&agent_chat.display().to_string()) {
+        if !source_is_within_agent_chat(&row.source, agent_chat) {
             return Err(format!(
                 "{} source is outside agent-chat path: {}",
                 row.capability, row.source
@@ -408,6 +408,27 @@ fn validate_rows(rows: &[ParityRow], agent_chat: &Path) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+fn source_is_within_agent_chat(source: &str, agent_chat: &Path) -> bool {
+    let source = Path::new(source);
+    if source
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return false;
+    }
+    if source.is_absolute() {
+        let root = agent_chat
+            .canonicalize()
+            .unwrap_or_else(|_| agent_chat.to_path_buf());
+        return source.starts_with(root);
+    }
+
+    !source.as_os_str().is_empty()
+        && source
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
 fn summarize(rows: &[ParityRow]) -> AuditSummary {

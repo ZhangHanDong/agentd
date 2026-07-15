@@ -1,6 +1,6 @@
 spec: task
 name: "real execute smoke artifact __AGENTD_REAL_EXECUTE_RUN_ID__"
-tags: [smoke, execute, real-agent, run-unique]
+tags: [smoke, execute, real-agent, run-unique, template-only]
 ---
 
 ## Intent

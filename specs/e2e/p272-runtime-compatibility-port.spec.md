@@ -1,6 +1,6 @@
 spec: task
 name: "agent runtime control compatibility port"
-tags: [e2e, agent-chat-replacement, runtime, compatibility, tmux, cli, p272]
+tags: [e2e, agent-chat-replacement, runtime, compatibility, tmux, cli, p272, design-only]
 ---
 
 ## Intent
