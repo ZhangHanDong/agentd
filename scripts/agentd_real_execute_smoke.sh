@@ -10,7 +10,7 @@ RUN_ID="real-execute-smoke-$(date +%Y%m%d%H%M%S)"
 PORT="18789"
 WAIT_SECONDS="600"
 STATE_DIR=""
-SPEC_FILE="$ROOT/.agentd/run/frozen.spec.md"
+SPEC_FILE="$ROOT/specs/e2e/real-execute-smoke-template.spec.md"
 IMPLEMENTER_ROLE="implementer"
 REVIEWERS="claude-sec,codex-perf,gemini-readability"
 RUNTIME_MATRIX="${AGENTD_REAL_EXECUTE_RUNTIMES:-}"
@@ -19,13 +19,13 @@ REVIEWERS_EXPLICIT="0"
 
 usage() {
     cat <<'EOF'
-usage: agentd_real_execute_smoke.sh [--dry-run|--preflight-only|--execute] [options]
+usage: agentd_real_execute_smoke.sh [--dry-run|--prepare-only|--preflight-only|--execute] [options]
 
 Options:
   --run-id ID          Run id to pass to agentctl (default: timestamped)
   --port PORT          Local daemon port (default: 18789)
   --state-dir DIR      Evidence directory (default: .agentd/real-execute-smoke/<run-id>)
-  --spec-file FILE     Frozen spec to copy into .agentd/run/frozen.spec.md
+  --spec-file FILE     Spec template to render into the run state directory
   --implementer-role ROLE
                        Role name for the execute.dot implement node
                        (default: implementer)
@@ -43,8 +43,8 @@ Environment:
                        codex,codex,codex,codex
 
 Real execution requires AGENTD_REAL_EXECUTE_SMOKE=1 and may use paid/authenticated
-Claude Code or Codex plus GitHub PR creation. Dry-run and preflight-only never
-start the daemon, tmux, Claude, Codex, or gh.
+Claude Code or Codex plus GitHub PR creation. Dry-run, prepare-only, and
+preflight-only never start the daemon, tmux, Claude, Codex, or gh.
 EOF
 }
 
@@ -56,6 +56,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --preflight-only)
             MODE="preflight-only"
+            shift
+            ;;
+        --prepare-only)
+            MODE="prepare-only"
             shift
             ;;
         --execute)
@@ -104,6 +108,15 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+validate_run_id() {
+    if [[ -z "$RUN_ID" || ! "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        echo "invalid run id: $RUN_ID" >&2
+        return 2
+    fi
+}
+
+validate_run_id
+
 abs_from_root() {
     local path="$1"
     if [[ "$path" = /* ]]; then
@@ -119,6 +132,13 @@ else
     STATE_DIR="$(abs_from_root "$STATE_DIR")"
 fi
 SPEC_FILE="$(abs_from_root "$SPEC_FILE")"
+RUST_ID="${RUN_ID//[^[:alnum:]]/_}"
+SMOKE_DOC_REL="docs/real-execute-smoke/$RUN_ID.md"
+SMOKE_TEST_REL="crates/agentd-bin/tests/real_execute_smoke_${RUST_ID}.rs"
+SMOKE_MARKER="AGENTD_REAL_EXECUTE_SMOKE_READY:$RUN_ID"
+SMOKE_EXISTS_FILTER="real_execute_smoke_${RUST_ID}_artifact_exists"
+SMOKE_MARKER_FILTER="real_execute_smoke_${RUST_ID}_artifact_mentions_ready_marker"
+TASK_BASE_SHA="$(git -C "$ROOT" rev-parse HEAD)"
 
 BASE_REMOTE="origin"
 BASE_BRANCH="main"
@@ -134,11 +154,9 @@ SMOKE_EXECUTE_WORKFLOW_LABEL="execute.workflow.dot"
 WORKFLOWS_DIR="$SMOKE_WORKFLOWS_DIR"
 WORKTREE_BASE="$STATE_DIR/worktrees"
 DB_PATH="$STATE_DIR/agentd.db"
-RUNTIME_DIR="$ROOT/.agentd/run"
-RUNTIME_SPEC="$RUNTIME_DIR/frozen.spec.md"
-RUNTIME_PLAN="$RUNTIME_DIR/plan.md"
 FROZEN_SPEC_COPY="$STATE_DIR/frozen.spec.md"
 PLAN_COPY="$STATE_DIR/plan.md"
+REPORT="$STATE_DIR/report.md"
 PREFLIGHT_LOG="$STATE_DIR/preflight.log"
 DAEMON_LOG="$STATE_DIR/daemon.log"
 AGENTCTL_OUT="$STATE_DIR/agentctl.out"
@@ -269,7 +287,22 @@ prepare_smoke_workflow() {
     sed \
         -e "s|role=\"implementer\"|role=\"$IMPLEMENTER_ROLE\"|" \
         -e "s|reviewers=\"claude-sec,codex-perf,gemini-readability\"|reviewers=\"$REVIEWERS\"|" \
-        "$SHIPPED_WORKFLOWS_DIR/execute.dot" >"$SMOKE_EXECUTE_WORKFLOW"
+        -e "s|\.agentd/run/frozen\.spec\.md|$FROZEN_SPEC_COPY|g" \
+        -e "s|\.agentd/run/plan\.md|$PLAN_COPY|g" \
+        -e "s|\.agentd/run/report\.md|$REPORT|g" \
+        -e "s|\.agentd/run/|$STATE_DIR/|g" \
+        "$SHIPPED_WORKFLOWS_DIR/execute.dot" |
+        awk -v base="$TASK_BASE_SHA" '
+            /"verify_lifecycle"  \[handler=/ {
+                print "  \"verify_task_delta\"  [handler=\"tool\", cmd=\"bash scripts/agentd_verify_task_delta.sh ${worktree} " base "\", timeout_secs=\"60\"];"
+            }
+            /"implement".*->.*"verify_lifecycle"/ {
+                print "  \"implement\"         -> \"verify_task_delta\";"
+                print "  \"verify_task_delta\" -> \"verify_lifecycle\";"
+                next
+            }
+            { print }
+        ' >"$SMOKE_EXECUTE_WORKFLOW"
 }
 
 print_plan() {
@@ -280,6 +313,12 @@ repo: $ROOT
 run_id: $RUN_ID
 state_dir: $STATE_DIR
 spec_file: $SPEC_FILE
+task_base_sha: $TASK_BASE_SHA
+smoke_document: $SMOKE_DOC_REL
+smoke_test: $SMOKE_TEST_REL
+smoke_marker: $SMOKE_MARKER
+smoke_exists_filter: $SMOKE_EXISTS_FILTER
+smoke_marker_filter: $SMOKE_MARKER_FILTER
 runtime_matrix: ${RUNTIME_MATRIX:-manual}
 implementer_role: $IMPLEMENTER_ROLE
 reviewers: $REVIEWERS
@@ -296,8 +335,9 @@ build:
   cargo build -p agentd-bin -p agentctl
 
 prepare:
-  cp '$SPEC_FILE' '$RUNTIME_SPEC'
-  bash scripts/agentd_write_plan.sh '$RUNTIME_SPEC' '$RUNTIME_PLAN'
+  render '$SPEC_FILE' '$FROZEN_SPEC_COPY'
+  bash scripts/agentd_write_plan.sh '$FROZEN_SPEC_COPY' '$PLAN_COPY'
+  inject verify_task_delta against '$TASK_BASE_SHA' into '$SMOKE_EXECUTE_WORKFLOW'
 
 daemon:
   $AGENTD_BIN --db-path '$DB_PATH' --port '$PORT' --workflows-dir '$WORKFLOWS_DIR' --repo-dir '$ROOT' --worktree-base '$WORKTREE_BASE'
@@ -314,10 +354,13 @@ evidence:
   run_snapshot.json
   events.snapshot
   summary.txt
+  report.md
 
 success criterion:
   execute.dot reaches a terminal run state after real agents implement/review,
-  publish_branch pushes agentd/<task_run_id>, and open_pr opens a real PR.
+  verify_task_delta observes the run-specific document and test relative to the
+  exact task base, publish_branch pushes agentd/<task_run_id>, and
+  open_pr opens a real PR.
 
 failure evidence:
   if there is a captured preflight error from scripts/agentd_open_pr.sh, the
@@ -402,8 +445,13 @@ write_summary() {
         echo "daemon_url: $DAEMON_URL"
         echo "state_dir: $STATE_DIR"
         echo "spec_file: $SPEC_FILE"
+        echo "task_base_sha: $TASK_BASE_SHA"
+        echo "smoke_document: $SMOKE_DOC_REL"
+        echo "smoke_test: $SMOKE_TEST_REL"
+        echo "smoke_marker: $SMOKE_MARKER"
         echo "frozen_spec: $FROZEN_SPEC_COPY"
         echo "plan: $PLAN_COPY"
+        echo "report: $REPORT"
         echo "run_snapshot: $RUN_SNAPSHOT"
         echo "events_snapshot: $EVENTS_SNAPSHOT"
         echo "daemon_log: $DAEMON_LOG"
@@ -416,13 +464,17 @@ prepare_runtime_spec_and_plan() {
         echo "frozen spec not found: $SPEC_FILE" >&2
         return 1
     fi
-    mkdir -p "$STATE_DIR" "$RUNTIME_DIR"
-    cp "$SPEC_FILE" "$FROZEN_SPEC_COPY"
-    if [[ "$(canonical_file_path "$SPEC_FILE")" != "$(canonical_file_path "$RUNTIME_SPEC")" ]]; then
-        cp "$SPEC_FILE" "$RUNTIME_SPEC"
-    fi
-    bash "$ROOT/scripts/agentd_write_plan.sh" "$RUNTIME_SPEC" "$RUNTIME_PLAN"
-    cp "$RUNTIME_PLAN" "$PLAN_COPY"
+    mkdir -p "$STATE_DIR"
+    sed \
+        -e "s|__AGENTD_REAL_EXECUTE_RUN_ID__|$RUN_ID|g" \
+        -e "s|__AGENTD_REAL_EXECUTE_RUST_ID__|$RUST_ID|g" \
+        -e "s|__AGENTD_REAL_EXECUTE_DOC_PATH__|$SMOKE_DOC_REL|g" \
+        -e "s|__AGENTD_REAL_EXECUTE_TEST_PATH__|$SMOKE_TEST_REL|g" \
+        -e "s|__AGENTD_REAL_EXECUTE_MARKER__|$SMOKE_MARKER|g" \
+        -e "s|__AGENTD_REAL_EXECUTE_EXISTS_FILTER__|$SMOKE_EXISTS_FILTER|g" \
+        -e "s|__AGENTD_REAL_EXECUTE_MARKER_FILTER__|$SMOKE_MARKER_FILTER|g" \
+        "$SPEC_FILE" >"$FROZEN_SPEC_COPY"
+    bash "$ROOT/scripts/agentd_write_plan.sh" "$FROZEN_SPEC_COPY" "$PLAN_COPY"
 }
 
 run_execute() {
@@ -494,6 +546,13 @@ case "$MODE" in
         apply_runtime_matrix
         validate_runtime_roles
         print_plan
+        ;;
+    prepare-only)
+        apply_runtime_matrix
+        validate_runtime_roles
+        prepare_runtime_spec_and_plan
+        prepare_smoke_workflow
+        echo "real execute smoke prepared; state: $STATE_DIR"
         ;;
     preflight-only)
         apply_runtime_matrix

@@ -114,6 +114,113 @@ fn real_execute_smoke_dry_run_prints_plan_without_starting() {
 }
 
 #[test]
+fn real_execute_smoke_dry_run_prints_run_unique_contract() {
+    let out = run_script(&["--dry-run", "--run-id", "p153-contract-01"]);
+
+    assert!(
+        out.status.success(),
+        "dry-run exits 0; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for expected in [
+        "docs/real-execute-smoke/p153-contract-01.md",
+        "crates/agentd-bin/tests/real_execute_smoke_p153_contract_01.rs",
+        "AGENTD_REAL_EXECUTE_SMOKE_READY:p153-contract-01",
+        "verify_task_delta",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "dry-run should print {expected}: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn real_execute_smoke_prepare_only_renders_isolated_contract() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let state_dir = temp.path().join("state");
+    let state_dir_arg = state_dir.to_string_lossy().to_string();
+    let out = run_script(&[
+        "--prepare-only",
+        "--run-id",
+        "p153-prepare-01",
+        "--state-dir",
+        &state_dir_arg,
+    ]);
+
+    assert!(
+        out.status.success(),
+        "prepare-only exits 0; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let frozen_spec =
+        fs::read_to_string(state_dir.join("frozen.spec.md")).expect("read rendered frozen spec");
+    assert!(
+        frozen_spec.contains("docs/real-execute-smoke/p153-prepare-01.md"),
+        "rendered spec names the run-specific document: {frozen_spec}"
+    );
+    assert!(
+        frozen_spec.contains("crates/agentd-bin/tests/real_execute_smoke_p153_prepare_01.rs"),
+        "rendered spec names the run-specific test: {frozen_spec}"
+    );
+    assert!(
+        frozen_spec.contains("AGENTD_REAL_EXECUTE_SMOKE_READY:p153-prepare-01"),
+        "rendered spec names the run-specific marker: {frozen_spec}"
+    );
+    assert!(state_dir.join("plan.md").is_file(), "plan is run-local");
+    assert!(
+        state_dir.join("workflows/execute.dot").is_file(),
+        "workflow is run-local"
+    );
+    let workflow =
+        fs::read_to_string(state_dir.join("workflows/execute.dot")).expect("read smoke workflow");
+    assert!(workflow.contains("verify_task_delta"), "{workflow}");
+    assert!(
+        workflow.contains(&state_dir.join("frozen.spec.md").display().to_string()),
+        "workflow reads the run-local spec: {workflow}"
+    );
+    assert!(
+        workflow.contains(&state_dir.join("plan.md").display().to_string()),
+        "workflow writes the run-local plan: {workflow}"
+    );
+    assert!(
+        workflow.contains(&state_dir.join("report.md").display().to_string()),
+        "workflow reads the run-local report: {workflow}"
+    );
+    assert!(
+        !workflow.contains(".agentd/run/"),
+        "workflow must not use shared runtime state: {workflow}"
+    );
+}
+
+#[test]
+fn real_execute_smoke_rejects_unsafe_run_id_before_state_creation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let state_dir = temp.path().join("state");
+    let state_dir_arg = state_dir.to_string_lossy().to_string();
+    let out = run_script(&[
+        "--prepare-only",
+        "--run-id",
+        "unsafe/run id",
+        "--state-dir",
+        &state_dir_arg,
+    ]);
+
+    assert!(!out.status.success(), "unsafe run id should fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("invalid run id") && stderr.contains("unsafe/run id"),
+        "stderr explains the unsafe run id: {stderr}"
+    );
+    assert!(
+        !state_dir.exists(),
+        "unsafe run id must fail before creating state"
+    );
+}
+
+#[test]
 fn real_execute_smoke_execute_requires_explicit_opt_in() {
     let temp = tempfile::tempdir().expect("tempdir");
     let state_dir = temp.path().join("state");
