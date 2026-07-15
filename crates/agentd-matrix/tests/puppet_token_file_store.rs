@@ -216,12 +216,12 @@ fn matrix_puppet_token_file_store_creates_missing_state_and_parent_dirs() {
 
     let value = read_json(&path);
     assert_eq!(value["agentTokens"]["codex-worker"], "created-token");
-    assert!(
+    assert_eq!(
         value["agentTokens"]
             .as_object()
             .expect("agentTokens object")
-            .len()
-            == 1
+            .len(),
+        1
     );
 }
 
