@@ -18,10 +18,10 @@ fn run(cmd: &mut Command, label: &str) -> Output {
     output
 }
 
-fn git(dir: &Path, args: &[&str]) {
+fn git(dir: &Path, args: &[&str]) -> Output {
     let mut cmd = Command::new("git");
     cmd.current_dir(dir).args(args);
-    run(&mut cmd, &format!("git {}", args.join(" ")));
+    run(&mut cmd, &format!("git {}", args.join(" ")))
 }
 
 #[test]
@@ -50,16 +50,23 @@ fn publish_worktree_writes_local_acceptance_report() {
     fs::write(worktree.join("README.md"), "seed\n").expect("seed readme");
     git(&worktree, &["add", "README.md"]);
     git(&worktree, &["commit", "-m", "seed"]);
+    let base = String::from_utf8(git(&worktree, &["rev-parse", "HEAD"]).stdout)
+        .expect("utf8 base")
+        .trim()
+        .to_owned();
 
     fs::write(worktree.join("agentd-change.txt"), "published by test\n")
         .expect("write task change");
+    let report_path = temp.path().join("state/report.md");
     let script = repo_root().join("scripts/agentd_publish_worktree.sh");
     let mut publish = Command::new("bash");
     publish
         .current_dir(temp.path())
         .arg(script)
         .arg(&worktree)
-        .arg(task_run_id);
+        .arg(task_run_id)
+        .arg(&base)
+        .arg(&report_path);
     let output = run(&mut publish, "agentd_publish_worktree");
 
     assert_eq!(
@@ -67,7 +74,6 @@ fn publish_worktree_writes_local_acceptance_report() {
         branch,
         "publish helper prints the task branch"
     );
-    let report_path = temp.path().join(".agentd/run/report.md");
     let report = fs::read_to_string(&report_path)
         .unwrap_or_else(|err| panic!("read {}: {err}", report_path.display()));
     assert!(
@@ -77,6 +83,96 @@ fn publish_worktree_writes_local_acceptance_report() {
     assert!(
         report.contains(&branch),
         "report names the branch: {report}"
+    );
+    assert!(
+        !temp.path().join(".agentd/run/report.md").exists(),
+        "custom report path must not write shared runtime state"
+    );
+
+    let remote_head = Command::new("git")
+        .args([
+            "--git-dir",
+            origin.to_str().unwrap(),
+            "rev-parse",
+            &format!("refs/heads/{branch}"),
+        ])
+        .output()
+        .expect("read remote task branch");
+    assert!(remote_head.status.success(), "remote task branch exists");
+    assert_ne!(
+        String::from_utf8(remote_head.stdout)
+            .expect("utf8 remote head")
+            .trim(),
+        base,
+        "published branch advances beyond the exact base"
+    );
+}
+
+#[test]
+fn publish_worktree_rejects_empty_delta_before_push() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let origin = temp.path().join("origin.git");
+    let worktree = temp.path().join("worktree");
+    let report_path = temp.path().join("state/report.md");
+    let task_run_id = "tr_1123456789ABCDEFGHJKMNPQRS";
+    let branch = format!("agentd/{task_run_id}");
+
+    let mut init_bare = Command::new("git");
+    init_bare.args(["init", "--bare", origin.to_str().unwrap()]);
+    run(&mut init_bare, "git init --bare");
+
+    fs::create_dir(&worktree).expect("create worktree");
+    git(&worktree, &["init"]);
+    git(
+        &worktree,
+        &["config", "user.email", "agentd@example.invalid"],
+    );
+    git(&worktree, &["config", "user.name", "agentd test"]);
+    git(
+        &worktree,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    fs::write(worktree.join("README.md"), "seed\n").expect("seed readme");
+    git(&worktree, &["add", "README.md"]);
+    git(&worktree, &["commit", "-m", "seed"]);
+    let base = String::from_utf8(git(&worktree, &["rev-parse", "HEAD"]).stdout)
+        .expect("utf8 base")
+        .trim()
+        .to_owned();
+
+    let script = repo_root().join("scripts/agentd_publish_worktree.sh");
+    let output = Command::new("bash")
+        .current_dir(temp.path())
+        .arg(script)
+        .arg(&worktree)
+        .arg(task_run_id)
+        .arg(&base)
+        .arg(&report_path)
+        .output()
+        .expect("run agentd_publish_worktree");
+
+    assert!(!output.status.success(), "empty delta must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("refusing publication: no task delta relative to")
+            && stderr.contains(&base),
+        "stderr explains the empty delta: {stderr}"
+    );
+    assert!(!report_path.exists(), "failed publication writes no report");
+
+    let remote_branch = Command::new("git")
+        .args([
+            "--git-dir",
+            origin.to_str().unwrap(),
+            "rev-parse",
+            "--verify",
+            &format!("refs/heads/{branch}"),
+        ])
+        .output()
+        .expect("check remote task branch");
+    assert!(
+        !remote_branch.status.success(),
+        "failed publication must not create the remote task branch"
     );
 }
 

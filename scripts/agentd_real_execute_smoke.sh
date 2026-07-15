@@ -291,6 +291,7 @@ prepare_smoke_workflow() {
         -e "s|\.agentd/run/plan\.md|$PLAN_COPY|g" \
         -e "s|\.agentd/run/report\.md|$REPORT|g" \
         -e "s|\.agentd/run/|$STATE_DIR/|g" \
+        -e "s|bash scripts/agentd_publish_worktree\.sh \${worktree} \${task_run_id}|bash scripts/agentd_publish_worktree.sh \${worktree} \${task_run_id} $TASK_BASE_SHA $REPORT|" \
         "$SHIPPED_WORKFLOWS_DIR/execute.dot" |
         awk -v base="$TASK_BASE_SHA" '
             /"verify_lifecycle"  \[handler=/ {

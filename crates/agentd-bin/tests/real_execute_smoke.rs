@@ -189,6 +189,23 @@ fn real_execute_smoke_prepare_only_renders_isolated_contract() {
         workflow.contains(&state_dir.join("report.md").display().to_string()),
         "workflow reads the run-local report: {workflow}"
     );
+    let task_base = Command::new("git")
+        .args(["-C", repo_root().to_str().unwrap(), "rev-parse", "HEAD"])
+        .output()
+        .expect("read exact task base");
+    assert!(task_base.status.success(), "git rev-parse HEAD succeeds");
+    let task_base = String::from_utf8(task_base.stdout)
+        .expect("utf8 task base")
+        .trim()
+        .to_owned();
+    let publish_contract = format!(
+        "agentd_publish_worktree.sh ${{worktree}} ${{task_run_id}} {task_base} {}",
+        state_dir.join("report.md").display()
+    );
+    assert!(
+        workflow.contains(&publish_contract),
+        "workflow passes exact base and run-local report to publication: {workflow}"
+    );
     assert!(
         !workflow.contains(".agentd/run/"),
         "workflow must not use shared runtime state: {workflow}"
