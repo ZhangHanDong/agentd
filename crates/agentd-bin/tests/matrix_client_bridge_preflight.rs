@@ -143,6 +143,7 @@ fn write_response(stream: &mut std::net::TcpStream, response: &FakeResponse) {
 
 fn daemon_config(api_token: Option<&str>) -> DaemonConfig {
     DaemonConfig {
+        security_mode: agentd_bin::SecurityRuntimeMode::Standalone,
         db_path: PathBuf::from("agentd.db"),
         port: 8787,
         workflows_dir: PathBuf::from("workflows"),

@@ -24,6 +24,7 @@ use crate::host::{
     AgentLifecycle, AgentLifecycleShutdown, AgentLifecycleShutdownReport, ProductionRunHost,
 };
 use crate::mempal::OfflineMempal;
+use crate::security::{SecurityRuntimeMode, build_security_runtime};
 
 /// Build the HTTP/SSE router over a host (testable via `tower::oneshot`).
 pub fn build_router(host: Arc<dyn RunHost>) -> Router {
@@ -127,6 +128,11 @@ impl AgentLifecycle for TmuxAgentLifecycle {
 /// # Errors
 /// [`CoreError`] if the store cannot be opened/migrated.
 pub async fn build_production_host(config: &DaemonConfig) -> Result<ProductionRunHost, CoreError> {
+    if config.security_mode == SecurityRuntimeMode::Enterprise {
+        return Err(CoreError::Invariant(
+            "enterprise mode cannot construct the standalone compatibility host".to_string(),
+        ));
+    }
     let store = SqliteStore::connect(&config.db_path).await?;
     std::fs::create_dir_all(&config.worktree_base)?;
     let worktree_pool = WorktreePool::new(Arc::new(GitWorktreeProvider::new(
@@ -243,16 +249,17 @@ pub async fn bind_listener(addr: SocketAddr) -> Result<tokio::net::TcpListener, 
     }
 }
 
-/// Boot the daemon: bind the listener FIRST (so an already-running instance
-/// fails fast on the clear guard message before opening the store), then build
-/// the production host and serve the HTTP/SSE surface. Logs the bound address
-/// and any in-flight parked runs.
+/// Boot the daemon: validate the security composition, then bind the listener
+/// before opening the store. Enterprise mode has no compatibility listener and
+/// fails before bind until all closed providers are explicitly selected.
 ///
 /// # Errors
 /// Returns any bind/store/serve error as a boxed error.
 pub async fn serve(config: DaemonConfig) -> Result<(), Box<dyn std::error::Error>> {
-    // Bind before any startup work: a second instance returns the guard message
-    // without opening the SQLite store or doing recovery (fail-fast, P1).
+    let auth = config.auth_config();
+    build_security_runtime(config.security_mode, &auth, None)?;
+    // After the pure security gate, bind before store/recovery work so the P1
+    // already-running guard remains fail-fast in standalone mode.
     let addr = SocketAddr::from(([127, 0, 0, 1], config.port));
     let listener = bind_listener(addr).await?;
     tracing::info!(%addr, "agentd daemon listening");
@@ -265,11 +272,7 @@ pub async fn serve(config: DaemonConfig) -> Result<(), Box<dyn std::error::Error
         );
     }
     let media_dir = media_dir_for_db(&config.db_path);
-    let app = build_router_with_auth_and_media(
-        Arc::new(host),
-        config.auth_config(),
-        MediaConfig::new(media_dir),
-    );
+    let app = build_router_with_auth_and_media(Arc::new(host), auth, MediaConfig::new(media_dir));
     axum::serve(listener, app).await?;
     Ok(())
 }

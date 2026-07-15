@@ -1,0 +1,649 @@
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use agentd_bin::security::{
+    EnterpriseSecretRequest, EnterpriseSecurityProviders, EnterpriseWorkerOperation,
+    ExecutionScopeResolveRequest, ExecutionSecurityScopePort, SecurityProviderKind,
+    SecurityRuntime, SecurityRuntimeMode, build_security_runtime,
+};
+use agentd_bin::{AgentdCli, DaemonConfig, daemon};
+use agentd_core::ports::{
+    AttemptCapabilityPort, AuditPage, AuditReadRequest, ExecutionAuditAppend, ExecutionAuditPort,
+    ExecutionAuditRecord, ExecutionEvidenceError, ExecutionSandboxPort, SecretBrokerPort,
+    SecurityError, TaskLeaseCloseRequest, TaskLeaseDispatchRequest, TaskLeaseError, TaskLeasePort,
+    TaskLeaseRenewRequest, TenantAuthorizationPort, WorkloadIdentityPort,
+};
+use agentd_core::types::{
+    AttemptCapabilityId, AuthenticatedWorkload, AuthorityKey, CapabilityAdmission,
+    CapabilityIssueRequest, CapabilityToken, CapabilityValidationRequest, EgressPolicy,
+    ExecutionSandboxProfile, ExecutionSecurityScope, FencingToken, LeaseId, LeaseStatus,
+    OciSandboxRuntime, OrganizationRef, PreparedSandbox, ProjectExecutionSnapshotRef, ProjectRef,
+    ProtectedResource, ProtectedResourceKind, RbacPolicyVersionRef, RunId, SandboxCacheSharing,
+    SandboxCleanupRequest, SandboxExecuteRequest, SandboxExecution, SandboxLimits,
+    SandboxLinuxCapabilities, SandboxMount, SandboxMountAccess, SandboxPrepareRequest,
+    SandboxPrivilegeEscalation, SandboxRootFilesystem, SandboxWorkspace, SecretCheckoutRequest,
+    SecretLease, SecretMaterial, SecretSelector, SecurityAuditContext, SecurityDenialReason,
+    TaskLeaseClaim, TaskLeaseGrant, TaskRunId, TenantAuthorization, TenantAuthorizationRequest,
+    WorkerId, WorkerIncarnationId, WorkloadIdentityRequest, WorkloadRole,
+};
+use agentd_surface::http::{AgentTokenMode, AuthConfig};
+use clap::Parser;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailureStage {
+    Identity,
+    Scope,
+    Authorization,
+    Lease,
+    Capability,
+    Secret,
+    SandboxPrepare,
+    SandboxExecute,
+    Audit,
+    Teardown,
+}
+
+#[derive(Debug)]
+struct RecordingPorts {
+    failure: Option<FailureStage>,
+    calls: Mutex<Vec<&'static str>>,
+}
+
+impl RecordingPorts {
+    fn new(failure: Option<FailureStage>) -> Self {
+        Self {
+            failure,
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn record(&self, stage: &'static str) {
+        let mut calls = self.calls.lock().expect("calls lock");
+        if calls.last().copied() != Some(stage) {
+            calls.push(stage);
+        }
+    }
+
+    fn calls(&self) -> Vec<&'static str> {
+        self.calls.lock().expect("calls lock").clone()
+    }
+
+    fn fail_security(&self, stage: FailureStage) -> Result<(), SecurityError> {
+        if self.failure == Some(stage) {
+            Err(SecurityError::Denied(SecurityDenialReason::ActionDenied))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl WorkloadIdentityPort for RecordingPorts {
+    async fn authenticate_workload(
+        &self,
+        _request: &WorkloadIdentityRequest,
+    ) -> Result<AuthenticatedWorkload, SecurityError> {
+        self.record("identity");
+        self.fail_security(FailureStage::Identity)?;
+        Ok(workload())
+    }
+}
+
+#[async_trait::async_trait]
+impl ExecutionSecurityScopePort for RecordingPorts {
+    async fn resolve_execution_scope(
+        &self,
+        authenticated: &AuthenticatedWorkload,
+        request: &ExecutionScopeResolveRequest,
+    ) -> Result<ExecutionSecurityScope, SecurityError> {
+        self.record("scope");
+        self.fail_security(FailureStage::Scope)?;
+        assert_eq!(authenticated, &workload());
+        assert_eq!(request.execution_task_id, claim().execution_task_id);
+        assert_eq!(request.resource, execution_resource());
+        assert_eq!(request.observed_at, 150);
+        Ok(scope())
+    }
+}
+
+#[async_trait::async_trait]
+impl TenantAuthorizationPort for RecordingPorts {
+    async fn authorize_tenant(
+        &self,
+        request: &TenantAuthorizationRequest,
+    ) -> Result<TenantAuthorization, SecurityError> {
+        self.record("authorization");
+        self.fail_security(FailureStage::Authorization)?;
+        Ok(TenantAuthorization {
+            workload: request.workload.clone(),
+            scope: request.scope.clone(),
+            action: request.action,
+            resource: request.resource.clone(),
+            authorized_at: 150,
+            expires_at: 300,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl TaskLeasePort for RecordingPorts {
+    async fn dispatch(
+        &self,
+        _request: &TaskLeaseDispatchRequest,
+    ) -> Result<TaskLeaseGrant, TaskLeaseError> {
+        Err(TaskLeaseError::Invalid(
+            "unused in security gate".to_string(),
+        ))
+    }
+
+    async fn renew(
+        &self,
+        _request: &TaskLeaseRenewRequest,
+    ) -> Result<TaskLeaseGrant, TaskLeaseError> {
+        Err(TaskLeaseError::Invalid(
+            "unused in security gate".to_string(),
+        ))
+    }
+
+    async fn release(
+        &self,
+        _request: &TaskLeaseCloseRequest,
+    ) -> Result<TaskLeaseGrant, TaskLeaseError> {
+        Err(TaskLeaseError::Invalid(
+            "unused in security gate".to_string(),
+        ))
+    }
+
+    async fn cancel(
+        &self,
+        _request: &TaskLeaseCloseRequest,
+    ) -> Result<TaskLeaseGrant, TaskLeaseError> {
+        Err(TaskLeaseError::Invalid(
+            "unused in security gate".to_string(),
+        ))
+    }
+
+    async fn validate_claim(
+        &self,
+        requested: &TaskLeaseClaim,
+        observed_at: i64,
+    ) -> Result<TaskLeaseGrant, TaskLeaseError> {
+        self.record("lease");
+        if self.failure == Some(FailureStage::Lease) {
+            return Err(TaskLeaseError::Rejected {
+                reason: agentd_core::ports::TaskLeaseRejectionReason::StaleFencingToken,
+                message: "scripted lease failure".to_string(),
+            });
+        }
+        assert_eq!(requested, &claim());
+        assert_eq!(observed_at, 150);
+        Ok(lease_grant())
+    }
+
+    async fn expire_due(&self, _observed_at: i64) -> Result<u64, TaskLeaseError> {
+        Err(TaskLeaseError::Invalid(
+            "unused in security gate".to_string(),
+        ))
+    }
+}
+
+#[async_trait::async_trait]
+impl AttemptCapabilityPort for RecordingPorts {
+    async fn issue_capability(
+        &self,
+        _request: &CapabilityIssueRequest,
+    ) -> Result<(CapabilityToken, CapabilityAdmission), SecurityError> {
+        Err(SecurityError::Invalid(
+            "production gate validates pre-issued capabilities".to_string(),
+        ))
+    }
+
+    async fn validate_capability(
+        &self,
+        request: &CapabilityValidationRequest,
+    ) -> Result<CapabilityAdmission, SecurityError> {
+        self.record("capability");
+        self.fail_security(FailureStage::Capability)?;
+        Ok(CapabilityAdmission {
+            id: AttemptCapabilityId::new(),
+            workload: workload(),
+            scope: request.scope.clone(),
+            action: request.action,
+            resource: request.resource.clone(),
+            issued_at: 140,
+            expires_at: 300,
+        })
+    }
+
+    async fn revoke_capability(
+        &self,
+        _id: &AttemptCapabilityId,
+        _observed_at: i64,
+    ) -> Result<(), SecurityError> {
+        Err(SecurityError::Invalid(
+            "unused in security gate".to_string(),
+        ))
+    }
+}
+
+#[async_trait::async_trait]
+impl SecretBrokerPort for RecordingPorts {
+    async fn checkout_secret(
+        &self,
+        request: &SecretCheckoutRequest,
+    ) -> Result<SecretLease, SecurityError> {
+        self.record("secret");
+        self.fail_security(FailureStage::Secret)?;
+        Ok(SecretLease {
+            selector: request.selector.clone(),
+            material: SecretMaterial::new(b"transient-secret".to_vec()),
+            expires_at: 250,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl ExecutionSandboxPort for RecordingPorts {
+    async fn prepare_sandbox(
+        &self,
+        request: &SandboxPrepareRequest,
+    ) -> Result<PreparedSandbox, SecurityError> {
+        self.record("sandbox");
+        self.fail_security(FailureStage::SandboxPrepare)?;
+        Ok(PreparedSandbox {
+            sandbox_id: "sb_enterprise".to_string(),
+            profile: request.profile.clone(),
+            created_at: 150,
+            expires_at: 300,
+        })
+    }
+
+    async fn execute_sandbox(
+        &self,
+        _request: &SandboxExecuteRequest,
+    ) -> Result<SandboxExecution, SecurityError> {
+        self.fail_security(FailureStage::SandboxExecute)?;
+        Ok(SandboxExecution {
+            exit_code: 0,
+            stdout: b"ok".to_vec(),
+            stderr: Vec::new(),
+        })
+    }
+
+    async fn cleanup_sandbox(&self, request: &SandboxCleanupRequest) -> Result<(), SecurityError> {
+        self.record("teardown");
+        assert_eq!(request.sandbox_id, "sb_enterprise");
+        if self.failure == Some(FailureStage::Teardown) {
+            Err(SecurityError::Denied(
+                SecurityDenialReason::SandboxCleanupFailed,
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ExecutionAuditPort for RecordingPorts {
+    async fn append_audit(
+        &self,
+        request: &ExecutionAuditAppend,
+    ) -> Result<ExecutionAuditRecord, ExecutionEvidenceError> {
+        self.record("audit");
+        assert!(!request.payload.to_string().contains("transient-secret"));
+        assert!(!request.payload.to_string().contains("capability-token"));
+        if self.failure == Some(FailureStage::Audit) {
+            return Err(ExecutionEvidenceError::Unavailable(
+                "scripted audit failure".to_string(),
+            ));
+        }
+        Ok(ExecutionAuditRecord {
+            append: request.clone(),
+            sequence: 1,
+            recorded_at: request.occurred_at,
+        })
+    }
+
+    async fn read_audit(
+        &self,
+        _request: &AuditReadRequest,
+    ) -> Result<AuditPage, ExecutionEvidenceError> {
+        Ok(AuditPage {
+            records: Vec::new(),
+            next_after_sequence: None,
+        })
+    }
+}
+
+fn providers(ports: &Arc<RecordingPorts>) -> EnterpriseSecurityProviders {
+    EnterpriseSecurityProviders::new(
+        Arc::clone(ports) as Arc<dyn WorkloadIdentityPort>,
+        Arc::clone(ports) as Arc<dyn ExecutionSecurityScopePort>,
+        Arc::clone(ports) as Arc<dyn TenantAuthorizationPort>,
+        Arc::clone(ports) as Arc<dyn TaskLeasePort>,
+        Arc::clone(ports) as Arc<dyn AttemptCapabilityPort>,
+        Arc::clone(ports) as Arc<dyn SecretBrokerPort>,
+        Arc::clone(ports) as Arc<dyn ExecutionSandboxPort>,
+        Arc::clone(ports) as Arc<dyn ExecutionAuditPort>,
+    )
+}
+
+fn authority_key() -> AuthorityKey {
+    AuthorityKey::new("specify:enterprise-test").expect("authority key")
+}
+
+fn organization() -> OrganizationRef {
+    OrganizationRef::new(authority_key(), "org-a", "1").expect("organization")
+}
+
+fn project() -> ProjectRef {
+    ProjectRef::new(authority_key(), "project-a", "2").expect("project")
+}
+
+fn snapshot() -> ProjectExecutionSnapshotRef {
+    ProjectExecutionSnapshotRef::new(authority_key(), "snapshot-a", "3").expect("snapshot")
+}
+
+fn worker_incarnation() -> WorkerIncarnationId {
+    WorkerIncarnationId::from_string("wi_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+}
+
+fn claim() -> TaskLeaseClaim {
+    TaskLeaseClaim {
+        execution_task_id: TaskRunId::from_string("tr_01ARZ3NDEKTSV4RRFFQ69G5FAW"),
+        worker_incarnation_id: worker_incarnation(),
+        lease_id: LeaseId::from_string("ls_01ARZ3NDEKTSV4RRFFQ69G5FAX"),
+        fencing_token: FencingToken::new(7).expect("fencing token"),
+    }
+}
+
+fn lease_grant() -> TaskLeaseGrant {
+    TaskLeaseGrant {
+        lease_id: claim().lease_id,
+        execution_task_id: claim().execution_task_id,
+        worker_incarnation_id: worker_incarnation(),
+        fencing_token: FencingToken::new(7).expect("fencing token"),
+        status: LeaseStatus::Active,
+        acquired_at: 100,
+        expires_at: 300,
+        renewed_at: None,
+        terminal_at: None,
+        terminal_reason: None,
+        record_version: 1,
+    }
+}
+
+fn workload() -> AuthenticatedWorkload {
+    AuthenticatedWorkload {
+        spiffe_uri: format!("spiffe://agents.example/worker/{}", worker_incarnation()),
+        role: WorkloadRole::Worker,
+        trust_domain: "agents.example".to_string(),
+        certificate_sha256: "a".repeat(64),
+        not_before: 100,
+        not_after: 300,
+        worker_id: Some(WorkerId::from_string("wk_01ARZ3NDEKTSV4RRFFQ69G5FAY")),
+        worker_incarnation_id: Some(worker_incarnation()),
+    }
+}
+
+fn scope() -> ExecutionSecurityScope {
+    ExecutionSecurityScope {
+        authority_key: authority_key(),
+        organization_ref: organization(),
+        project_ref: project(),
+        execution_snapshot_ref: snapshot(),
+        rbac_policy_version_ref: RbacPolicyVersionRef::new(authority_key(), "rbac-a", "4")
+            .expect("rbac ref"),
+        worker_incarnation_id: worker_incarnation(),
+        task_lease_claim: claim(),
+        sandbox_profile_id: "oci-restricted-v1".to_string(),
+        egress_profile_id: "deny-all-v1".to_string(),
+        policy_revocation_epoch: 9,
+        valid_until: 280,
+        audit_context: SecurityAuditContext {
+            execution_run_id: RunId::from_string("r_01ARZ3NDEKTSV4RRFFQ69G5FAZ"),
+            snapshot_content_sha256: "b".repeat(64),
+            target_repository_id: "repository-a".to_string(),
+            target_base_commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
+        },
+    }
+}
+
+fn execution_resource() -> ProtectedResource {
+    ProtectedResource {
+        organization_ref: organization(),
+        project_ref: project(),
+        execution_snapshot_ref: snapshot(),
+        kind: ProtectedResourceKind::Execution,
+    }
+}
+
+fn profile() -> ExecutionSandboxProfile {
+    ExecutionSandboxProfile {
+        profile_id: "oci-restricted-v1".to_string(),
+        runtime: OciSandboxRuntime::Docker,
+        image_digest: format!("sha256:{}", "c".repeat(64)),
+        root_filesystem: SandboxRootFilesystem::ReadOnly,
+        workspace: SandboxWorkspace::Ephemeral,
+        mounts: vec![SandboxMount {
+            source_id: "input-bundle".to_string(),
+            target: "/workspace/input".to_string(),
+            access: SandboxMountAccess::ReadOnly,
+        }],
+        linux_capabilities: SandboxLinuxCapabilities::DropAll,
+        privilege_escalation: SandboxPrivilegeEscalation::Denied,
+        seccomp_profile: "runtime-default".to_string(),
+        limits: SandboxLimits {
+            pids: 64,
+            memory_bytes: 512 * 1024 * 1024,
+            cpu_millis: 1_000,
+        },
+        tenant_cache_namespace: "specify:enterprise-test/org-a/project-a".to_string(),
+        cache_sharing: SandboxCacheSharing::TenantOnly,
+        egress: EgressPolicy::DenyAll,
+    }
+}
+
+fn operation() -> EnterpriseWorkerOperation {
+    EnterpriseWorkerOperation {
+        identity_request: WorkloadIdentityRequest {
+            peer_certificates_der: vec![vec![1, 2, 3]],
+            observed_at: 150,
+        },
+        scope_request: ExecutionScopeResolveRequest {
+            execution_task_id: claim().execution_task_id,
+            resource: execution_resource(),
+            audit_context: scope().audit_context,
+            observed_at: 150,
+        },
+        sandbox_prepare_token: CapabilityToken::new([1; 32]),
+        sandbox_execute_token: CapabilityToken::new([2; 32]),
+        secret: Some(EnterpriseSecretRequest {
+            selector: SecretSelector::new("repository/app-token").expect("secret selector"),
+            capability_token: CapabilityToken::new([3; 32]),
+        }),
+        profile: profile(),
+        argv: vec!["cargo".to_string(), "test".to_string()],
+        env: BTreeMap::from([("CI".to_string(), "1".to_string())]),
+        observed_at: 150,
+    }
+}
+
+fn configured_auth() -> AuthConfig {
+    AuthConfig {
+        api_token: Some("compatibility-listener-disabled".to_string()),
+        agent_token_mode: AgentTokenMode::Hard,
+        agent_tokens: BTreeMap::new(),
+    }
+}
+
+async fn assert_failure_stops(failure: FailureStage, expected_calls: Vec<&'static str>) {
+    let ports = Arc::new(RecordingPorts::new(Some(failure)));
+    let runtime = build_security_runtime(
+        SecurityRuntimeMode::Enterprise,
+        &configured_auth(),
+        Some(providers(&ports)),
+    )
+    .expect("enterprise composition");
+    let SecurityRuntime::Enterprise(pipeline) = runtime else {
+        panic!("enterprise mode must build the enterprise pipeline");
+    };
+
+    let error = Box::pin(pipeline.execute(operation()))
+        .await
+        .expect_err("scripted stage failure must fail closed");
+    assert_eq!(
+        ports.calls(),
+        expected_calls,
+        "failure at {failure:?}: {error}"
+    );
+}
+
+fn expected_failure_calls(failure: FailureStage) -> Vec<&'static str> {
+    let ordered = [
+        "identity",
+        "scope",
+        "authorization",
+        "lease",
+        "capability",
+        "secret",
+        "sandbox",
+    ];
+    let prefix_len = match failure {
+        FailureStage::Identity => 1,
+        FailureStage::Scope => 2,
+        FailureStage::Authorization => 3,
+        FailureStage::Lease => 4,
+        FailureStage::Capability => 5,
+        FailureStage::Secret => 6,
+        FailureStage::SandboxPrepare
+        | FailureStage::SandboxExecute
+        | FailureStage::Audit
+        | FailureStage::Teardown => 7,
+    };
+    let mut calls = ordered[..prefix_len].to_vec();
+    calls.push("audit");
+    if matches!(
+        failure,
+        FailureStage::SandboxExecute | FailureStage::Audit | FailureStage::Teardown
+    ) {
+        calls.push("teardown");
+    }
+    calls
+}
+
+#[tokio::test]
+async fn production_security_gate_orders_checks_and_stops_on_failure() {
+    for failure in [
+        FailureStage::Identity,
+        FailureStage::Scope,
+        FailureStage::Authorization,
+        FailureStage::Lease,
+        FailureStage::Capability,
+        FailureStage::Secret,
+        FailureStage::SandboxPrepare,
+        FailureStage::SandboxExecute,
+        FailureStage::Audit,
+        FailureStage::Teardown,
+    ] {
+        assert_failure_stops(failure, expected_failure_calls(failure)).await;
+    }
+
+    let ports = Arc::new(RecordingPorts::new(None));
+    let runtime = build_security_runtime(
+        SecurityRuntimeMode::Enterprise,
+        &configured_auth(),
+        Some(providers(&ports)),
+    )
+    .expect("enterprise composition");
+    let SecurityRuntime::Enterprise(pipeline) = runtime else {
+        panic!("enterprise mode must build the enterprise pipeline");
+    };
+    let result = Box::pin(pipeline.execute(operation()))
+        .await
+        .expect("secure operation");
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(
+        ports.calls(),
+        vec![
+            "identity",
+            "scope",
+            "authorization",
+            "lease",
+            "capability",
+            "secret",
+            "sandbox",
+            "audit",
+            "teardown",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn enterprise_security_mode_rejects_missing_providers_and_open_auth() {
+    let cli = AgentdCli::try_parse_from(["agentd", "--security-mode", "enterprise"])
+        .expect("enterprise mode parses");
+    assert_eq!(cli.config.security_mode, SecurityRuntimeMode::Enterprise);
+
+    let open_ports = Arc::new(RecordingPorts::new(None));
+    let open_error = build_security_runtime(
+        SecurityRuntimeMode::Enterprise,
+        &AuthConfig::open(),
+        Some(providers(&open_ports)),
+    )
+    .expect_err("enterprise mode rejects open auth before composition");
+    assert!(open_error.to_string().contains("open_auth"));
+    assert!(open_ports.calls().is_empty());
+
+    for kind in SecurityProviderKind::ALL {
+        let ports = Arc::new(RecordingPorts::new(None));
+        let selected = providers(&ports).without(kind);
+        let error = build_security_runtime(
+            SecurityRuntimeMode::Enterprise,
+            &configured_auth(),
+            Some(selected),
+        )
+        .expect_err("missing provider must fail startup");
+        assert!(
+            error.to_string().contains(kind.as_str()),
+            "missing provider error must name {}: {error}",
+            kind.as_str()
+        );
+        assert!(ports.calls().is_empty());
+    }
+
+    let missing_all =
+        build_security_runtime(SecurityRuntimeMode::Enterprise, &configured_auth(), None)
+            .expect_err("enterprise mode requires explicit providers");
+    assert!(missing_all.to_string().contains("workload_identity"));
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve free port");
+    let port = probe.local_addr().expect("probe address").port();
+    drop(probe);
+    let db_path = temp.path().join("enterprise-must-not-open.db");
+    let daemon_error = daemon::serve(DaemonConfig {
+        security_mode: SecurityRuntimeMode::Enterprise,
+        db_path: db_path.clone(),
+        port,
+        workflows_dir: PathBuf::from("workflows"),
+        repo_dir: PathBuf::from("."),
+        worktree_base: temp.path().join("worktrees"),
+        log_level: "info".to_string(),
+        api_token: Some("closed-listener".to_string()),
+        agent_tokens: Vec::new(),
+        agent_token_mode: "hard".to_string(),
+    })
+    .await
+    .expect_err("missing enterprise providers reject daemon startup");
+    assert!(daemon_error.to_string().contains("workload_identity"));
+    assert!(!db_path.exists(), "startup must fail before opening SQLite");
+    let _still_free = std::net::TcpListener::bind(("127.0.0.1", port))
+        .expect("startup must fail before binding the HTTP listener");
+
+    let standalone =
+        build_security_runtime(SecurityRuntimeMode::Standalone, &AuthConfig::open(), None)
+            .expect("explicit standalone mode preserves compatibility behavior");
+    assert!(matches!(standalone, SecurityRuntime::Standalone));
+}

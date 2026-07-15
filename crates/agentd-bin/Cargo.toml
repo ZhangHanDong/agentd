@@ -33,6 +33,8 @@ agentd-surface = { path = "../agentd-surface" }
 agentd-tmux = { path = "../agentd-tmux" }
 async-trait = "0.1"
 sha2 = "0.10"
+hex = { workspace = true }
+thiserror = { workspace = true }
 serde_json = { workspace = true }
 clap = { workspace = true }
 axum = { workspace = true }

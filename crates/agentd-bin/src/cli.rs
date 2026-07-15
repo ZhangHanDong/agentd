@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use agentd_surface::http::{AgentTokenMode, AuthConfig};
 use clap::{Args, Parser, Subcommand};
 
+use crate::security::SecurityRuntimeMode;
+
 /// Top-level `agentd` CLI.
 #[derive(Debug, Parser)]
 #[command(name = "agentd", version, about = "The agentd local workflow daemon")]
@@ -238,6 +240,10 @@ pub struct MatrixClientBridgePreflightArgs {
 /// The agentd workflow daemon.
 #[derive(Debug, Args)]
 pub struct DaemonConfig {
+    /// Execution-security composition mode.
+    #[arg(long, value_enum, default_value = "standalone", global = true)]
+    pub security_mode: SecurityRuntimeMode,
+
     /// Path to the `SQLite` database (migrations apply on connect).
     #[arg(long, default_value = "agentd.db", global = true)]
     pub db_path: PathBuf,
@@ -425,6 +431,10 @@ mod tests {
         assert_eq!(PathBuf::from("agentd.db"), cli.config.db_path);
         assert_eq!(8787, cli.config.port);
         assert_eq!(PathBuf::from(".agentd/worktrees"), cli.config.worktree_base);
+        assert_eq!(
+            super::SecurityRuntimeMode::Standalone,
+            cli.config.security_mode
+        );
     }
 
     #[test]

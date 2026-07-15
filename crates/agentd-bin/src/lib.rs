@@ -12,6 +12,7 @@ pub mod daemon;
 pub mod host;
 pub mod matrix_bridge;
 pub mod mempal;
+pub mod security;
 pub mod stdio_mcp;
 
 pub use cli::{
@@ -21,3 +22,4 @@ pub use cli::{
 pub use clock::SystemClock;
 pub use host::ProductionRunHost;
 pub use mempal::OfflineMempal;
+pub use security::SecurityRuntimeMode;

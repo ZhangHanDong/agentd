@@ -103,6 +103,7 @@ fn request(initial_prompt: Option<&str>) -> SpawnRequest {
 
 fn config_with_relative_paths() -> DaemonConfig {
     DaemonConfig {
+        security_mode: agentd_bin::SecurityRuntimeMode::Standalone,
         db_path: PathBuf::from("state's dir/agentd.db"),
         port: 8787,
         workflows_dir: PathBuf::from("workflows"),
