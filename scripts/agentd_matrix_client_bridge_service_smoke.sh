@@ -502,10 +502,18 @@ build_common_args() {
     if [[ -n "$MATRIX_SERVER_NAME" ]]; then
         AGENTD_COMMON_ARGS+=("--matrix-server-name" "$MATRIX_SERVER_NAME")
     fi
-    append_repeated_args "--matrix-agent" "${MATRIX_AGENTS[@]}"
-    append_repeated_args "--matrix-skip-agent" "${MATRIX_SKIP_AGENTS[@]}"
-    append_repeated_args "--matrix-trusted-inviter" "${MATRIX_TRUSTED_INVITERS[@]}"
-    append_repeated_args "--matrix-ignore-sender" "${MATRIX_IGNORED_SENDERS[@]}"
+    if (( ${#MATRIX_AGENTS[@]} > 0 )); then
+        append_repeated_args "--matrix-agent" "${MATRIX_AGENTS[@]}"
+    fi
+    if (( ${#MATRIX_SKIP_AGENTS[@]} > 0 )); then
+        append_repeated_args "--matrix-skip-agent" "${MATRIX_SKIP_AGENTS[@]}"
+    fi
+    if (( ${#MATRIX_TRUSTED_INVITERS[@]} > 0 )); then
+        append_repeated_args "--matrix-trusted-inviter" "${MATRIX_TRUSTED_INVITERS[@]}"
+    fi
+    if (( ${#MATRIX_IGNORED_SENDERS[@]} > 0 )); then
+        append_repeated_args "--matrix-ignore-sender" "${MATRIX_IGNORED_SENDERS[@]}"
+    fi
     if [[ -n "$MATRIX_PUPPET_STATE" ]]; then
         AGENTD_COMMON_ARGS+=("--matrix-puppet-state" "$MATRIX_PUPPET_STATE")
     fi

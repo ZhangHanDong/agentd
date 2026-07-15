@@ -33,6 +33,8 @@ contracts remain validated without being misreported as implemented.
 - Bootstrap the existing reconciliation PR at the commit that introduces P156.
   Once the base contains P156, GitHub checks audit the complete base-to-head
   range; main pushes audit the event's before-to-head range.
+- Run Matrix service smoke tests with the macOS system Bash so empty repeatable
+  option arrays remain portable under Bash 3.2 nounset semantics.
 
 ## Boundaries
 
@@ -51,10 +53,12 @@ contracts remain validated without being misreported as implemented.
 - crates/agentctl/src/parity.rs
 - crates/agentctl/tests/parity_cli.rs
 - crates/agentd-bin/tests/contract.rs
+- crates/agentd-bin/tests/matrix_service_smoke.rs
 - crates/agentd-bin/tests/real_execute_smoke.rs
 - crates/agentd-core/tests/ci_clippy.rs
 - crates/agentd-core/tests/spec_guard.rs
 - scripts/agentd_guard_changed_contract.sh
+- scripts/agentd_matrix_client_bridge_service_smoke.sh
 - scripts/agentd_verify_spec.sh
 - scripts/agentd_real_execute_smoke.sh
 - scripts/check.sh
@@ -136,3 +140,16 @@ Scenario: changed implementation contract governs the complete delta
   And range verification includes follow-up commits after P156 adoption
   And lifecycle success passes the guard
   And lifecycle failure fails the guard
+
+Scenario: Matrix service smoke is portable to macOS system Bash
+  Test:
+    Package: agentd-bin
+    Filter: matrix_service_smoke_execute_invokes_preflight_then_service_and_writes_evidence
+  Level: shell integration
+  Test Double: fake agentd service executable and temporary state
+  Given macOS runs the smoke script with its system Bash 3.2 and nounset enabled
+  And optional repeatable Matrix arguments are empty
+  When the execute smoke builds the shared service arguments
+  Then empty arrays are not expanded under nounset
+  And preflight runs before service execution
+  And the smoke writes its expected evidence

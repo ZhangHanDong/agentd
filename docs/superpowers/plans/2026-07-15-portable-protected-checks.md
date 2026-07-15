@@ -17,5 +17,7 @@
    then use the full PR range and push event range for subsequent checks.
 8. Pin agent-spec 1.0.0 in local and GitHub gates, strengthen P130 ordering
    coverage, and reject parent components in absolute parity sources.
-9. Run targeted tests, P156 lifecycle, changed-contract guard, the complete spec
+9. Run Matrix service smoke tests with the macOS system Bash and guard empty
+   repeatable option arrays before expansion under Bash 3.2 nounset semantics.
+10. Run targeted tests, P156 lifecycle, changed-contract guard, the complete spec
    audit, and full workspace gates; push and monitor PR #21 without merging it.

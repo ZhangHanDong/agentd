@@ -20,7 +20,12 @@ fn run_script(args: &[&str]) -> Output {
 }
 
 fn run_script_with_env(args: &[&str], envs: &[(&str, &str)]) -> Output {
-    let mut command = Command::new("bash");
+    let shell = if cfg!(target_os = "macos") {
+        "/bin/bash"
+    } else {
+        "bash"
+    };
+    let mut command = Command::new(shell);
     command
         .arg(script_path())
         .args(args)
