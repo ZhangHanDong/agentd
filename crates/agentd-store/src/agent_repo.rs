@@ -190,7 +190,7 @@ pub async fn register_agent(
 }
 
 pub async fn list_agents(pool: &SqlitePool) -> Result<Vec<AgentRecord>, StoreError> {
-    let rows = sqlx::query(agent_select_sql("WHERE name IS NOT NULL ORDER BY name").as_str())
+    let rows = sqlx::query(agent_select_sql("WHERE name IS NOT NULL ORDER BY name"))
         .fetch_all(pool)
         .await?;
     Ok(rows.iter().map(row_to_agent).collect())
@@ -198,7 +198,7 @@ pub async fn list_agents(pool: &SqlitePool) -> Result<Vec<AgentRecord>, StoreErr
 
 pub async fn get_agent(pool: &SqlitePool, name: &str) -> Result<Option<AgentRecord>, StoreError> {
     let name = normalize_name(name)?;
-    let row = sqlx::query(agent_select_sql("WHERE name = ? OR id = ?").as_str())
+    let row = sqlx::query(agent_select_sql("WHERE name = ? OR id = ?"))
         .bind(&name)
         .bind(&name)
         .fetch_optional(pool)
@@ -498,12 +498,12 @@ fn local_mxid(name: &str) -> String {
     format!("agentd-local:{name}")
 }
 
-fn agent_select_sql(tail: &str) -> String {
-    format!(
+fn agent_select_sql(tail: &'static str) -> sqlx::AssertSqlSafe<String> {
+    sqlx::AssertSqlSafe(format!(
         "SELECT id, name, role, capability, runtime, model, tmux_target, home_dir, \
          workdir, state_dir, server, status, offline_reason, last_seen_at, \
          registered_at, updated_at, runtime_profile, runtime_state FROM agents {tail}"
-    )
+    ))
 }
 
 fn row_to_agent(row: &sqlx::sqlite::SqliteRow) -> AgentRecord {

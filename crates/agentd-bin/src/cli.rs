@@ -289,12 +289,11 @@ impl DaemonConfig {
         });
         let mut agent_tokens = BTreeMap::new();
         for assignment in &self.agent_tokens {
-            if let Some((name, token)) = assignment.split_once('=') {
-                if let (Some(name), Some(token)) =
+            if let Some((name, token)) = assignment.split_once('=')
+                && let (Some(name), Some(token)) =
                     (clean_token(Some(name)), clean_token(Some(token)))
-                {
-                    agent_tokens.insert(name, token);
-                }
+            {
+                agent_tokens.insert(name, token);
             }
         }
         let agent_token_mode = match self.agent_token_mode.trim().to_ascii_lowercase().as_str() {

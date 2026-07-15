@@ -117,7 +117,7 @@ async fn migration_adds_message_attachment_columns() {
         ("direct_messages", "attachments_json"),
         ("group_messages", "attachments_json"),
     ] {
-        let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!("PRAGMA table_info({table})")))
             .fetch_all(store.pool())
             .await
             .expect("message table columns");

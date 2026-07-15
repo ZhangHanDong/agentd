@@ -163,17 +163,17 @@ async fn open_store() -> (SqliteStore, tempfile::TempDir) {
     (store, dir)
 }
 
-async fn message_count(store: &SqliteStore, table: &str) -> i64 {
-    let sql = format!("SELECT COUNT(*) AS count FROM {table}");
-    sqlx::query_scalar::<_, i64>(&sql)
+async fn message_count(store: &SqliteStore, table: &'static str) -> i64 {
+    let sql = sqlx::AssertSqlSafe(format!("SELECT COUNT(*) AS count FROM {table}"));
+    sqlx::query_scalar::<_, i64>(sql)
         .fetch_one(store.pool())
         .await
         .expect("count rows")
 }
 
-async fn compatibility_count(store: &SqliteStore, table: &str) -> i64 {
-    let sql = format!("SELECT COUNT(*) AS count FROM {table}");
-    sqlx::query_scalar::<_, i64>(&sql)
+async fn compatibility_count(store: &SqliteStore, table: &'static str) -> i64 {
+    let sql = sqlx::AssertSqlSafe(format!("SELECT COUNT(*) AS count FROM {table}"));
+    sqlx::query_scalar::<_, i64>(sql)
         .fetch_one(store.pool())
         .await
         .expect("count compatibility rows")

@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+#[cfg(not(feature = "matrix-sdk-adapter"))]
+use agentd_bin::matrix_bridge::run_matrix_sdk_bridge_service;
 use agentd_bin::matrix_bridge::{
     matrix_client_bridge_service_config, run_matrix_client_bridge_service,
-    run_matrix_sdk_bridge_service,
 };
 use agentd_bin::{AgentdCli, AgentdCommand, DaemonConfig, MatrixClientBridgeServiceArgs};
 use agentd_matrix::{

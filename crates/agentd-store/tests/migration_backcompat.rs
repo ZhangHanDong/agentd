@@ -28,7 +28,7 @@ async fn raw_pool() -> SqlitePool {
 async fn apply(pool: &SqlitePool, file: &str) {
     let sql = std::fs::read_to_string(migrations_dir().join(file))
         .unwrap_or_else(|e| panic!("read migration {file}: {e}"));
-    sqlx::raw_sql(&sql)
+    sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
         .execute(pool)
         .await
         .unwrap_or_else(|e| panic!("apply migration {file}: {e}"));
@@ -235,10 +235,11 @@ async fn enterprise_identity_migration_preserves_base_rows() {
         "runtime_sessions",
         "runtime_attempts",
     ] {
-        let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
-            .fetch_one(&pool)
-            .await
-            .expect("enterprise row count");
+        let count: i64 =
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT COUNT(*) FROM {table}")))
+                .fetch_one(&pool)
+                .await
+                .expect("enterprise row count");
         assert_eq!(count, 0, "{table} must start empty");
     }
     let version: String = sqlx::query_scalar("SELECT value FROM schema_meta WHERE key = 'version'")
@@ -332,10 +333,11 @@ async fn enterprise_artifact_audit_migration_preserves_existing_rows() {
         "artifact_certification_refs",
         "execution_audit_events",
     ] {
-        let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
-            .fetch_one(&pool)
-            .await
-            .unwrap_or_else(|err| panic!("count {table}: {err}"));
+        let count: i64 =
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT COUNT(*) FROM {table}")))
+                .fetch_one(&pool)
+                .await
+                .unwrap_or_else(|err| panic!("count {table}: {err}"));
         assert_eq!(count, 0, "{table} must start empty");
     }
     let version: String = sqlx::query_scalar("SELECT value FROM schema_meta WHERE key='version'")
@@ -459,10 +461,11 @@ async fn task_lease_migration_preserves_enterprise_and_compatibility_rows() {
     assert_eq!(after, before);
 
     for table in ["execution_task_leases", "execution_task_lease_heads"] {
-        let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
-            .fetch_one(&pool)
-            .await
-            .expect("P270 table count");
+        let count: i64 =
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT COUNT(*) FROM {table}")))
+                .fetch_one(&pool)
+                .await
+                .expect("P270 table count");
         assert_eq!(count, 0, "{table} starts empty");
     }
     let ticket_promotions: i64 = sqlx::query_scalar(

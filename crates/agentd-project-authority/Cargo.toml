@@ -6,6 +6,9 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+# This internal authority boundary is released with agentd, not independently.
+# Keeping it private also makes its version-less workspace path dependency explicit.
+publish = false
 
 [lints]
 workspace = true

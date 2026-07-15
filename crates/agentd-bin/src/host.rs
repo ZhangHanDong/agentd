@@ -607,12 +607,11 @@ impl ProductionRunHost {
             }
             RunProgress::Ignored { .. } => return Ok(()),
         };
-        if kind == "run_parked" {
-            if let Some(scheduler) = self.scheduler_event_allocations(run_id).await? {
-                if let Some(object) = payload.as_object_mut() {
-                    object.insert("scheduler".to_string(), scheduler);
-                }
-            }
+        if kind == "run_parked"
+            && let Some(scheduler) = self.scheduler_event_allocations(run_id).await?
+            && let Some(object) = payload.as_object_mut()
+        {
+            object.insert("scheduler".to_string(), scheduler);
         }
         let payload = payload.to_string();
         // Dedup consecutive same-node re-parks (P1 re-park-noise gap): a fan-out
@@ -620,14 +619,13 @@ impl ProductionRunHost {
         // recent event is already a `run_parked` for this same node, emit nothing
         // — no durable row AND no broadcast. Distinct-node parks and terminals
         // (kind != "run_parked") always fall through.
-        if kind == "run_parked" {
-            if let Some((last_kind, last_payload)) =
+        if kind == "run_parked"
+            && let Some((last_kind, last_payload)) =
                 event_repo::last(self.store.pool(), run_id).await?
-            {
-                if last_kind == "run_parked" && last_payload == payload {
-                    return Ok(());
-                }
-            }
+            && last_kind == "run_parked"
+            && last_payload == payload
+        {
+            return Ok(());
         }
         // DUAL-WRITE: persist (durable/audit) then broadcast (the live SSE tail).
         let seq = event_repo::append(self.store.pool(), run_id, kind, &payload).await?;

@@ -162,7 +162,7 @@ pub async fn get_task(
     pool: &SqlitePool,
     id: &str,
 ) -> Result<Option<AgentChatTaskRecord>, StoreError> {
-    let row = sqlx::query(task_select_sql("WHERE id = ?").as_str())
+    let row = sqlx::query(task_select_sql("WHERE id = ?"))
         .bind(id)
         .fetch_optional(pool)
         .await?;
@@ -173,7 +173,7 @@ pub async fn list_tasks(
     pool: &SqlitePool,
     filters: AgentChatTaskFilters,
 ) -> Result<Vec<AgentChatTaskRecord>, StoreError> {
-    let rows = sqlx::query(task_select_sql("ORDER BY rowid").as_str())
+    let rows = sqlx::query(task_select_sql("ORDER BY rowid"))
         .fetch_all(pool)
         .await?;
     let statuses = filters
@@ -471,13 +471,13 @@ async fn upsert_task(pool: &SqlitePool, task: &AgentChatTaskRecord) -> Result<()
     Ok(())
 }
 
-fn task_select_sql(tail: &str) -> String {
-    format!(
+fn task_select_sql(tail: &'static str) -> sqlx::AssertSqlSafe<String> {
+    sqlx::AssertSqlSafe(format!(
         "SELECT id, title, description, status, priority, granularity, assignee, created_by, \
          created_at, updated_at, started_at, completed_at, heartbeat_at, waiting_reason, \
          waiting_until, parent_id, labels_json, health_json, comments_json \
          FROM agent_chat_tasks {tail}"
-    )
+    ))
 }
 
 fn row_to_task(row: &sqlx::sqlite::SqliteRow) -> Result<AgentChatTaskRecord, StoreError> {

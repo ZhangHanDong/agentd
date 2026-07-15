@@ -346,10 +346,9 @@ pub async fn read_direct_inbox(
 ) -> Result<Vec<DirectMessageRecord>, StoreError> {
     let agent_id = required(agent_id.to_string(), "agent id required")?;
     let mut tx = pool.begin().await?;
-    let rows = sqlx::query(
-        direct_message_select_sql("WHERE to_agent = ? AND read_at IS NULL ORDER BY ts, id")
-            .as_str(),
-    )
+    let rows = sqlx::query(direct_message_select_sql(
+        "WHERE to_agent = ? AND read_at IS NULL ORDER BY ts, id",
+    ))
     .bind(&agent_id)
     .fetch_all(&mut *tx)
     .await?;
@@ -446,11 +445,12 @@ pub async fn read_group_messages(
     let group = required(group.to_string(), "group required")?;
     let agent_id = required(agent_id.to_string(), "agent id required")?;
     let mut tx = pool.begin().await?;
-    let rows =
-        sqlx::query(group_message_select_sql("WHERE group_name = ? ORDER BY ts, rowid").as_str())
-            .bind(&group)
-            .fetch_all(&mut *tx)
-            .await?;
+    let rows = sqlx::query(group_message_select_sql(
+        "WHERE group_name = ? ORDER BY ts, rowid",
+    ))
+    .bind(&group)
+    .fetch_all(&mut *tx)
+    .await?;
     let messages = rows
         .iter()
         .map(row_to_group_message)
@@ -533,7 +533,7 @@ async fn get_direct_message(
     pool: &SqlitePool,
     id: &str,
 ) -> Result<Option<DirectMessageRecord>, StoreError> {
-    let row = sqlx::query(direct_message_select_sql("WHERE id = ?").as_str())
+    let row = sqlx::query(direct_message_select_sql("WHERE id = ?"))
         .bind(id)
         .fetch_optional(pool)
         .await?;
@@ -544,7 +544,7 @@ async fn get_group_message(
     pool: &SqlitePool,
     id: &str,
 ) -> Result<Option<GroupMessageRecord>, StoreError> {
-    let row = sqlx::query(group_message_select_sql("WHERE id = ?").as_str())
+    let row = sqlx::query(group_message_select_sql("WHERE id = ?"))
         .bind(id)
         .fetch_optional(pool)
         .await?;
@@ -566,13 +566,10 @@ async fn read_group_mentions(
     options: InboxReadOptions,
 ) -> Result<Vec<GroupMessageRecord>, StoreError> {
     let mut tx = pool.begin().await?;
-    let rows = sqlx::query(
-        group_message_select_sql(
-            "WHERE id NOT IN (SELECT message_id FROM group_mention_reads WHERE agent_name = ?) \
-             ORDER BY ts, rowid",
-        )
-        .as_str(),
-    )
+    let rows = sqlx::query(group_message_select_sql(
+        "WHERE id NOT IN (SELECT message_id FROM group_mention_reads WHERE agent_name = ?) \
+         ORDER BY ts, rowid",
+    ))
     .bind(agent_id)
     .fetch_all(&mut *tx)
     .await?;
@@ -606,20 +603,20 @@ async fn read_group_mentions(
     Ok(messages)
 }
 
-fn direct_message_select_sql(tail: &str) -> String {
-    format!(
+fn direct_message_select_sql(tail: &'static str) -> sqlx::AssertSqlSafe<String> {
+    sqlx::AssertSqlSafe(format!(
         "SELECT id, ts, from_agent, to_agent, message_type, priority, summary, full, \
          reply_to, source, source_room, sender_mxid, trust_level, from_id, \
          schema_json, attachments_json, read_at \
          FROM direct_messages {tail}"
-    )
+    ))
 }
 
-fn group_message_select_sql(tail: &str) -> String {
-    format!(
+fn group_message_select_sql(tail: &'static str) -> sqlx::AssertSqlSafe<String> {
+    sqlx::AssertSqlSafe(format!(
         "SELECT id, ts, from_agent, group_name, message_type, priority, summary, full, \
          mentions_json, reply_to, schema_json, source, attachments_json FROM group_messages {tail}"
-    )
+    ))
 }
 
 fn row_to_message(row: &sqlx::sqlite::SqliteRow) -> Result<DirectMessageRecord, StoreError> {

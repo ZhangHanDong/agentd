@@ -23,18 +23,18 @@ pub fn select_next_edge<'g, S: std::hash::BuildHasher>(
 
     // 1. condition match (source order)
     for e in &outgoing {
-        if let Some(c) = e.attr("condition") {
-            if eval_condition(c, outcome, ctx) {
-                return Some(e);
-            }
+        if let Some(c) = e.attr("condition")
+            && eval_condition(c, outcome, ctx)
+        {
+            return Some(e);
         }
     }
 
     // 2. handler-suggested preferred_label
-    if let Some(lbl) = outcome.preferred_label.as_deref() {
-        if let Some(e) = outgoing.iter().find(|e| e.attr("label") == Some(lbl)) {
-            return Some(e);
-        }
+    if let Some(lbl) = outcome.preferred_label.as_deref()
+        && let Some(e) = outgoing.iter().find(|e| e.attr("label") == Some(lbl))
+    {
+        return Some(e);
     }
 
     // 3. retry_target on Fail, only under the target's attempt ceiling

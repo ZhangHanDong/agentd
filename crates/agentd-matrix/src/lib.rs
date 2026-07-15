@@ -1595,7 +1595,7 @@ impl SdkMatrixClientConfig {
 #[cfg(feature = "matrix-sdk-adapter")]
 #[derive(Debug)]
 pub struct SdkMatrixClient {
-    client: matrix_sdk::Client,
+    client: Option<matrix_sdk::Client>,
     runtime: tokio::runtime::Runtime,
     config: SdkMatrixClientConfig,
 }
@@ -1621,7 +1621,7 @@ impl SdkMatrixClient {
         let client = client
             .map_err(|err| BridgeError::transport(format!("build Matrix SDK client: {err}")))?;
         Ok(Self {
-            client,
+            client: Some(client),
             runtime,
             config,
         })
@@ -1635,15 +1635,17 @@ impl SdkMatrixClient {
 
     /// Borrow the underlying Matrix SDK client.
     #[must_use]
-    pub const fn sdk_client(&self) -> &matrix_sdk::Client {
-        &self.client
+    pub fn sdk_client(&self) -> &matrix_sdk::Client {
+        self.client
+            .as_ref()
+            .expect("Matrix SDK client is available before drop")
     }
 
     fn sdk_room(&self, room_id: &str) -> Result<matrix_sdk::Room, BridgeError> {
         let room_id = matrix_sdk::ruma::RoomId::parse(room_id).map_err(|err| {
             BridgeError::transport(format!("invalid Matrix room id {room_id}: {err}"))
         })?;
-        self.client.get_room(&room_id).ok_or_else(|| {
+        self.sdk_client().get_room(&room_id).ok_or_else(|| {
             BridgeError::transport(format!(
                 "Matrix room {room_id} is not known to the SDK client"
             ))
@@ -1651,7 +1653,16 @@ impl SdkMatrixClient {
     }
 
     fn current_user_id(&self) -> Option<String> {
-        self.client.user_id().map(ToString::to_string)
+        self.sdk_client().user_id().map(ToString::to_string)
+    }
+}
+
+#[cfg(feature = "matrix-sdk-adapter")]
+impl Drop for SdkMatrixClient {
+    fn drop(&mut self) {
+        let client = self.client.take();
+        let _runtime_guard = self.runtime.enter();
+        drop(client);
     }
 }
 
@@ -2760,10 +2771,10 @@ fn normalize_matrix_bot_command_body(body: &str, formatted_body: Option<&str>) -
         return trimmed.to_owned();
     }
 
-    if formatted_body.is_some_and(formatted_body_starts_with_matrix_command_mention) {
-        if let Some(command_index) = trimmed.find('!') {
-            return trimmed[command_index..].trim().to_owned();
-        }
+    if formatted_body.is_some_and(formatted_body_starts_with_matrix_command_mention)
+        && let Some(command_index) = trimmed.find('!')
+    {
+        return trimmed[command_index..].trim().to_owned();
     }
 
     trimmed.to_owned()
@@ -2791,7 +2802,7 @@ fn formatted_body_starts_with_matrix_command_mention(formatted_body: &str) -> bo
 #[cfg(feature = "matrix-sdk-adapter")]
 pub fn sdk_timeline_text_messages(
     room_id: &str,
-    events: &[matrix_sdk::deserialized_responses::SyncTimelineEvent],
+    events: &[matrix_sdk::deserialized_responses::TimelineEvent],
 ) -> Vec<MatrixClientTextMessage> {
     events
         .iter()
@@ -2802,7 +2813,7 @@ pub fn sdk_timeline_text_messages(
 #[cfg(feature = "matrix-sdk-adapter")]
 fn sdk_timeline_text_message(
     room_id: &str,
-    event: &matrix_sdk::deserialized_responses::SyncTimelineEvent,
+    event: &matrix_sdk::deserialized_responses::TimelineEvent,
 ) -> Option<MatrixClientTextMessage> {
     use matrix_sdk::ruma::events::{
         AnySyncMessageLikeEvent, AnySyncTimelineEvent, SyncMessageLikeEvent,
@@ -3001,15 +3012,16 @@ impl MatrixClientPort for SdkMatrixClient {
             let device_id = matrix_sdk::ruma::OwnedDeviceId::from(
                 self.config.device_id.as_deref().unwrap_or("AGENTD"),
             );
-            let session = matrix_sdk::matrix_auth::MatrixSession {
+            let session = matrix_sdk::authentication::matrix::MatrixSession {
                 meta: matrix_sdk::SessionMeta { user_id, device_id },
-                tokens: matrix_sdk::matrix_auth::MatrixSessionTokens {
+                tokens: matrix_sdk::SessionTokens {
                     access_token: access_token.clone(),
                     refresh_token: None,
                 },
             };
+            let client = self.sdk_client().clone();
             self.runtime
-                .block_on(self.client.restore_session(session))
+                .block_on(client.restore_session(session))
                 .map_err(|err| {
                     BridgeError::transport(format!("restore Matrix SDK session: {err}"))
                 })?;
@@ -3019,8 +3031,9 @@ impl MatrixClientPort for SdkMatrixClient {
         }
 
         if let (Some(username), Some(password)) = (&self.config.username, &self.config.password) {
+            let client = self.sdk_client().clone();
             let response = self.runtime.block_on(async {
-                self.client
+                client
                     .matrix_auth()
                     .login_username(username, password)
                     .send()
@@ -3040,11 +3053,12 @@ impl MatrixClientPort for SdkMatrixClient {
         self.ensure_logged_in()?;
         let settings = matrix_sdk::config::SyncSettings::new()
             .timeout(Duration::from_millis(self.config.sync_timeout_ms));
+        let client = self.sdk_client().clone();
         let sync = self
             .runtime
-            .block_on(self.client.sync_once(settings))
+            .block_on(client.sync_once(settings))
             .map_err(|err| BridgeError::transport(format!("Matrix SDK sync_once failed: {err}")))?;
-        let sync_joined_rooms = &sync.rooms.join;
+        let sync_joined_rooms = &sync.rooms.joined;
         let text_events = sync_joined_rooms
             .iter()
             .flat_map(|(room_id, room)| {
@@ -3054,7 +3068,7 @@ impl MatrixClientPort for SdkMatrixClient {
             .collect();
 
         let joined_rooms = self
-            .client
+            .sdk_client()
             .joined_rooms()
             .into_iter()
             .map(|room| MatrixClientRoom {
@@ -3068,7 +3082,7 @@ impl MatrixClientPort for SdkMatrixClient {
             })
             .collect();
         let invites = self
-            .client
+            .sdk_client()
             .invited_rooms()
             .into_iter()
             .map(|room| MatrixClientInvite {
@@ -3091,8 +3105,9 @@ impl MatrixClientPort for SdkMatrixClient {
         let room_id = matrix_sdk::ruma::RoomId::parse(room_id).map_err(|err| {
             BridgeError::transport(format!("invalid Matrix room id {room_id}: {err}"))
         })?;
+        let client = self.sdk_client().clone();
         self.runtime
-            .block_on(self.client.join_room_by_id(&room_id))
+            .block_on(client.join_room_by_id(&room_id))
             .map_err(|err| BridgeError::transport(format!("join Matrix room {room_id}: {err}")))?;
         Ok(())
     }
@@ -3173,9 +3188,10 @@ impl MatrixClientPort for SdkMatrixClient {
         request.is_direct = true;
         request.name = Some(name.to_owned());
         request.preset = Some(create_room::v3::RoomPreset::TrustedPrivateChat);
+        let client = self.sdk_client().clone();
         let room = self
             .runtime
-            .block_on(self.client.create_room(request))
+            .block_on(client.create_room(request))
             .map_err(|err| BridgeError::transport(format!("create Matrix direct room: {err}")))?;
         Ok(room.room_id().to_string())
     }

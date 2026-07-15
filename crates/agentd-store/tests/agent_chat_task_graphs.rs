@@ -70,7 +70,7 @@ async fn register_online_coding_agent(store: &SqliteStore, name: &str) {
     .expect("register agent");
 }
 
-async fn scalar_count(store: &SqliteStore, sql: &str) -> i64 {
+async fn scalar_count(store: &SqliteStore, sql: &'static str) -> i64 {
     sqlx::query_scalar(sql)
         .fetch_one(store.pool())
         .await

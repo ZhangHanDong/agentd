@@ -19,10 +19,10 @@ pub static MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 /// # Errors
 /// Returns [`StoreError`] on a directory-create, connection, or migration failure.
 pub async fn open(db_path: &Path) -> Result<SqlitePool, StoreError> {
-    if let Some(parent) = db_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = db_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
     }
     let opts = SqliteConnectOptions::new()
         .filename(db_path)

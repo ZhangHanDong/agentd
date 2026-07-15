@@ -875,7 +875,7 @@ async fn mark_group_history_read(
 }
 
 async fn existing_ids(pool: &SqlitePool, table: &str) -> Result<BTreeSet<String>, StoreError> {
-    let sql = match table {
+    let sql: &'static str = match table {
         "direct_messages" => "SELECT id FROM direct_messages",
         "group_messages" => "SELECT id FROM group_messages",
         "agent_chat_tasks" => "SELECT id FROM agent_chat_tasks",

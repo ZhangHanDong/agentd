@@ -240,7 +240,7 @@ pub async fn list_graphs(
     pool: &SqlitePool,
     status: Option<&str>,
 ) -> Result<Vec<AgentChatTaskGraphRecord>, StoreError> {
-    let rows = sqlx::query(graph_select_sql("ORDER BY rowid").as_str())
+    let rows = sqlx::query(graph_select_sql("ORDER BY rowid"))
         .fetch_all(pool)
         .await?;
     let status = status.and_then(|value| clean_text(Some(value.to_string())));
@@ -265,7 +265,7 @@ pub async fn get_graph(
     let Some(id) = clean_str(id) else {
         return Ok(None);
     };
-    let row = sqlx::query(graph_select_sql("WHERE id = ?").as_str())
+    let row = sqlx::query(graph_select_sql("WHERE id = ?"))
         .bind(&id)
         .fetch_optional(pool)
         .await?;
@@ -917,8 +917,10 @@ async fn upsert_graph(
     Ok(())
 }
 
-fn graph_select_sql(tail: &str) -> String {
-    format!("SELECT id, owner, label, status, raw_json FROM agent_chat_task_graphs {tail}")
+fn graph_select_sql(tail: &'static str) -> sqlx::AssertSqlSafe<String> {
+    sqlx::AssertSqlSafe(format!(
+        "SELECT id, owner, label, status, raw_json FROM agent_chat_task_graphs {tail}"
+    ))
 }
 
 fn row_to_graph(row: &sqlx::sqlite::SqliteRow) -> Result<AgentChatTaskGraphRecord, StoreError> {
