@@ -13,10 +13,10 @@ use agentd_core::types::{
     ProtectedResource, ProtectedResourceKind, RbacPolicyVersionRef, SandboxCacheSharing,
     SandboxCleanupRequest, SandboxExecuteRequest, SandboxExecution, SandboxLimits,
     SandboxLinuxCapabilities, SandboxMount, SandboxMountAccess, SandboxPrepareRequest,
-    SandboxPrivilegeEscalation, SandboxRootFilesystem, SandboxWorkspace, SecretCheckoutRequest,
-    SecretLease, SecretMaterial, SecretSelector, SecurityAuditContext, TaskLeaseClaim, TaskRunId,
-    TenantAuthorization, TenantAuthorizationRequest, WorkerId, WorkerIncarnationId,
-    WorkloadIdentityRequest, WorkloadRole,
+    SandboxPrivilegeEscalation, SandboxRootFilesystem, SandboxTerminalReason, SandboxWorkspace,
+    SecretCheckoutRequest, SecretLease, SecretMaterial, SecretSelector, SecurityAuditContext,
+    TaskLeaseClaim, TaskRunId, TenantAuthorization, TenantAuthorizationRequest, WorkerId,
+    WorkerIncarnationId, WorkloadIdentityRequest, WorkloadRole,
 };
 
 fn authority_key() -> AuthorityKey {
@@ -259,12 +259,14 @@ impl ExecutionSandboxPort for RecordingSecurityPorts {
         &self,
         request: &SandboxExecuteRequest,
     ) -> Result<SandboxExecution, SecurityError> {
+        assert_eq!(request.admission.action, ProtectedAction::SandboxExecute);
         assert_eq!(request.sandbox.sandbox_id, "sandbox-1");
         assert_eq!(request.argv, vec!["cargo", "test"]);
         assert_eq!(
             request.env,
             BTreeMap::from([("CI".to_string(), "1".to_string())])
         );
+        assert_eq!(request.observed_at, 160);
         self.record("sandbox.execute");
         Ok(SandboxExecution {
             exit_code: 0,
@@ -276,12 +278,14 @@ impl ExecutionSandboxPort for RecordingSecurityPorts {
     async fn cleanup_sandbox(&self, request: &SandboxCleanupRequest) -> Result<(), SecurityError> {
         assert_eq!(request.sandbox_id, "sandbox-1");
         assert_eq!(request.observed_at, 170);
+        assert_eq!(request.terminal_reason, SandboxTerminalReason::Success);
         self.record("sandbox.cleanup");
         Ok(())
     }
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn security_ports_preserve_separate_ordered_boundaries() {
     let ports = RecordingSecurityPorts::default();
 
@@ -358,9 +362,14 @@ async fn security_ports_preserve_separate_ordered_boundaries() {
         .await
         .expect("prepare sandbox");
     let execute = SandboxExecuteRequest {
+        admission: CapabilityAdmission {
+            action: ProtectedAction::SandboxExecute,
+            ..admission()
+        },
         sandbox: sandbox.clone(),
         argv: vec!["cargo".to_string(), "test".to_string()],
         env: BTreeMap::from([("CI".to_string(), "1".to_string())]),
+        observed_at: 160,
     };
     ports
         .execute_sandbox(&execute)
@@ -370,6 +379,7 @@ async fn security_ports_preserve_separate_ordered_boundaries() {
         .cleanup_sandbox(&SandboxCleanupRequest {
             sandbox_id: sandbox.sandbox_id,
             observed_at: 170,
+            terminal_reason: SandboxTerminalReason::Success,
         })
         .await
         .expect("cleanup sandbox");

@@ -405,9 +405,11 @@ pub struct PreparedSandbox {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxExecuteRequest {
+    pub admission: CapabilityAdmission,
     pub sandbox: PreparedSandbox,
     pub argv: Vec<String>,
     pub env: BTreeMap<String, String>,
+    pub observed_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -421,6 +423,17 @@ pub struct SandboxExecution {
 pub struct SandboxCleanupRequest {
     pub sandbox_id: String,
     pub observed_at: i64,
+    pub terminal_reason: SandboxTerminalReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxTerminalReason {
+    Success,
+    Failure,
+    Cancelled,
+    TimedOut,
+    Recovery,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

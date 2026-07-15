@@ -71,10 +71,10 @@
 - Create: `scripts/agentd_real_security_sandbox_smoke.sh`
 - Modify: `crates/agentd-bin/tests/real_execute_smoke.rs` only if shared smoke conventions require it
 
-- [ ] Write typed launch-plan tests for immutable image digest, read-only root, explicit mounts, dropped capabilities, no-new-privileges, seccomp, resource limits, per-tenant cache, disabled network, and argv-safe execution; verify RED.
-- [ ] Implement OCI plan/runner adapters through `CommandRunner`, never shell concatenation or host-worktree mounting.
-- [ ] Write success/failure/cancel/timeout/recovery cleanup tests and implement idempotent teardown records.
-- [ ] Add an opt-in Docker/Podman smoke whose default path starts no container; run unit and dry-run smoke selectors GREEN.
+- [x] Write typed launch-plan tests for immutable image digest, read-only root, explicit mounts, dropped capabilities, no-new-privileges, seccomp, resource limits, per-tenant cache, disabled network, and argv-safe execution; verify RED.
+- [x] Implement OCI plan/runner adapters through `CommandRunner`, never shell concatenation or host-worktree mounting.
+- [x] Write success/failure/cancel/timeout/recovery cleanup tests and implement idempotent teardown records.
+- [x] Add an opt-in Docker/Podman smoke whose default path starts no container; run unit and dry-run smoke selectors GREEN.
 
 ### Task 5: Ordered Enterprise Composition
 

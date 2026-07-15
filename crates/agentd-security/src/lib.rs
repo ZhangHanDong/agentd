@@ -3,4 +3,5 @@
 #![warn(clippy::unwrap_used, clippy::panic)]
 
 pub mod identity;
+pub mod sandbox;
 pub mod secrets;

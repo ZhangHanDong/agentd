@@ -33,9 +33,9 @@ pub use security::{
     ProtectedAction, ProtectedResource, ProtectedResourceKind, SandboxCacheSharing,
     SandboxCleanupRequest, SandboxExecuteRequest, SandboxExecution, SandboxLimits,
     SandboxLinuxCapabilities, SandboxMount, SandboxMountAccess, SandboxPrepareRequest,
-    SandboxPrivilegeEscalation, SandboxRootFilesystem, SandboxWorkspace, SecretCheckoutRequest,
-    SecretLease, SecretMaterial, SecretSelector, SecurityAuditContext, SecurityDenialReason,
-    SecurityValueError, TenantAuthorization, TenantAuthorizationRequest, WorkloadIdentityRequest,
-    WorkloadRole,
+    SandboxPrivilegeEscalation, SandboxRootFilesystem, SandboxTerminalReason, SandboxWorkspace,
+    SecretCheckoutRequest, SecretLease, SecretMaterial, SecretSelector, SecurityAuditContext,
+    SecurityDenialReason, SecurityValueError, TenantAuthorization, TenantAuthorizationRequest,
+    WorkloadIdentityRequest, WorkloadRole,
 };
 pub use verdict::{ReviewVerdict, VerdictValue};
