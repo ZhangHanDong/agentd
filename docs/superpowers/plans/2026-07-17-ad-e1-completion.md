@@ -29,7 +29,7 @@
 
 **Interfaces:**
 - Produces: `EnterprisePrincipalId`, `EnterprisePrincipal`, `PrincipalStatus`, `PrincipalKind`, `OidcIdentity`, `MatrixIdentity`, `EnterpriseRequestIdentity`.
-- Produces: `EnterprisePrincipalPort::resolve_oidc`, `resolve_matrix`, `get_principal`, and `check_security_epoch`.
+- Produces: `EnterprisePrincipalPort::resolve_oidc`, `resolve_matrix`, and `get_principal`.
 - Produces: `PlacementPolicy`, `PlacementCandidate`, `SecurityCheckpoint`, and `PolicyRevocationPort`.
 
 - [x] **Step 1:** Add compile-time contract tests proving disabled principals, revoked Matrix devices, untrusted homeservers, and stale revocation epochs are closed denials.

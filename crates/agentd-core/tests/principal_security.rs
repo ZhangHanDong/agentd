@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use agentd_core::ports::{EnterprisePrincipalPort, SecurityError};
+use agentd_core::ports::{EnterprisePrincipalPort, PolicyRevocationPort, SecurityError};
 use agentd_core::types::{
     AuthorityKey, DataClassification, EnterprisePrincipal, EnterprisePrincipalId,
     EnterpriseRequestIdentity, MatrixDeviceBinding, MatrixDeviceStatus,
@@ -152,7 +152,10 @@ impl EnterprisePrincipalPort for RecordingPrincipalPort {
             300,
         ))
     }
+}
 
+#[async_trait::async_trait]
+impl PolicyRevocationPort for RecordingPrincipalPort {
     async fn check_security_epoch(
         &self,
         request: &SecurityEpochRequest,

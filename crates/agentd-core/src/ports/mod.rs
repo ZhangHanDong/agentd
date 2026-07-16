@@ -11,6 +11,7 @@ pub mod execution_evidence;
 pub mod mempal;
 pub mod principal;
 pub mod project_authority;
+pub mod revocation;
 pub mod security;
 pub mod store;
 pub mod task_lease;
@@ -39,6 +40,7 @@ pub use project_authority::{
     ProjectAuthorityAvailability, ProjectAuthorityError, ProjectAuthorityHealth,
     ProjectAuthorityMode, ProjectAuthorityPort, ProjectSnapshotResolveRequest,
 };
+pub use revocation::PolicyRevocationPort;
 pub use security::{
     AttemptCapabilityPort, ExecutionSandboxPort, SecretBrokerPort, SecurityError,
     TenantAuthorizationPort, WorkloadIdentityPort,

@@ -2,8 +2,7 @@
 
 use crate::types::{
     EnterprisePrincipal, EnterprisePrincipalId, EnterpriseRequestIdentity,
-    MatrixPrincipalResolveRequest, OidcPrincipalResolveRequest, SecurityEpochRequest,
-    SecurityEpochStatus,
+    MatrixPrincipalResolveRequest, OidcPrincipalResolveRequest,
 };
 
 use super::SecurityError;
@@ -24,9 +23,4 @@ pub trait EnterprisePrincipalPort: Send + Sync {
         &self,
         request: &MatrixPrincipalResolveRequest,
     ) -> Result<EnterpriseRequestIdentity, SecurityError>;
-
-    async fn check_security_epoch(
-        &self,
-        request: &SecurityEpochRequest,
-    ) -> Result<SecurityEpochStatus, SecurityError>;
 }
