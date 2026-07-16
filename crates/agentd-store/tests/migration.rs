@@ -75,7 +75,7 @@ async fn migration_is_idempotent_on_reopen() {
         .fetch_one(s2.pool())
         .await
         .expect("schema version row");
-    assert_eq!(version, "16");
+    assert_eq!(version, "17");
 }
 
 #[tokio::test]
@@ -132,7 +132,7 @@ async fn migration_adds_message_attachment_columns() {
         .fetch_one(store.pool())
         .await
         .expect("schema version row");
-    assert_eq!(version, "16");
+    assert_eq!(version, "17");
 }
 
 #[tokio::test]
@@ -223,7 +223,7 @@ async fn migration_creates_remote_relay_backend_tables() {
         .fetch_one(store.pool())
         .await
         .expect("schema version row");
-    assert_eq!(version, "16");
+    assert_eq!(version, "17");
 }
 
 #[tokio::test]
@@ -292,7 +292,7 @@ async fn migration_creates_matrix_bridge_contract_tables() {
         .fetch_one(store.pool())
         .await
         .expect("schema version row");
-    assert_eq!(version, "16");
+    assert_eq!(version, "17");
 }
 
 #[tokio::test]
@@ -344,7 +344,7 @@ async fn migration_creates_agent_chat_task_import_tables() {
         .fetch_one(store.pool())
         .await
         .expect("schema version row");
-    assert_eq!(version, "16");
+    assert_eq!(version, "17");
 }
 
 #[tokio::test]
@@ -364,7 +364,7 @@ async fn migration_adds_direct_message_schema_column() {
         .fetch_one(store.pool())
         .await
         .expect("schema version row");
-    assert_eq!(version, "16");
+    assert_eq!(version, "17");
 }
 
 #[tokio::test]
@@ -474,7 +474,7 @@ async fn migration_creates_agent_scheduler_tables() {
         .fetch_one(store.pool())
         .await
         .expect("schema version row");
-    assert_eq!(version, "16");
+    assert_eq!(version, "17");
 }
 
 #[tokio::test]
@@ -521,7 +521,7 @@ async fn migration_creates_enterprise_agent_worker_runtime_tables() {
         .fetch_one(store.pool())
         .await
         .expect("schema version");
-    assert_eq!(version, "16");
+    assert_eq!(version, "17");
 
     let indexes: Vec<String> = sqlx::query_scalar(
         "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_%one_current'",
@@ -585,7 +585,7 @@ async fn migration_creates_enterprise_artifact_audit_tables() {
         .fetch_one(store.pool())
         .await
         .expect("schema version");
-    assert_eq!(version, "16");
+    assert_eq!(version, "17");
 
     let triggers: Vec<String> =
         sqlx::query("SELECT name FROM sqlite_master WHERE type='trigger' ORDER BY name")
@@ -654,7 +654,7 @@ async fn migration_creates_constrained_task_lease_tables() {
         .fetch_one(store.pool())
         .await
         .expect("schema version");
-    assert_eq!(version, "16");
+    assert_eq!(version, "17");
 
     let lease_fk_tables: Vec<String> = sqlx::query_scalar(
         "SELECT \"table\" FROM pragma_foreign_key_list('execution_task_leases') ORDER BY \"table\"",

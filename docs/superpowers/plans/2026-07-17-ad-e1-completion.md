@@ -49,10 +49,10 @@
 - Consumes: Task 1 principal and Matrix types.
 - Produces: `SqliteEnterprisePrincipalRepository` implementing `EnterprisePrincipalPort` plus explicit `upsert_principal`, `disable_principal`, `bind_oidc_subject`, `bind_matrix_user`, `bind_matrix_device`, and `revoke_matrix_device` lifecycle methods.
 
-- [ ] **Step 1:** Add migration and repository tests for current resolution, duplicate issuer/subject rejection, disablement, device revocation, homeserver trust, appservice namespace, idempotent updates, and absence of secret columns.
-- [ ] **Step 2:** Run `cargo test -p agentd-store --test enterprise_principals` and require RED.
-- [ ] **Step 3:** Implement additive schema and repository with transactional lifecycle updates and stable audit references.
-- [ ] **Step 4:** Run the focused store selector GREEN and commit `feat(store): persist enterprise principal lifecycle`.
+- [x] **Step 1:** Add migration and repository tests for current resolution, duplicate issuer/subject rejection, disablement, device revocation, homeserver trust, appservice namespace, idempotent updates, and absence of secret columns.
+- [x] **Step 2:** Run `cargo test -p agentd-store --test enterprise_principals` and require RED.
+- [x] **Step 3:** Implement additive schema and repository with transactional lifecycle updates and stable audit references.
+- [x] **Step 4:** Run the focused store selector GREEN and commit `feat(store): persist enterprise principal lifecycle`.
 
 ### Task 3: OIDC and Matrix Authentication Adapters
 

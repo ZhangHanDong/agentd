@@ -30,6 +30,7 @@ pub mod outbox_repo;
 pub mod outcome_repo;
 pub mod paths;
 pub mod pool;
+pub mod principal_repo;
 pub mod project_repo;
 pub mod relay_repo;
 pub mod review_repo;
