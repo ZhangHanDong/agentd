@@ -5,6 +5,8 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use super::PlacementPolicy;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct AuthorityKey(String);
@@ -259,6 +261,8 @@ pub struct ProjectExecutionSnapshot {
     pub rbac_policy_version_ref: RbacPolicyVersionRef,
     pub quota_policy_version_ref: QuotaPolicyVersionRef,
     pub certification_policy_version_ref: Option<CertificationPolicyVersionRef>,
+    pub placement_policy: PlacementPolicy,
+    pub policy_revocation_epoch: u64,
     pub issued_at: i64,
     pub valid_until: i64,
     pub content_sha256: String,
@@ -272,6 +276,23 @@ impl ProjectExecutionSnapshot {
         }
         if self.issued_at >= self.valid_until {
             return Err(ProjectAuthorityValidationError::InvalidValidityWindow);
+        }
+        if self.policy_revocation_epoch == 0 {
+            return Err(ProjectAuthorityValidationError::InvalidPolicyRevocationEpoch);
+        }
+        if self.placement_policy.allowed_regions.is_empty()
+            || self
+                .placement_policy
+                .allowed_worker_trust_domains
+                .is_empty()
+            || self.placement_policy.egress_profile_id.trim().is_empty()
+            || self
+                .placement_policy
+                .tenant_cache_namespace
+                .trim()
+                .is_empty()
+        {
+            return Err(ProjectAuthorityValidationError::InvalidPlacementPolicy);
         }
         validate_sha256(&self.content_sha256, "snapshot content sha256")?;
 
@@ -396,6 +417,10 @@ pub enum ProjectAuthorityValidationError {
     InvalidAuthorityRevision,
     #[error("snapshot validity window must have issued_at before valid_until")]
     InvalidValidityWindow,
+    #[error("policy revocation epoch must be positive")]
+    InvalidPolicyRevocationEpoch,
+    #[error("placement policy must declare region, trust-domain, egress, and cache constraints")]
+    InvalidPlacementPolicy,
     #[error("{0} must be 64 lowercase hexadecimal characters")]
     InvalidSha256(&'static str),
     #[error("repository base commit must be 40 lowercase hexadecimal characters")]

@@ -110,12 +110,12 @@ impl SqliteTaskLeaseControlPlane {
     }
 }
 
-enum Decision<T> {
+pub(crate) enum Decision<T> {
     Return(T),
     Reject(TaskLeaseError),
 }
 
-enum ClaimAuthorization {
+pub(crate) enum ClaimAuthorization {
     Authorized(TaskLeaseGrant),
     Rejected(TaskLeaseError),
 }
@@ -179,7 +179,7 @@ async fn finish_decision<T>(
     }
 }
 
-async fn renew_in_transaction(
+pub(crate) async fn renew_in_transaction(
     connection: &mut SqliteConnection,
     request: &TaskLeaseRenewRequest,
 ) -> Result<Decision<TaskLeaseGrant>, TaskLeaseError> {
@@ -214,7 +214,7 @@ async fn renew_in_transaction(
     ))
 }
 
-async fn close_in_transaction(
+pub(crate) async fn close_in_transaction(
     connection: &mut SqliteConnection,
     request: &TaskLeaseCloseRequest,
     status: LeaseStatus,
@@ -267,7 +267,7 @@ async fn expire_due_in_transaction(
         .map_err(|_| TaskLeaseError::Unavailable("expiry result exceeds u64".to_string()))
 }
 
-async fn authorize_claim(
+pub(crate) async fn authorize_claim(
     connection: &mut SqliteConnection,
     claim: &TaskLeaseClaim,
     observed_at: i64,
@@ -376,7 +376,7 @@ async fn worker_can_report(
     Ok(row.get::<i64, _>("is_current") == 1 && matches!(status.as_str(), "online" | "draining"))
 }
 
-async fn get_grant(
+pub(crate) async fn get_grant(
     connection: &mut SqliteConnection,
     lease_id: &str,
 ) -> Result<TaskLeaseGrant, TaskLeaseError> {
@@ -430,7 +430,7 @@ fn row_to_grant(row: &sqlx::sqlite::SqliteRow) -> Result<TaskLeaseGrant, TaskLea
     })
 }
 
-async fn dispatch_in_transaction(
+pub(crate) async fn dispatch_in_transaction(
     connection: &mut SqliteConnection,
     request: &TaskLeaseDispatchRequest,
 ) -> Result<TaskLeaseGrant, TaskLeaseError> {
@@ -625,7 +625,7 @@ async fn reconcile_active_lease(
     )))
 }
 
-async fn terminalize_active(
+pub(crate) async fn terminalize_active(
     connection: &mut SqliteConnection,
     task_id: &str,
     lease_id: &str,

@@ -23,6 +23,7 @@ pub mod event_repo;
 pub mod execution_artifact_repo;
 pub mod execution_audit_repo;
 pub mod execution_evidence_control_plane;
+pub mod fleet_scheduler;
 pub mod human_wait_repo;
 pub mod matrix_bridge_repo;
 pub mod message_repo;

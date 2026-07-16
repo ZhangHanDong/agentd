@@ -8,8 +8,8 @@ use agentd_core::ports::{
     WorkerArtifactReport, WorkerUsageReport,
 };
 use agentd_core::types::{
-    AgentProfileId, AuditEventId, ExecutionArtifactId, NodeId, RunId, RuntimeAttemptId,
-    RuntimeSessionId, TaskRunId, WorkerId, WorkerIncarnationId,
+    AgentProfileId, ArtifactUploadId, AuditEventId, ExecutionArtifactId, NodeId, RunId,
+    RuntimeAttemptId, RuntimeSessionId, TaskRunId, WorkerId, WorkerIncarnationId,
 };
 use agentd_store::agent_profile_repo::{self, AgentProfileCreate};
 use agentd_store::execution_evidence_control_plane::SqliteExecutionEvidenceControlPlane;
@@ -603,9 +603,28 @@ async fn worker_artifact_publish_requires_current_lease_and_audits_rejection() {
         ExecutionArtifactKind::TestReport,
         &fixture,
     );
+    let upload_id = ArtifactUploadId::from_string("au_01ARZ3NDEKTSV4RRFFQ69G5FB9");
+    sqlx::query(
+        "INSERT INTO enterprise_artifact_upload_acknowledgements (\
+            upload_id, execution_artifact_id, execution_task_id, worker_incarnation_id, \
+            lease_id, fencing_token, idempotency_key, artifact_sha256, upload_attempt, \
+            part_count, acknowledged_at\
+         ) VALUES (?, ?, ?, ?, ?, ?, 'evidence-upload-1', ?, 1, 1, 105)",
+    )
+    .bind(upload_id.as_str())
+    .bind(artifact.id.as_str())
+    .bind(first_grant.execution_task_id.as_str())
+    .bind(first_grant.worker_incarnation_id.as_str())
+    .bind(first_grant.lease_id.as_str())
+    .bind(i64::try_from(first_grant.fencing_token.value()).expect("fencing"))
+    .bind(&artifact.content_sha256)
+    .execute(fixture.store.pool())
+    .await
+    .expect("artifact upload ack");
     let accepted = control_plane
         .publish_worker_artifact(&WorkerArtifactReport {
             claim: first_grant.claim(),
+            upload_id: upload_id.clone(),
             observed_at: 110,
             artifact: artifact.clone(),
         })
@@ -635,6 +654,7 @@ async fn worker_artifact_publish_requires_current_lease_and_audits_rejection() {
     let stale = control_plane
         .publish_worker_artifact(&WorkerArtifactReport {
             claim: first_grant.claim(),
+            upload_id,
             observed_at: 130,
             artifact: accepted.publish.clone(),
         })

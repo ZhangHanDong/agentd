@@ -1,12 +1,14 @@
 #![allow(dead_code)]
 
+use std::collections::BTreeSet;
+
 use agentd_core::ports::ProjectSnapshotResolveRequest;
 use agentd_core::types::{
-    AuthorityKey, CertificationPolicyVersionRef, FrozenSpecVersionRef, MatrixRoomRef,
-    OfflineRecoveryPolicy, OrganizationRef, ProductWorkflowRef, ProjectExecutionSnapshot,
-    ProjectExecutionSnapshotRef, ProjectRef, ProjectRoomBindingRef, QuotaPolicyVersionRef,
-    RbacPolicyVersionRef, RepositoryBinding, RepositoryRef, RepositoryRole, RequirementRef,
-    RoomBinding, RoomBindingRole, TeamRef,
+    AuthorityKey, CertificationPolicyVersionRef, DataClassification, FrozenSpecVersionRef,
+    MatrixRoomRef, OfflineRecoveryPolicy, OrganizationRef, PlacementPolicy, ProductWorkflowRef,
+    ProjectExecutionSnapshot, ProjectExecutionSnapshotRef, ProjectRef, ProjectRoomBindingRef,
+    QuotaPolicyVersionRef, RbacPolicyVersionRef, RepositoryBinding, RepositoryRef, RepositoryRole,
+    RequirementRef, RoomBinding, RoomBindingRole, TeamRef,
 };
 
 pub fn authority(value: &str) -> AuthorityKey {
@@ -69,6 +71,16 @@ pub fn snapshot(
             CertificationPolicyVersionRef::new(authority_key, "cert-policy-1", "15")
                 .expect("certification policy ref"),
         ),
+        placement_policy: PlacementPolicy {
+            data_classification: DataClassification::Restricted,
+            allowed_regions: BTreeSet::from(["eu-west-1".to_string()]),
+            allowed_worker_trust_domains: BTreeSet::from(["workers.example".to_string()]),
+            require_signed_image: true,
+            require_dedicated_pool: true,
+            egress_profile_id: "restricted-egress-v1".to_string(),
+            tenant_cache_namespace: format!("tenant/{project_id}"),
+        },
+        policy_revocation_epoch: 9,
         issued_at: 100,
         valid_until: 1_000,
         content_sha256: "a".repeat(64),

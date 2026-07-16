@@ -336,6 +336,7 @@ async fn execution_evidence_contract_ports_preserve_typed_requests() {
     };
     let worker_artifact = WorkerArtifactReport {
         claim: claim(),
+        upload_id: agentd_core::types::ArtifactUploadId::new(),
         observed_at: 100,
         artifact: artifact.clone(),
     };

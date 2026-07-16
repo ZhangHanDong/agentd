@@ -504,6 +504,19 @@ Exit gate:
 - duplicate acquisition/release/upload is idempotent;
 - failure-injection covers reassignment, partial upload, and network partition.
 
+Implementation status (2026-07-17): AD-E2 code-complete candidate. Core now
+defines the canonical fleet protocol; migration `0018` owns the durable
+enterprise queue, worker availability, report receipts, artifact upload
+acknowledgements, side-effect admissions, fencing rejection evidence, and
+outbox. `SqliteFleetScheduler` implements trusted placement/epoch-aware pull,
+transactional lease acquisition, heartbeat/capacity/quota control,
+renew/complete/fail/cancel, deterministic retry/dead-letter, reaping, fenced
+artifact/side-effect admission, and explain output. `EnterpriseFleetService`
+replaces caller workload/time with mTLS identity and trusted clock data. This is
+not an AD-E2 or FSF-3 exit: restart, worker-loss, network-partition,
+partial-upload, multi-host, rollback, and operator sign-off evidence remains in
+the final manual checklist.
+
 ### AD-E3: Matrix/Robrix Gateway and Control-Plane Cutover
 
 Depends on: AD-E2.

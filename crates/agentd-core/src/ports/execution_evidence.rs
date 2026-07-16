@@ -6,8 +6,8 @@ use thiserror::Error;
 
 use crate::ports::TaskLeaseRejectionReason;
 use crate::types::{
-    AuditEventId, ExecutionArtifactId, RunId, RuntimeAttemptId, RuntimeSessionId, TaskLeaseClaim,
-    TaskRunId, WorkerIncarnationId,
+    ArtifactUploadId, AuditEventId, ExecutionArtifactId, RunId, RuntimeAttemptId, RuntimeSessionId,
+    TaskLeaseClaim, TaskRunId, WorkerIncarnationId,
 };
 
 macro_rules! evidence_kind {
@@ -259,6 +259,7 @@ pub struct CertificationReferenceRecord {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkerArtifactReport {
     pub claim: TaskLeaseClaim,
+    pub upload_id: ArtifactUploadId,
     pub observed_at: i64,
     pub artifact: ExecutionArtifactPublish,
 }

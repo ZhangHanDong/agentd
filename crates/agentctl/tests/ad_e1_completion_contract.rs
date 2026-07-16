@@ -94,7 +94,10 @@ fn ad_e1_production_pipeline_owns_trusted_placement_output_redaction_and_closed_
         "admit_output",
         "validate_request(&request)",
     ] {
-        assert!(operation.contains(proof), "production pipeline missing {proof}");
+        assert!(
+            operation.contains(proof),
+            "production pipeline missing {proof}"
+        );
     }
     for proof in [
         "production_security_gate_orders_checks_and_stops_on_failure",
@@ -103,7 +106,10 @@ fn ad_e1_production_pipeline_owns_trusted_placement_output_redaction_and_closed_
         "SecurityCheckpoint::Delivery",
         "SecurityCheckpoint::Release",
     ] {
-        assert!(evidence.contains(proof), "pipeline evidence missing {proof}");
+        assert!(
+            evidence.contains(proof),
+            "pipeline evidence missing {proof}"
+        );
     }
 }
 

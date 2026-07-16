@@ -294,6 +294,19 @@ pub enum SecurityCheckpoint {
     Release,
 }
 
+impl SecurityCheckpoint {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Dispatch => "dispatch",
+            Self::LeaseRenewal => "lease_renewal",
+            Self::ArtifactAcceptance => "artifact_acceptance",
+            Self::Delivery => "delivery",
+            Self::Release => "release",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecurityEpochRequest {
     pub checkpoint: SecurityCheckpoint,

@@ -1,9 +1,12 @@
+use std::collections::BTreeSet;
+
 use agentd_core::types::{
-    AuthorityKey, AuthorityResourceRef, CertificationPolicyVersionRef, FrozenSpecVersionRef,
-    MatrixRoomRef, OfflineRecoveryPolicy, OrganizationRef, ProductWorkflowRef,
-    ProjectExecutionSnapshot, ProjectExecutionSnapshotRef, ProjectRef, ProjectRoomBindingRef,
-    QuotaPolicyVersionRef, RbacPolicyVersionRef, RepositoryBinding, RepositoryRef, RepositoryRole,
-    RequirementRef, ResourceKind, RoomBinding, RoomBindingRole, TeamRef,
+    AuthorityKey, AuthorityResourceRef, CertificationPolicyVersionRef, DataClassification,
+    FrozenSpecVersionRef, MatrixRoomRef, OfflineRecoveryPolicy, OrganizationRef, PlacementPolicy,
+    ProductWorkflowRef, ProjectExecutionSnapshot, ProjectExecutionSnapshotRef, ProjectRef,
+    ProjectRoomBindingRef, QuotaPolicyVersionRef, RbacPolicyVersionRef, RepositoryBinding,
+    RepositoryRef, RepositoryRole, RequirementRef, ResourceKind, RoomBinding, RoomBindingRole,
+    TeamRef,
 };
 
 fn authority(value: &str) -> AuthorityKey {
@@ -75,6 +78,16 @@ fn valid_snapshot() -> ProjectExecutionSnapshot {
             CertificationPolicyVersionRef::new(project_authority, "cert-policy-1", "15")
                 .expect("certification policy ref"),
         ),
+        placement_policy: PlacementPolicy {
+            data_classification: DataClassification::Restricted,
+            allowed_regions: BTreeSet::from(["eu-west-1".to_string()]),
+            allowed_worker_trust_domains: BTreeSet::from(["workers.example".to_string()]),
+            require_signed_image: true,
+            require_dedicated_pool: true,
+            egress_profile_id: "restricted-egress-v1".to_string(),
+            tenant_cache_namespace: "org-1/project-1".to_string(),
+        },
+        policy_revocation_epoch: 9,
         issued_at: 100,
         valid_until: 1_000,
         content_sha256: "a".repeat(64),
@@ -145,6 +158,10 @@ fn project_authority_refs_and_snapshot_validation_follow_p266() {
     let mut bad_commit = snapshot.clone();
     bad_commit.repository_bindings[0].base_commit = "main".to_string();
     assert!(bad_commit.validate().is_err());
+
+    let mut missing_epoch = snapshot.clone();
+    missing_epoch.policy_revocation_epoch = 0;
+    assert!(missing_epoch.validate().is_err());
 
     let mut two_targets = snapshot;
     two_targets

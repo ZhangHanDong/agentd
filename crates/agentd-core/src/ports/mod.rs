@@ -8,6 +8,7 @@ pub mod backend;
 pub mod clock;
 pub mod command_runner;
 pub mod execution_evidence;
+pub mod fleet_scheduler;
 pub mod mempal;
 pub mod principal;
 pub mod project_authority;
@@ -33,6 +34,14 @@ pub use execution_evidence::{
     ExecutionEvidenceValidationError, ExecutionSnapshotLink, PageLimit, UsageLedgerPort,
     UsageMeasurement, UsageMetric, UsagePage, UsageReadRequest, UsageRecord, UsageTotal,
     UsageTotals, WorkerArtifactReport, WorkerUsageReport,
+};
+pub use fleet_scheduler::{
+    ArtifactUploadAck, ArtifactUploadAckRequest, FleetAssignment, FleetCancelRequest,
+    FleetCompletionReport, FleetDenialReason, FleetExplain, FleetFailureReport,
+    FleetHeartbeatRequest, FleetOutboxEvent, FleetPullRequest, FleetQueueStatus, FleetReapRequest,
+    FleetReapSummary, FleetRenewRequest, FleetSchedulerError, FleetSchedulerPort,
+    FleetSideEffectAdmission, FleetSideEffectRequest, FleetSubmitRequest, FleetTaskRecord,
+    FleetTaskRequirements, WorkerAvailability,
 };
 pub use mempal::{DrawerHit, MempalClient};
 pub use principal::EnterprisePrincipalPort;

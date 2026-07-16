@@ -9,6 +9,7 @@ pub mod agent_mcp_context;
 pub mod cli;
 pub mod clock;
 pub mod daemon;
+pub mod fleet;
 pub mod host;
 pub mod matrix_bridge;
 pub mod mempal;

@@ -74,6 +74,48 @@ where
         }
     }
 
+    async fn authorize_artifact_upload(
+        &self,
+        request: &WorkerArtifactReport,
+    ) -> Result<(), ExecutionEvidenceError> {
+        let fencing_token = i64::try_from(request.claim.fencing_token.value()).map_err(|_| {
+            ExecutionEvidenceError::Invalid("fencing token exceeds SQLite range".to_string())
+        })?;
+        let acknowledged: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM enterprise_artifact_upload_acknowledgements \
+             WHERE upload_id = ? AND execution_artifact_id = ? AND execution_task_id = ? \
+               AND worker_incarnation_id = ? AND lease_id = ? AND fencing_token = ? \
+               AND artifact_sha256 = ? AND acknowledged_at <= ?",
+        )
+        .bind(request.upload_id.as_str())
+        .bind(request.artifact.id.as_str())
+        .bind(request.claim.execution_task_id.as_str())
+        .bind(request.claim.worker_incarnation_id.as_str())
+        .bind(request.claim.lease_id.as_str())
+        .bind(fencing_token)
+        .bind(&request.artifact.content_sha256)
+        .bind(request.observed_at)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| ExecutionEvidenceError::Unavailable(error.to_string()))?;
+        if acknowledged == 1 {
+            return Ok(());
+        }
+        let reason = TaskLeaseRejectionReason::NotCurrentLease;
+        self.append_rejection_audit(
+            "artifact.upload_ack",
+            &request.claim,
+            request.observed_at,
+            &request.artifact.links,
+            reason,
+        )
+        .await?;
+        Err(ExecutionEvidenceError::LeaseRejected {
+            reason,
+            message: "artifact upload lacks a current fenced acknowledgement".to_string(),
+        })
+    }
+
     async fn append_rejection_audit(
         &self,
         operation: &str,
@@ -155,6 +197,7 @@ where
             &request.artifact.links,
         )
         .await?;
+        self.authorize_artifact_upload(request).await?;
         self.publish_artifact(&request.artifact).await
     }
 
