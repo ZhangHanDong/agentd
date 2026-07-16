@@ -9,6 +9,7 @@ pub mod clock;
 pub mod command_runner;
 pub mod execution_evidence;
 pub mod mempal;
+pub mod principal;
 pub mod project_authority;
 pub mod security;
 pub mod store;
@@ -33,6 +34,7 @@ pub use execution_evidence::{
     UsageTotals, WorkerArtifactReport, WorkerUsageReport,
 };
 pub use mempal::{DrawerHit, MempalClient};
+pub use principal::EnterprisePrincipalPort;
 pub use project_authority::{
     ProjectAuthorityAvailability, ProjectAuthorityError, ProjectAuthorityHealth,
     ProjectAuthorityMode, ProjectAuthorityPort, ProjectSnapshotResolveRequest,

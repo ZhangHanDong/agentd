@@ -3,6 +3,7 @@ pub mod enterprise;
 pub mod handle;
 pub mod ids;
 pub mod outcome;
+pub mod principal;
 pub mod project_authority;
 pub mod security;
 pub mod verdict;
@@ -18,6 +19,13 @@ pub use ids::{
     RunId, RuntimeAttemptId, RuntimeSessionId, TaskRunId, WorkerId, WorkerIncarnationId,
 };
 pub use outcome::{Artifact, ArtifactKind, MempalWrite, Outcome, Status};
+pub use principal::{
+    DataClassification, EnterpriseAuthentication, EnterprisePrincipal, EnterprisePrincipalId,
+    EnterpriseRequestIdentity, MatrixDeviceBinding, MatrixDeviceStatus,
+    MatrixPrincipalResolveRequest, MatrixTrustPolicy, OidcPrincipalResolveRequest,
+    PlacementAdmission, PlacementCandidate, PlacementPolicy, PrincipalKind, PrincipalStatus,
+    SecurityCheckpoint, SecurityEpochRequest, SecurityEpochStatus,
+};
 pub use project_authority::{
     AuthorityKey, AuthorityResourceRef, CertificationPolicyVersionRef, FrozenSpecVersionRef,
     IssueRef, MatrixRoomRef, OfflineRecoveryPolicy, OrganizationRef, ProductWorkflowRef,

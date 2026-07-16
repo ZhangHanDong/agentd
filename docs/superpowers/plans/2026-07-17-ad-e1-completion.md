@@ -29,13 +29,13 @@
 
 **Interfaces:**
 - Produces: `EnterprisePrincipalId`, `EnterprisePrincipal`, `PrincipalStatus`, `PrincipalKind`, `OidcIdentity`, `MatrixIdentity`, `EnterpriseRequestIdentity`.
-- Produces: `EnterprisePrincipalPort::resolve_oidc`, `resolve_matrix`, `get_principal`, and `check_principal`.
+- Produces: `EnterprisePrincipalPort::resolve_oidc`, `resolve_matrix`, `get_principal`, and `check_security_epoch`.
 - Produces: `PlacementPolicy`, `PlacementCandidate`, `SecurityCheckpoint`, and `PolicyRevocationPort`.
 
-- [ ] **Step 1:** Add compile-time contract tests proving disabled principals, revoked Matrix devices, untrusted homeservers, and stale revocation epochs are closed denials.
-- [ ] **Step 2:** Run `cargo test -p agentd-core --test principal_security` and require RED because the contracts do not exist.
-- [ ] **Step 3:** Add the closed types, validation constructors, denial variants, and async ports without I/O or product SDK types.
-- [ ] **Step 4:** Run the focused core selector GREEN and commit `feat(security): define enterprise principal contracts`.
+- [x] **Step 1:** Add compile-time contract tests proving disabled principals, revoked Matrix devices, untrusted homeservers, and stale revocation epochs are closed denials.
+- [x] **Step 2:** Run `cargo test -p agentd-core --test principal_security` and require RED because the contracts do not exist.
+- [x] **Step 3:** Add the closed types, validation constructors, denial variants, and async ports without I/O or product SDK types.
+- [x] **Step 4:** Run the focused core selector GREEN and commit `feat(security): define enterprise principal contracts`.
 
 ### Task 2: Durable Principal Lifecycle
 

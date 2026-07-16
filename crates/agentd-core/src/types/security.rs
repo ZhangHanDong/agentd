@@ -439,6 +439,19 @@ pub enum SandboxTerminalReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SecurityDenialReason {
+    PrincipalDisabled,
+    PrincipalUnmapped,
+    MatrixHomeserverUntrusted,
+    MatrixDeviceRevoked,
+    MatrixAppserviceUntrusted,
+    PolicyEpochStale,
+    PolicyEpochRegressed,
+    PlacementRegionDenied,
+    PlacementTrustDomainDenied,
+    PlacementImageUnsigned,
+    PlacementDedicatedPoolRequired,
+    PlacementEgressDenied,
+    PlacementCacheIsolationDenied,
     IdentityUntrusted,
     IdentityExpired,
     IdentityRevoked,
@@ -462,6 +475,19 @@ impl SecurityDenialReason {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::PrincipalDisabled => "principal_disabled",
+            Self::PrincipalUnmapped => "principal_unmapped",
+            Self::MatrixHomeserverUntrusted => "matrix_homeserver_untrusted",
+            Self::MatrixDeviceRevoked => "matrix_device_revoked",
+            Self::MatrixAppserviceUntrusted => "matrix_appservice_untrusted",
+            Self::PolicyEpochStale => "policy_epoch_stale",
+            Self::PolicyEpochRegressed => "policy_epoch_regressed",
+            Self::PlacementRegionDenied => "placement_region_denied",
+            Self::PlacementTrustDomainDenied => "placement_trust_domain_denied",
+            Self::PlacementImageUnsigned => "placement_image_unsigned",
+            Self::PlacementDedicatedPoolRequired => "placement_dedicated_pool_required",
+            Self::PlacementEgressDenied => "placement_egress_denied",
+            Self::PlacementCacheIsolationDenied => "placement_cache_isolation_denied",
             Self::IdentityUntrusted => "identity_untrusted",
             Self::IdentityExpired => "identity_expired",
             Self::IdentityRevoked => "identity_revoked",
