@@ -16,18 +16,24 @@ agentd-core = { path = "../agentd-core" }
 agentd-store = { path = "../agentd-store" }
 async-trait = "0.1"
 hex = { workspace = true }
+jsonwebtoken = { workspace = true }
+regex-automata = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
 sqlx = { workspace = true }
 tokio = { workspace = true }
+thiserror = { workspace = true }
 ulid = "1"
 url = { workspace = true }
 x509-parser = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
+base64 = { workspace = true }
 rcgen = { workspace = true }
+rsa = { workspace = true }
 tempfile = { workspace = true }
 time = { workspace = true }

@@ -201,6 +201,25 @@ async fn matrix_user_and_device_lifecycle_fail_closed() {
 async fn matrix_appservice_requires_trusted_namespace() {
     let (store, _dir) = store().await;
     let repo = repository(&store);
+    let human_id = EnterprisePrincipalId::new();
+    repo.upsert_principal(principal(human_id.clone(), "Human", PrincipalKind::Human))
+        .await
+        .expect("upsert human principal");
+    let human_binding = repo
+        .bind_matrix_appservice(MatrixAppserviceBinding {
+            appservice_id: "agentd-gateway".to_string(),
+            homeserver: "matrix.example".to_string(),
+            sender_localpart_prefix: "ac_".to_string(),
+            principal_id: human_id,
+            bound_at: 105,
+        })
+        .await
+        .expect_err("appservice cannot bind a human principal");
+    assert!(
+        matches!(human_binding, StoreError::Conflict(_)),
+        "{human_binding:?}"
+    );
+
     let id = EnterprisePrincipalId::new();
     repo.upsert_principal(principal(
         id.clone(),

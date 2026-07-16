@@ -59,6 +59,21 @@ approved for integration.
 - Existing bearer/agent-token routes remain explicit standalone/FSF-0
   compatibility only. Enterprise mode does not use `AuthConfig::open()` and
   exposes no unsecured compatibility listener.
+- The completion candidate adds durable non-secret enterprise-principal, OIDC
+  subject, Matrix user/device/appservice lifecycle state in migration `0017`.
+- OIDC authentication verifies a pinned HTTPS issuer, audience, RS256 key id,
+  signature, validity interval, and mapped active principal before producing an
+  enterprise identity. Matrix resolution requires current trusted user/device
+  or appservice service-principal bindings.
+- Transcript/log redaction is byte-oriented, bounded, deterministic, and
+  compiled from exact values plus policy regexes without exposing raw rules in
+  errors or `Debug`.
+- Placement admission checks the snapshot data classification against worker
+  capability plus region, trust domain, canonical signed image digest,
+  dedicated pool, egress profile, and tenant cache namespace.
+- Remote secret transport echoes immutable admission scope and may not extend
+  its selector or expiry. Specify policy epoch is checked at dispatch, lease
+  renewal, artifact acceptance, delivery, and release.
 
 ## Boundaries
 
@@ -111,11 +126,10 @@ approved for integration.
 
 ## Out of Scope
 
-- Human OIDC, browser sessions, enterprise principal provisioning, and SCIM.
-- Matrix user/device/appservice principal mapping and homeserver trust policy.
-- Vault, cloud KMS, cloud secret manager, SPIRE server, or Kubernetes
-  deployment selection.
-- Full data-classification/region/signed-image placement policy and autoscaling.
+- Browser session UI, SCIM, and production enterprise-principal provisioning.
+- Concrete Vault, cloud KMS, cloud secret manager, SPIRE server, or Kubernetes
+  deployment adapters and operator rollout.
+- Autoscaling and AD-E2 worker-inventory transport for placement candidates.
 - Worker enrollment/pull/heartbeat/drain wire protocol and offline recovery.
 - Native process/PTY/session ownership and provider resume.
 - AD-E2 worker acquisition or authenticated enterprise transport wiring from a
@@ -302,3 +316,78 @@ Scenario: roadmap parity and migration record baseline without claiming AD-E1 ex
   And migration `0016_execution_security.sql` contains no secret or private-key columns
   And P272-P275 worker fleet native runtime Matrix OpenFab cutover and scale remain unclaimed
   And AD-E0 AD-E1 FSF-0 and FSF-2 remain incomplete without their acceptance records
+
+Rule: completion-candidate  remaining AD-E1 contracts are code-owned without acceptance promotion
+
+Scenario: enterprise principals authenticate OIDC requests
+  Test:
+    Package: agentd-security
+    Filter: oidc_authenticator_verifies_signature_claims_and_principal_lifecycle
+  Level: authentication adapter integration
+  Test Double: generated RSA key temporary SQLite and repository-backed OIDC bindings
+  Given a pinned OIDC provider plus current principal bindings
+  When signed API tokens resolve
+  Then only verified active principals are returned
+  And disabled unmapped expired foreign or malformed identities fail closed
+
+Scenario: enterprise principals authenticate Matrix requests
+  Test:
+    Package: agentd-security
+    Filter: matrix_resolver_requires_trusted_homeserver_and_human_device
+  Level: authentication adapter integration
+  Test Double: temporary SQLite and repository-backed Matrix bindings
+  Given trusted homeserver device and appservice policy plus current principal bindings
+  When human Matrix devices and appservice senders resolve
+  Then only current trusted principals are returned
+  And disabled revoked foreign missing-device or malformed identities fail closed
+
+Scenario: content redaction is bounded and deterministic
+  Test:
+    Package: agentd-security
+    Filter: redaction_is_leftmost_longest_and_deterministic
+  Level: pure security policy
+  Test Double: none
+  Given exact and regex redaction rules
+  When binary content is evaluated
+  Then raw matched bytes are replaced deterministically within configured bounds
+
+Scenario: placement rejects every independent mismatch
+  Test:
+    Package: agentd-security
+    Filter: placement_rejects_each_independent_constraint
+  Level: pure security policy
+  Test Double: none
+  Given an immutable placement policy and worker candidate
+  When each placement dimension is mismatched
+  Then every classification region trust image pool egress or cache mismatch is denied
+
+Scenario: remote secrets fail closed without disclosure
+  Test:
+    Package: agentd-security
+    Filter: remote_broker_rejects_scope_expiry_and_transport_failures_without_disclosure
+  Level: injected transport adapters
+  Test Double: recording remote secret transport
+  Given one exact secret admission
+  When scope expiry and transport availability are exercised
+  Then no expanded or unavailable secret is disclosed
+
+Scenario: authority epochs fail closed at every checkpoint
+  Test:
+    Package: agentd-security
+    Filter: checker_enforces_every_closed_checkpoint_at_equal_epoch
+  Level: injected transport adapters
+  Test Double: recording Specify authority transport
+  Given one pinned snapshot epoch
+  When every closed checkpoint is exercised
+  Then stale regressed unavailable or malformed epochs stop before protected effects
+
+Scenario: completion artifacts remain candidate-only until final manual validation
+  Test:
+    Package: agentctl
+    Filter: ad_e1_docs_record_candidate_and_defer_all_real_acceptance
+  Level: repository artifact inspection
+  Test Double: repository documents and sources
+  Given all AD-E1 code owners and the cumulative AD-E1 through AD-E7 checklist
+  When roadmap parity migration adapters and checklist are inspected
+  Then every AD-E1 work item resolves to code
+  And neither AD-E1 nor FSF-2 is marked accepted or PASS

@@ -70,10 +70,10 @@
 - Produces: `OidcAuthenticator<R>` over an injected `EnterprisePrincipalPort` and pinned `OidcProviderConfig`/JWK set.
 - Produces: `MatrixPrincipalResolver<R>` enforcing homeserver, user, device, and appservice mapping.
 
-- [ ] **Step 1:** Add signed-token tests covering issuer, audience, expiry, not-before, algorithm, kid, subject mapping, disabled principal, and token-redacted errors.
-- [ ] **Step 2:** Add Matrix tests covering trusted/untrusted homeserver, active/disabled user, current/revoked device, and allowed/foreign appservice namespace.
-- [ ] **Step 3:** Implement verification with `jsonwebtoken` and repository-backed resolution; never parse an unverified claim into an authenticated identity.
-- [ ] **Step 4:** Run both focused selectors GREEN and commit `feat(security): authenticate oidc and matrix principals`.
+- [x] **Step 1:** Add signed-token tests covering issuer, audience, expiry, not-before, algorithm, kid, subject mapping, disabled principal, and token-redacted errors.
+- [x] **Step 2:** Add Matrix tests covering trusted/untrusted homeserver, active/disabled user, current/revoked device, and allowed/foreign appservice namespace.
+- [x] **Step 3:** Implement verification with `jsonwebtoken` and repository-backed resolution; never parse an unverified claim into an authenticated identity.
+- [x] **Step 4:** Run both focused selectors GREEN and commit `feat(security): authenticate oidc and matrix principals`.
 
 ### Task 4: Content Redaction and Placement Admission
 
@@ -91,10 +91,10 @@
 - Produces: `ContentRedactor::compile` and `redact` with exact-value and policy-pattern rules.
 - Produces: `PlacementPolicyEvaluator::evaluate(&PlacementPolicy, &PlacementCandidate)` returning a closed `PlacementAdmission`.
 
-- [ ] **Step 1:** Add redaction tests for overlap, regex policy, binary/UTF-8 handling, output bounds, deterministic replacement, and no raw secret in Debug/errors.
-- [ ] **Step 2:** Add placement tests for classification, region, trust domain, signed digest, dedicated pool, egress, and tenant cache isolation.
-- [ ] **Step 3:** Implement bounded redaction with `regex-automata` and exact longest-match ordering, then implement pure placement evaluation.
-- [ ] **Step 4:** Run focused selectors GREEN and commit `feat(security): enforce redaction and placement policy`.
+- [x] **Step 1:** Add redaction tests for overlap, regex policy, binary/UTF-8 handling, output bounds, deterministic replacement, and no raw secret in Debug/errors.
+- [x] **Step 2:** Add placement tests for classification, region, trust domain, signed digest, dedicated pool, egress, and tenant cache isolation.
+- [x] **Step 3:** Implement bounded redaction with `regex-automata` and exact longest-match ordering, then implement pure placement evaluation.
+- [x] **Step 4:** Run focused selectors GREEN and commit `feat(security): enforce redaction and placement policy`.
 
 ### Task 5: Remote Secret Broker and Revocation Checkpoints
 
@@ -112,10 +112,10 @@
 - Produces: `AuthorityRevocationChecker<A>` implementing `PolicyRevocationPort` for all closed checkpoints.
 - Extends: enterprise operation composition with placement and checkpoint checks before protected side effects.
 
-- [ ] **Step 1:** Add fake-transport tests proving exact selector/scope requests, bounded expiry, redacted failures, timeout/unavailability denial, and no secret persistence.
-- [ ] **Step 2:** Add dispatch/renewal/artifact/delivery/release tests for equal, advanced, unavailable, and malformed authority epochs.
-- [ ] **Step 3:** Implement adapters and insert current checkpoint validation before every protected external side effect.
-- [ ] **Step 4:** Run focused selectors GREEN and commit `feat(security): enforce remote secrets and revocation checkpoints`.
+- [x] **Step 1:** Add fake-transport tests proving exact selector/scope requests, bounded expiry, redacted failures, timeout/unavailability denial, and no secret persistence.
+- [x] **Step 2:** Add dispatch/renewal/artifact/delivery/release tests for equal, advanced, unavailable, and malformed authority epochs.
+- [x] **Step 3:** Implement adapters and insert current checkpoint validation before every protected external side effect.
+- [x] **Step 4:** Run focused selectors GREEN and commit `feat(security): enforce remote secrets and revocation checkpoints`.
 
 ### Task 6: Candidate Evidence and Deferred Manual Checklist
 
@@ -131,7 +131,7 @@
 - Produces: repository-level proof that every AD-E1 roadmap work item has code ownership while keeping AD-E1/FSF-2 unaccepted until final manual verification.
 - Produces: one cumulative manual checklist carried forward through AD-E7.
 
-- [ ] **Step 1:** Add a repository artifact test binding every new type, port, migration, adapter, and deferred real/manual scenario.
-- [ ] **Step 2:** Update roadmap/parity/spec status to code-complete candidate without setting an exit gate to PASS.
-- [ ] **Step 3:** Append exact OIDC, Matrix, secret broker, OCI, cross-tenant, revocation, and placement manual commands/evidence fields to the cumulative checklist.
-- [ ] **Step 4:** Run automated workspace feedback, record failures without stopping later phase coding, and commit `docs(security): record complete ad-e1 candidate`.
+- [x] **Step 1:** Add a repository artifact test binding every new type, port, migration, adapter, and deferred real/manual scenario.
+- [x] **Step 2:** Update roadmap/parity/spec status to code-complete candidate without setting an exit gate to PASS.
+- [x] **Step 3:** Append exact OIDC, Matrix, secret broker, OCI, cross-tenant, revocation, and placement manual commands/evidence fields to the cumulative checklist.
+- [x] **Step 4:** Run automated workspace feedback, record failures without stopping later phase coding, and commit `docs(security): record complete ad-e1 candidate`.

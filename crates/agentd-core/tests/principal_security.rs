@@ -101,6 +101,7 @@ fn policy_epoch_and_placement_are_closed_contracts() {
         tenant_cache_namespace: "org-a/project-a".to_string(),
     };
     let candidate = PlacementCandidate {
+        supported_data_classifications: BTreeSet::from([DataClassification::Restricted]),
         region: "us-east-1".to_string(),
         worker_trust_domain: "workers.example".to_string(),
         image_digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

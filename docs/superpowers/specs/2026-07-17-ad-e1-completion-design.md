@@ -1,6 +1,6 @@
 # AD-E1 Completion Design
 
-- Status: code-first candidate implementation approved by the operator on 2026-07-17
+- Status: code-complete candidate on 2026-07-17; real/manual acceptance deferred
 - Canonical roadmap: `docs/plans/2026-07-09-agentd-native-runtime-roadmap.md`
 - Builds on: `docs/superpowers/specs/2026-07-12-ad-e1-minimum-security-baseline-design.md`
 
@@ -73,3 +73,15 @@ phase acceptance. No Claude process is started. Real OIDC, Matrix, secret
 broker, OCI, worker, OpenFab, restart, failover, and human workflows are listed
 in `docs/acceptance/ad-e-roadmap-manual-checklist.md` and executed together only
 after the AD-E1 through AD-E7 candidate code is implemented.
+
+## Candidate Ownership
+
+- `agentd-core` owns closed principal, placement, and checkpoint contracts.
+- `agentd-store` migration `0017` owns only non-secret OIDC/Matrix lifecycle mappings.
+- `agentd-security` owns pinned OIDC verification, Matrix source resolution,
+  bounded redaction, placement evaluation, remote secret scope validation, and
+  Specify epoch checking.
+- `agentd-bin` requires placement and policy-revocation providers in enterprise
+  composition and repeats epoch checks before protected side effects.
+- `docs/acceptance/ad-e-roadmap-manual-checklist.md` is the sole deferred real
+  acceptance record. No candidate artifact changes AD-E1 or FSF-2 to PASS.

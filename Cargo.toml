@@ -53,6 +53,8 @@ clap = { version = "4", features = ["derive"] }
 base64 = "0.22"
 getrandom = "0.4"
 hex = "0.4"
+jsonwebtoken = "9.3"
+regex-automata = "0.4"
 subtle = "2.6"
 zeroize = "1.9"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
@@ -72,7 +74,8 @@ tempfile = "3"
 mockall = "0.13"
 wiremock = "0.6"
 rcgen = "0.13"
-time = "0.3"
+rsa = "0.9"
+time = "=0.3.45"
 
 [profile.dev]
 opt-level = 0

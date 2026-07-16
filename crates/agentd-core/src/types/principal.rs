@@ -195,7 +195,7 @@ impl MatrixTrustPolicy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DataClassification {
     Public,
@@ -217,6 +217,7 @@ pub struct PlacementPolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlacementCandidate {
+    pub supported_data_classifications: BTreeSet<DataClassification>,
     pub region: String,
     pub worker_trust_domain: String,
     pub image_digest: String,
@@ -237,6 +238,12 @@ impl PlacementPolicy {
         &self,
         candidate: &PlacementCandidate,
     ) -> Result<PlacementAdmission, SecurityDenialReason> {
+        if !candidate
+            .supported_data_classifications
+            .contains(&self.data_classification)
+        {
+            return Err(SecurityDenialReason::PlacementClassificationDenied);
+        }
         if !self.allowed_regions.contains(&candidate.region) {
             return Err(SecurityDenialReason::PlacementRegionDenied);
         }
@@ -245,6 +252,9 @@ impl PlacementPolicy {
             .contains(&candidate.worker_trust_domain)
         {
             return Err(SecurityDenialReason::PlacementTrustDomainDenied);
+        }
+        if !is_sha256_digest(&candidate.image_digest) {
+            return Err(SecurityDenialReason::PlacementImageDigestInvalid);
         }
         if self.require_signed_image && !candidate.image_signature_verified {
             return Err(SecurityDenialReason::PlacementImageUnsigned);
@@ -263,6 +273,15 @@ impl PlacementPolicy {
             candidate: candidate.clone(),
         })
     }
+}
+
+fn is_sha256_digest(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

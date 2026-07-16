@@ -429,15 +429,16 @@ Depends on: AD-E0.
 
 Purpose: make multi-tenant execution safe before expanding the worker fleet.
 
-Current status on 2026-07-15: minimum baseline candidate; not an AD-E1 or FSF-2
-exit. The candidate covers workload mTLS verification, immutable tenant/project
-scope, lease/fencing-bound opaque capabilities, scoped secret checkout, OCI
-sandbox isolation, redacted security audit, cleanup, and fail-closed enterprise
-composition. The work list and exit gate below remain open, including the
-deferred identity, policy, production-provider, placement, and cross-surface
-requirements. The protected-operation composition API is candidate evidence;
-enterprise daemon transport remains incomplete until the later authenticated
-worker protocol is specified and accepted.
+Current status on 2026-07-17: code-complete candidate; not an AD-E1 or FSF-2
+exit. The candidate now covers OIDC and Matrix enterprise principals, workload
+mTLS, immutable tenant/project scope, lease/fencing-bound capabilities, local
+and remote secret-broker boundaries, OCI sandbox isolation, bounded content
+redaction, policy-revocation checkpoints, placement admission, redacted audit,
+cleanup, and fail-closed enterprise composition. Production provider wiring,
+authenticated AD-E2 transport, real service exercises, cross-surface rollout,
+and every exit-gate scenario remain deferred to
+`docs/acceptance/ad-e-roadmap-manual-checklist.md`. Candidate code ownership is
+not acceptance evidence and does not authorize promotion.
 
 Work:
 

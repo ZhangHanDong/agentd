@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -12,21 +12,22 @@ use agentd_bin::{AgentdCli, DaemonConfig, daemon};
 use agentd_core::ports::{
     AttemptCapabilityPort, AuditPage, AuditReadRequest, Clock, ExecutionAuditAppend,
     ExecutionAuditPort, ExecutionAuditRecord, ExecutionEvidenceError, ExecutionSandboxPort,
-    SecretBrokerPort, SecurityError, TaskLeaseCloseRequest, TaskLeaseDispatchRequest,
-    TaskLeaseError, TaskLeasePort, TaskLeaseRenewRequest, TenantAuthorizationPort,
-    WorkloadIdentityPort,
+    PolicyRevocationPort, SecretBrokerPort, SecurityError, TaskLeaseCloseRequest,
+    TaskLeaseDispatchRequest, TaskLeaseError, TaskLeasePort, TaskLeaseRenewRequest,
+    TenantAuthorizationPort, WorkloadIdentityPort,
 };
 use agentd_core::test_support::FixedClock;
 use agentd_core::types::{
     AttemptCapabilityId, AuthenticatedWorkload, AuthorityKey, CapabilityAdmission,
-    CapabilityIssueRequest, CapabilityToken, CapabilityValidationRequest, EgressPolicy,
-    ExecutionSandboxProfile, ExecutionSecurityScope, FencingToken, LeaseId, LeaseStatus,
-    OciSandboxRuntime, OrganizationRef, PreparedSandbox, ProjectExecutionSnapshotRef, ProjectRef,
-    ProtectedResource, ProtectedResourceKind, RbacPolicyVersionRef, RunId, SandboxCacheSharing,
-    SandboxCleanupRequest, SandboxExecuteRequest, SandboxExecution, SandboxLimits,
-    SandboxLinuxCapabilities, SandboxMount, SandboxMountAccess, SandboxPrepareRequest,
-    SandboxPrivilegeEscalation, SandboxRootFilesystem, SandboxWorkspace, SecretCheckoutRequest,
-    SecretLease, SecretMaterial, SecretSelector, SecurityAuditContext, SecurityDenialReason,
+    CapabilityIssueRequest, CapabilityToken, CapabilityValidationRequest, DataClassification,
+    EgressPolicy, ExecutionSandboxProfile, ExecutionSecurityScope, FencingToken, LeaseId,
+    LeaseStatus, OciSandboxRuntime, OrganizationRef, PlacementCandidate, PlacementPolicy,
+    PreparedSandbox, ProjectExecutionSnapshotRef, ProjectRef, ProtectedResource,
+    ProtectedResourceKind, RbacPolicyVersionRef, RunId, SandboxCacheSharing, SandboxCleanupRequest,
+    SandboxExecuteRequest, SandboxExecution, SandboxLimits, SandboxLinuxCapabilities, SandboxMount,
+    SandboxMountAccess, SandboxPrepareRequest, SandboxPrivilegeEscalation, SandboxRootFilesystem,
+    SandboxWorkspace, SecretCheckoutRequest, SecretLease, SecretMaterial, SecretSelector,
+    SecurityAuditContext, SecurityDenialReason, SecurityEpochRequest, SecurityEpochStatus,
     TaskLeaseClaim, TaskLeaseGrant, TaskRunId, TenantAuthorization, TenantAuthorizationRequest,
     WorkerId, WorkerIncarnationId, WorkloadIdentityRequest, WorkloadRole,
 };
@@ -39,6 +40,7 @@ use tokio::sync::Notify;
 enum FailureStage {
     Identity,
     Scope,
+    Revocation,
     Authorization,
     Lease,
     Capability,
@@ -212,6 +214,23 @@ impl TenantAuthorizationPort for RecordingPorts {
             resource: request.resource.clone(),
             authorized_at: 150,
             expires_at: 300,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl PolicyRevocationPort for RecordingPorts {
+    async fn check_security_epoch(
+        &self,
+        request: &SecurityEpochRequest,
+    ) -> Result<SecurityEpochStatus, SecurityError> {
+        self.record("revocation");
+        self.observe("revocation", request.observed_at);
+        self.fail_security(FailureStage::Revocation)?;
+        assert_eq!(request.pinned_epoch, 9);
+        Ok(SecurityEpochStatus {
+            current_epoch: 9,
+            observed_at: request.observed_at,
         })
     }
 }
@@ -445,6 +464,7 @@ fn providers_with_clock(
         Arc::clone(ports) as Arc<dyn SecretBrokerPort>,
         Arc::clone(ports) as Arc<dyn ExecutionSandboxPort>,
         Arc::clone(ports) as Arc<dyn ExecutionAuditPort>,
+        Arc::clone(ports) as Arc<dyn PolicyRevocationPort>,
         clock,
     )
 }
@@ -594,6 +614,31 @@ fn profile() -> ExecutionSandboxProfile {
     }
 }
 
+fn placement_policy() -> PlacementPolicy {
+    PlacementPolicy {
+        data_classification: DataClassification::Restricted,
+        allowed_regions: BTreeSet::from(["local-zone".to_string()]),
+        allowed_worker_trust_domains: BTreeSet::from(["agents.example".to_string()]),
+        require_signed_image: true,
+        require_dedicated_pool: true,
+        egress_profile_id: "deny-all-v1".to_string(),
+        tenant_cache_namespace: "specify:enterprise-test/org-a/project-a".to_string(),
+    }
+}
+
+fn placement_candidate() -> PlacementCandidate {
+    PlacementCandidate {
+        supported_data_classifications: BTreeSet::from([DataClassification::Restricted]),
+        region: "local-zone".to_string(),
+        worker_trust_domain: "agents.example".to_string(),
+        image_digest: format!("sha256:{}", "c".repeat(64)),
+        image_signature_verified: true,
+        dedicated_pool: true,
+        egress_profile_id: "deny-all-v1".to_string(),
+        tenant_cache_namespace: "specify:enterprise-test/org-a/project-a".to_string(),
+    }
+}
+
 fn operation() -> EnterpriseWorkerOperation {
     EnterpriseWorkerOperation {
         identity_request: WorkloadIdentityRequest {
@@ -612,6 +657,8 @@ fn operation() -> EnterpriseWorkerOperation {
             selector: SecretSelector::new("repository/app-token").expect("secret selector"),
             capability_token: CapabilityToken::new([b'C'; 32]),
         }),
+        placement_policy: placement_policy(),
+        placement_candidate: placement_candidate(),
         profile: profile(),
         argv: vec!["cargo".to_string(), "test".to_string()],
         env: BTreeMap::from([("CI".to_string(), "1".to_string())]),
@@ -653,15 +700,33 @@ fn expected_failure_calls(failure: FailureStage) -> Vec<&'static str> {
     let mut calls = match failure {
         FailureStage::Identity => vec!["identity"],
         FailureStage::Scope => vec!["identity", "scope"],
-        FailureStage::Authorization => vec!["identity", "scope", "authorization"],
-        FailureStage::Lease => vec!["identity", "scope", "authorization", "lease"],
-        FailureStage::Capability => {
-            vec!["identity", "scope", "authorization", "lease", "capability"]
+        FailureStage::Revocation => vec!["identity", "scope", "revocation"],
+        FailureStage::Authorization => {
+            vec!["identity", "scope", "revocation", "authorization"]
         }
+        FailureStage::Lease => vec![
+            "identity",
+            "scope",
+            "revocation",
+            "authorization",
+            "revocation",
+            "lease",
+        ],
+        FailureStage::Capability => vec![
+            "identity",
+            "scope",
+            "revocation",
+            "authorization",
+            "revocation",
+            "lease",
+            "capability",
+        ],
         FailureStage::Secret => vec![
             "identity",
             "scope",
+            "revocation",
             "authorization",
+            "revocation",
             "lease",
             "capability",
             "secret",
@@ -669,10 +734,13 @@ fn expected_failure_calls(failure: FailureStage) -> Vec<&'static str> {
         FailureStage::SandboxPrepare => vec![
             "identity",
             "scope",
+            "revocation",
             "authorization",
+            "revocation",
             "lease",
             "capability",
             "secret",
+            "revocation",
             "lease",
             "capability",
             "sandbox",
@@ -680,13 +748,17 @@ fn expected_failure_calls(failure: FailureStage) -> Vec<&'static str> {
         FailureStage::SandboxExecute | FailureStage::Audit | FailureStage::Teardown => vec![
             "identity",
             "scope",
+            "revocation",
             "authorization",
+            "revocation",
             "lease",
             "capability",
             "secret",
+            "revocation",
             "lease",
             "capability",
             "sandbox",
+            "revocation",
             "lease",
             "capability",
         ],
@@ -706,6 +778,7 @@ async fn production_security_gate_orders_checks_and_stops_on_failure() {
     for failure in [
         FailureStage::Identity,
         FailureStage::Scope,
+        FailureStage::Revocation,
         FailureStage::Authorization,
         FailureStage::Lease,
         FailureStage::Capability,
@@ -737,13 +810,17 @@ async fn production_security_gate_orders_checks_and_stops_on_failure() {
         vec![
             "identity",
             "scope",
+            "revocation",
             "authorization",
+            "revocation",
             "lease",
             "capability",
             "secret",
+            "revocation",
             "lease",
             "capability",
             "sandbox",
+            "revocation",
             "lease",
             "capability",
             "audit",
@@ -798,7 +875,7 @@ async fn production_security_gate_audits_provider_unavailability_with_stable_rea
     );
     assert_eq!(
         ports.calls(),
-        vec!["identity", "scope", "authorization", "audit"]
+        vec!["identity", "scope", "revocation", "authorization", "audit"]
     );
 }
 
@@ -836,13 +913,17 @@ async fn production_security_gate_preserves_audit_and_teardown_failures() {
         vec![
             "identity",
             "scope",
+            "revocation",
             "authorization",
+            "revocation",
             "lease",
             "capability",
             "secret",
+            "revocation",
             "lease",
             "capability",
             "sandbox",
+            "revocation",
             "lease",
             "capability",
             "audit",
@@ -886,13 +967,17 @@ async fn production_security_gate_cleans_up_when_operation_is_cancelled() {
         vec![
             "identity",
             "scope",
+            "revocation",
             "authorization",
+            "revocation",
             "lease",
             "capability",
             "secret",
+            "revocation",
             "lease",
             "capability",
             "sandbox",
+            "revocation",
             "lease",
             "capability",
             "audit",
@@ -924,8 +1009,8 @@ async fn production_security_gate_revalidates_before_each_external_side_effect()
         SecurityError::Denied(SecurityDenialReason::LeaseRejected)
     );
     assert!(
-        ports.observations().contains(&("lease", 300)),
-        "lease must be revalidated with the advanced trusted clock"
+        !ports.observations().contains(&("lease", 300)),
+        "expired scope checkpoint must stop before lease validation"
     );
     assert!(
         !ports

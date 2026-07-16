@@ -341,7 +341,25 @@ impl SqliteEnterprisePrincipalRepository {
         require_text(&binding.appservice_id, "appservice_id")?;
         require_text(&binding.homeserver, "homeserver")?;
         require_text(&binding.sender_localpart_prefix, "sender_localpart_prefix")?;
-        self.require_active_principal(&binding.principal_id).await?;
+        if !self
+            .matrix_trust_policy
+            .trusted_homeservers
+            .contains(&binding.homeserver)
+            || !self
+                .matrix_trust_policy
+                .trusted_appservices
+                .contains(&binding.appservice_id)
+        {
+            return Err(StoreError::Conflict(
+                "Matrix appservice is not trusted".to_string(),
+            ));
+        }
+        let principal = self.require_active_principal(&binding.principal_id).await?;
+        if principal.kind != PrincipalKind::Service {
+            return Err(StoreError::Conflict(
+                "Matrix appservice must bind a service principal".to_string(),
+            ));
+        }
         let existing = sqlx::query(
             "SELECT sender_localpart_prefix, principal_id, status \
              FROM matrix_principal_appservices WHERE appservice_id = ? AND homeserver = ?",

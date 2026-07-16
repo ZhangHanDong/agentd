@@ -6,16 +6,17 @@ use std::sync::Arc;
 
 use agentd_core::ports::{
     AttemptCapabilityPort, AuditActorKind, Clock, ExecutionAuditAppend, ExecutionAuditPort,
-    ExecutionEvidenceLinks, ExecutionSandboxPort, ExecutionSnapshotLink, SecretBrokerPort,
-    SecurityError, TaskLeasePort, TenantAuthorizationPort, WorkloadIdentityPort,
+    ExecutionEvidenceLinks, ExecutionSandboxPort, ExecutionSnapshotLink, PolicyRevocationPort,
+    SecretBrokerPort, SecurityError, TaskLeasePort, TenantAuthorizationPort, WorkloadIdentityPort,
 };
 use agentd_core::types::{
     AuthenticatedWorkload, CapabilityAdmission, CapabilityToken, CapabilityValidationRequest,
-    ExecutionSandboxProfile, ExecutionSecurityScope, ProtectedAction, ProtectedResource,
-    ProtectedResourceKind, SandboxCleanupRequest, SandboxExecuteRequest, SandboxExecution,
-    SandboxPrepareRequest, SandboxTerminalReason, SecretCheckoutRequest, SecretLease,
-    SecretSelector, SecurityAuditContext, SecurityDenialReason, TaskRunId, TenantAuthorization,
-    TenantAuthorizationRequest, WorkloadIdentityRequest,
+    ExecutionSandboxProfile, ExecutionSecurityScope, PlacementCandidate, PlacementPolicy,
+    ProtectedAction, ProtectedResource, ProtectedResourceKind, SandboxCleanupRequest,
+    SandboxExecuteRequest, SandboxExecution, SandboxPrepareRequest, SandboxTerminalReason,
+    SecretCheckoutRequest, SecretLease, SecretSelector, SecurityAuditContext, SecurityCheckpoint,
+    SecurityDenialReason, SecurityEpochRequest, SecurityEpochStatus, TaskRunId,
+    TenantAuthorization, TenantAuthorizationRequest, WorkloadIdentityRequest,
 };
 use agentd_surface::http::AuthConfig;
 use clap::ValueEnum;
@@ -41,11 +42,12 @@ pub enum SecurityProviderKind {
     SecretBroker,
     ExecutionSandbox,
     ExecutionAudit,
+    PolicyRevocation,
     TrustedClock,
 }
 
 impl SecurityProviderKind {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::WorkloadIdentity,
         Self::ExecutionScope,
         Self::TenantAuthorization,
@@ -54,6 +56,7 @@ impl SecurityProviderKind {
         Self::SecretBroker,
         Self::ExecutionSandbox,
         Self::ExecutionAudit,
+        Self::PolicyRevocation,
         Self::TrustedClock,
     ];
 
@@ -68,6 +71,7 @@ impl SecurityProviderKind {
             Self::SecretBroker => "secret_broker",
             Self::ExecutionSandbox => "execution_sandbox",
             Self::ExecutionAudit => "execution_audit",
+            Self::PolicyRevocation => "policy_revocation",
             Self::TrustedClock => "trusted_clock",
         }
     }
@@ -109,6 +113,8 @@ pub struct EnterpriseWorkerOperation {
     pub sandbox_prepare_token: CapabilityToken,
     pub sandbox_execute_token: CapabilityToken,
     pub secret: Option<EnterpriseSecretRequest>,
+    pub placement_policy: PlacementPolicy,
+    pub placement_candidate: PlacementCandidate,
     pub profile: ExecutionSandboxProfile,
     pub argv: Vec<String>,
     pub env: BTreeMap<String, String>,
@@ -125,6 +131,7 @@ pub struct EnterpriseSecurityProviders {
     secret_broker: Option<Arc<dyn SecretBrokerPort>>,
     execution_sandbox: Option<Arc<dyn ExecutionSandboxPort>>,
     execution_audit: Option<Arc<dyn ExecutionAuditPort>>,
+    policy_revocation: Option<Arc<dyn PolicyRevocationPort>>,
     trusted_clock: Option<Arc<dyn Clock>>,
 }
 
@@ -155,6 +162,7 @@ impl EnterpriseSecurityProviders {
         secret_broker: Arc<dyn SecretBrokerPort>,
         execution_sandbox: Arc<dyn ExecutionSandboxPort>,
         execution_audit: Arc<dyn ExecutionAuditPort>,
+        policy_revocation: Arc<dyn PolicyRevocationPort>,
         trusted_clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
@@ -166,6 +174,7 @@ impl EnterpriseSecurityProviders {
             secret_broker: Some(secret_broker),
             execution_sandbox: Some(execution_sandbox),
             execution_audit: Some(execution_audit),
+            policy_revocation: Some(policy_revocation),
             trusted_clock: Some(trusted_clock),
         }
     }
@@ -181,6 +190,7 @@ impl EnterpriseSecurityProviders {
             SecurityProviderKind::SecretBroker => self.secret_broker = None,
             SecurityProviderKind::ExecutionSandbox => self.execution_sandbox = None,
             SecurityProviderKind::ExecutionAudit => self.execution_audit = None,
+            SecurityProviderKind::PolicyRevocation => self.policy_revocation = None,
             SecurityProviderKind::TrustedClock => self.trusted_clock = None,
         }
         self
@@ -196,6 +206,7 @@ impl EnterpriseSecurityProviders {
             SecurityProviderKind::SecretBroker => self.secret_broker.is_some(),
             SecurityProviderKind::ExecutionSandbox => self.execution_sandbox.is_some(),
             SecurityProviderKind::ExecutionAudit => self.execution_audit.is_some(),
+            SecurityProviderKind::PolicyRevocation => self.policy_revocation.is_some(),
             SecurityProviderKind::TrustedClock => self.trusted_clock.is_some(),
         }
     }
@@ -216,6 +227,7 @@ impl EnterpriseSecurityProviders {
             secret_broker: take_provider(&mut self.secret_broker),
             execution_sandbox: take_provider(&mut self.execution_sandbox),
             execution_audit: take_provider(&mut self.execution_audit),
+            policy_revocation: take_provider(&mut self.policy_revocation),
             trusted_clock: take_provider(&mut self.trusted_clock),
         })
     }
@@ -287,6 +299,7 @@ pub struct EnterpriseSecurityPipeline {
     secret_broker: Arc<dyn SecretBrokerPort>,
     execution_sandbox: Arc<dyn ExecutionSandboxPort>,
     execution_audit: Arc<dyn ExecutionAuditPort>,
+    policy_revocation: Arc<dyn PolicyRevocationPort>,
     trusted_clock: Arc<dyn Clock>,
 }
 
@@ -439,6 +452,32 @@ impl EnterpriseSecurityPipeline {
                 .deny(&workload, &scope, "scope", error, operation.observed_at)
                 .await;
         }
+        self.run_stage(
+            &workload,
+            &scope,
+            "placement",
+            operation.observed_at,
+            operation
+                .placement_policy
+                .evaluate(&operation.placement_candidate)
+                .map(|_| ())
+                .map_err(SecurityError::Denied),
+        )
+        .await?;
+        self.run_stage(
+            &workload,
+            &scope,
+            "revocation",
+            operation.observed_at,
+            self.check_revocation_checkpoint(
+                &scope,
+                SecurityCheckpoint::Dispatch,
+                operation.observed_at,
+            )
+            .await
+            .map(|_| ()),
+        )
+        .await?;
         let secret_resource = secret_resource(&operation);
         self.run_stage(
             &workload,
@@ -532,6 +571,16 @@ impl EnterpriseSecurityPipeline {
                     .await;
             }
         };
+        self.run_stage(
+            workload,
+            scope,
+            "revocation",
+            observed_at,
+            self.check_revocation_checkpoint(scope, SecurityCheckpoint::LeaseRenewal, observed_at)
+                .await
+                .map(|_| ()),
+        )
+        .await?;
         self.run_stage(
             workload,
             scope,
@@ -664,6 +713,16 @@ impl EnterpriseSecurityPipeline {
         self.run_stage(
             workload,
             scope,
+            "revocation",
+            observed_at,
+            self.check_revocation_checkpoint(scope, SecurityCheckpoint::LeaseRenewal, observed_at)
+                .await
+                .map(|_| ()),
+        )
+        .await?;
+        self.run_stage(
+            workload,
+            scope,
             "lease",
             observed_at,
             self.validate_lease(scope, observed_at).await,
@@ -713,6 +772,21 @@ impl EnterpriseSecurityPipeline {
                     .await;
             }
         };
+        if let Err(error) = self
+            .check_revocation_checkpoint(scope, SecurityCheckpoint::LeaseRenewal, observed_at)
+            .await
+        {
+            return self
+                .deny_and_teardown(
+                    workload,
+                    scope,
+                    "revocation",
+                    error,
+                    terminal_guard,
+                    observed_at,
+                )
+                .await;
+        }
         if let Err(error) = self.validate_lease(scope, observed_at).await {
             return self
                 .deny_and_teardown(workload, scope, "lease", error, terminal_guard, observed_at)
@@ -752,6 +826,37 @@ impl EnterpriseSecurityPipeline {
             ));
         }
         Ok(observed_at)
+    }
+
+    pub async fn check_revocation_checkpoint(
+        &self,
+        scope: &ExecutionSecurityScope,
+        checkpoint: SecurityCheckpoint,
+        observed_at: i64,
+    ) -> Result<SecurityEpochStatus, SecurityError> {
+        if observed_at < 0 || observed_at >= scope.valid_until {
+            return Err(SecurityError::Denied(SecurityDenialReason::LeaseRejected));
+        }
+        let status = self
+            .policy_revocation
+            .check_security_epoch(&SecurityEpochRequest {
+                checkpoint,
+                organization_ref: scope.organization_ref.clone(),
+                project_ref: scope.project_ref.clone(),
+                execution_snapshot_ref: scope.execution_snapshot_ref.clone(),
+                pinned_epoch: scope.policy_revocation_epoch,
+                observed_at,
+            })
+            .await?;
+        if status.observed_at > observed_at {
+            return Err(SecurityError::Unavailable(
+                "policy revocation authority returned future state".to_string(),
+            ));
+        }
+        status
+            .validate_pinned_epoch(scope.policy_revocation_epoch)
+            .map_err(SecurityError::Denied)?;
+        Ok(status)
     }
 
     async fn finish_success(
@@ -1000,6 +1105,12 @@ fn validate_resolved_scope(
         || operation.observed_at < workload.not_before
         || operation.observed_at >= workload.not_after
         || operation.observed_at >= scope.valid_until
+        || workload.trust_domain != operation.placement_candidate.worker_trust_domain
+        || scope.sandbox_profile_id != operation.profile.profile_id
+        || scope.egress_profile_id != operation.placement_candidate.egress_profile_id
+        || operation.profile.image_digest != operation.placement_candidate.image_digest
+        || operation.profile.tenant_cache_namespace
+            != operation.placement_candidate.tenant_cache_namespace
         || !matches!(
             operation.scope_request.resource.kind,
             ProtectedResourceKind::Execution
