@@ -4,9 +4,10 @@ use thiserror::Error;
 
 use crate::types::{
     AttemptCapabilityId, AuthenticatedWorkload, CapabilityAdmission, CapabilityIssueRequest,
-    CapabilityToken, CapabilityValidationRequest, PreparedSandbox, SandboxCleanupRequest,
-    SandboxExecuteRequest, SandboxExecution, SandboxPrepareRequest, SecretCheckoutRequest,
-    SecretLease, TenantAuthorization, TenantAuthorizationRequest, WorkloadIdentityRequest,
+    CapabilityToken, CapabilityValidationRequest, ExecutionSandboxProfile, ExecutionSecurityScope,
+    PlacementAdmission, PreparedSandbox, SandboxCleanupRequest, SandboxExecuteRequest,
+    SandboxExecution, SandboxPrepareRequest, SecretCheckoutRequest, SecretLease,
+    TenantAuthorization, TenantAuthorizationRequest, WorkloadIdentityRequest,
 };
 
 use crate::types::SecurityDenialReason;
@@ -45,6 +46,22 @@ pub trait TenantAuthorizationPort: Send + Sync {
         &self,
         request: &TenantAuthorizationRequest,
     ) -> Result<TenantAuthorization, SecurityError>;
+}
+
+#[async_trait::async_trait]
+pub trait PlacementAdmissionPort: Send + Sync {
+    async fn admit_placement(
+        &self,
+        workload: &AuthenticatedWorkload,
+        scope: &ExecutionSecurityScope,
+        profile: &ExecutionSandboxProfile,
+        observed_at: i64,
+    ) -> Result<PlacementAdmission, SecurityError>;
+}
+
+#[async_trait::async_trait]
+pub trait ContentRedactionPort: Send + Sync {
+    async fn redact_content(&self, content: &[u8]) -> Result<Vec<u8>, SecurityError>;
 }
 
 #[async_trait::async_trait]

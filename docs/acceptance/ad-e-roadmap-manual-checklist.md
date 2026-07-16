@@ -8,10 +8,10 @@
 
 ## AD-E1
 
-- [ ] OIDC: authenticate a signed token from the configured HTTPS issuer; capture issuer, audience, kid, principal id, expiry, and redacted denial evidence for wrong issuer/audience/kid/algorithm/expiry.
-- [ ] Matrix: resolve a current human device and a trusted appservice service principal; capture denials for foreign homeserver, disabled user, missing/revoked device, and foreign appservice namespace.
+- [ ] OIDC: authenticate a signed token from the configured HTTPS issuer; capture issuer, audience, `azp`, kid, principal id, trusted time, repository-response binding, expiry, and redacted denial evidence for wrong issuer/audience/authorized-party/kid/algorithm/expiry.
+- [ ] Matrix: resolve a current human device and a trusted appservice service principal from authenticated Matrix transport metadata; capture trusted event time and denials for forged sender/device/appservice metadata, foreign homeserver, disabled user, missing/revoked device, and foreign appservice namespace.
 - [ ] Workload mTLS: rotate a worker certificate and prove expired, revoked, foreign-CA, and superseded-incarnation identities cannot dispatch or renew.
-- [ ] Remote secret broker: check out repository/model/object-store credentials through the production transport, prove scope/expiry caps, rotate credentials, and inspect storage/log/audit for absence of secret bytes.
+- [ ] Remote secret broker: check out repository/model/object-store credentials through the production transport, prove checkout nonce, RBAC version, revocation epoch, secret version, local timeout, scope/expiry caps, credential rotation, and absence of secret bytes in storage/log/audit.
 - [ ] OCI sandbox: run `AGENTD_REAL_SECURITY_SANDBOX_SMOKE=1 bash scripts/agentd_real_security_sandbox_smoke.sh --execute`; prove host credentials, another tenant worktree/cache, privilege escalation, and undeclared egress are denied and cleanup is deterministic.
 - [ ] Cross-tenant: attempt API, queue, audit, artifact, cache, model-cache, secret, and worker-reuse access using mismatched organization/project/snapshot references; retain stable denial codes.
 - [ ] Redaction: inject exact, overlapping, regex-shaped, UTF-8, and binary secrets into stdout/stderr/transcript/audit paths; prove persisted and delivered content contains deterministic replacement only.

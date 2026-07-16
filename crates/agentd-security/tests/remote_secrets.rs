@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::{sync::Mutex, time::Duration};
 
 use agentd_core::ports::{SecretBrokerPort, SecurityError};
 use agentd_core::types::{
@@ -16,7 +16,18 @@ use agentd_security::remote_secrets::{
 #[derive(Debug)]
 struct FakeTransport {
     requests: Mutex<Vec<RemoteSecretRequest>>,
-    response: Mutex<Option<Result<RemoteSecretResponse, SecretBrokerTransportError>>>,
+    response: Mutex<Option<ScriptedResponse>>,
+}
+
+#[derive(Debug)]
+enum ScriptedResponse {
+    Valid {
+        material: &'static [u8],
+        expires_at: i64,
+    },
+    ForeignScope,
+    ExcessExpiry,
+    Transport(SecretBrokerTransportError),
 }
 
 #[async_trait::async_trait]
@@ -29,11 +40,53 @@ impl SecretBrokerTransport for FakeTransport {
             .lock()
             .expect("requests")
             .push(request.clone());
-        self.response
+        let response = self
+            .response
             .lock()
             .expect("response")
             .take()
-            .expect("one scripted response")
+            .expect("one scripted response");
+        match response {
+            ScriptedResponse::Valid {
+                material,
+                expires_at,
+            } => Ok(RemoteSecretResponse {
+                scope: request.scope.clone(),
+                secret_version: "v1".to_string(),
+                material: SecretMaterial::new(material.to_vec()),
+                expires_at,
+            }),
+            ScriptedResponse::ForeignScope => {
+                let mut scope = request.scope.clone();
+                scope.selector = SecretSelector::new("repository/foreign-token").expect("selector");
+                Ok(RemoteSecretResponse {
+                    scope,
+                    secret_version: "v1".to_string(),
+                    material: SecretMaterial::new(b"scope-leak".to_vec()),
+                    expires_at: 250,
+                })
+            }
+            ScriptedResponse::ExcessExpiry => Ok(RemoteSecretResponse {
+                scope: request.scope.clone(),
+                secret_version: "v1".to_string(),
+                material: SecretMaterial::new(b"expiry-leak".to_vec()),
+                expires_at: request.scope.requested_expires_at + 1,
+            }),
+            ScriptedResponse::Transport(error) => Err(error),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct NeverTransport;
+
+#[async_trait::async_trait]
+impl SecretBrokerTransport for NeverTransport {
+    async fn checkout(
+        &self,
+        _request: &RemoteSecretRequest,
+    ) -> Result<RemoteSecretResponse, SecretBrokerTransportError> {
+        std::future::pending().await
     }
 }
 
@@ -112,16 +165,14 @@ fn request() -> SecretCheckoutRequest {
 #[tokio::test]
 async fn remote_broker_sends_exact_immutable_scope_and_returns_transient_material() {
     let checkout = request();
-    let remote_request = RemoteSecretRequest::from_checkout(&checkout).expect("remote request");
     let transport = FakeTransport {
         requests: Mutex::new(Vec::new()),
-        response: Mutex::new(Some(Ok(RemoteSecretResponse {
-            scope: remote_request.scope.clone(),
-            material: SecretMaterial::new(b"remote-secret-value".to_vec()),
+        response: Mutex::new(Some(ScriptedResponse::Valid {
+            material: b"remote-secret-value",
             expires_at: 280,
-        }))),
+        })),
     };
-    let broker = RemoteSecretBroker::new(transport);
+    let broker = RemoteSecretBroker::new(transport, Duration::from_secs(1)).expect("broker");
 
     let lease = broker
         .checkout_secret(&checkout)
@@ -130,45 +181,33 @@ async fn remote_broker_sends_exact_immutable_scope_and_returns_transient_materia
     assert_eq!(lease.selector, selector());
     assert_eq!(lease.material.expose_secret(), b"remote-secret-value");
     assert_eq!(lease.expires_at, 280);
+    let requests = broker.transport().requests.lock().expect("requests");
+    let remote_request = requests.first().expect("remote request");
     assert_eq!(
-        broker
-            .transport()
-            .requests
-            .lock()
-            .expect("requests")
-            .as_slice(),
-        &[remote_request]
+        remote_request.scope.rbac_policy_version_ref,
+        checkout.admission.scope.rbac_policy_version_ref
     );
+    assert_eq!(remote_request.scope.policy_revocation_epoch, 7);
+    assert!(remote_request.scope.checkout_id.starts_with("sc_"));
+    assert_eq!(remote_request.scope.checkout_id.len(), 29);
     assert!(!format!("{broker:?} {lease:?}").contains("remote-secret-value"));
 }
 
 #[tokio::test]
 async fn remote_broker_rejects_scope_expiry_and_transport_failures_without_disclosure() {
     let checkout = request();
-    let remote_request = RemoteSecretRequest::from_checkout(&checkout).expect("remote request");
     for response in [
-        Ok(RemoteSecretResponse {
-            scope: {
-                let mut scope = remote_request.scope.clone();
-                scope.selector = SecretSelector::new("repository/foreign-token").expect("selector");
-                scope
-            },
-            material: SecretMaterial::new(b"scope-leak".to_vec()),
-            expires_at: 250,
-        }),
-        Ok(RemoteSecretResponse {
-            scope: remote_request.scope.clone(),
-            material: SecretMaterial::new(b"expiry-leak".to_vec()),
-            expires_at: 301,
-        }),
-        Err(SecretBrokerTransportError::TimedOut),
-        Err(SecretBrokerTransportError::Unavailable),
+        ScriptedResponse::ForeignScope,
+        ScriptedResponse::ExcessExpiry,
+        ScriptedResponse::Transport(SecretBrokerTransportError::TimedOut),
+        ScriptedResponse::Transport(SecretBrokerTransportError::Unavailable),
     ] {
         let transport = FakeTransport {
             requests: Mutex::new(Vec::new()),
             response: Mutex::new(Some(response)),
         };
-        let error = RemoteSecretBroker::new(transport)
+        let error = RemoteSecretBroker::new(transport, Duration::from_secs(1))
+            .expect("broker")
             .checkout_secret(&checkout)
             .await
             .expect_err("invalid remote response must fail closed");
@@ -181,4 +220,18 @@ async fn remote_broker_rejects_scope_expiry_and_transport_failures_without_discl
         assert!(!rendered.contains("expiry-leak"));
         assert!(!rendered.contains("foreign-token"));
     }
+}
+
+#[tokio::test]
+async fn remote_broker_enforces_a_local_timeout() {
+    let error = RemoteSecretBroker::new(NeverTransport, Duration::from_millis(1))
+        .expect("broker")
+        .checkout_secret(&request())
+        .await
+        .expect_err("local timeout must fail closed");
+
+    assert_eq!(
+        error,
+        SecurityError::Denied(SecurityDenialReason::SecretUnavailable)
+    );
 }

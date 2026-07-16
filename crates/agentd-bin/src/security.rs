@@ -5,18 +5,19 @@ use std::fmt;
 use std::sync::Arc;
 
 use agentd_core::ports::{
-    AttemptCapabilityPort, AuditActorKind, Clock, ExecutionAuditAppend, ExecutionAuditPort,
-    ExecutionEvidenceLinks, ExecutionSandboxPort, ExecutionSnapshotLink, PolicyRevocationPort,
-    SecretBrokerPort, SecurityError, TaskLeasePort, TenantAuthorizationPort, WorkloadIdentityPort,
+    AttemptCapabilityPort, AuditActorKind, Clock, ContentRedactionPort, ExecutionAuditAppend,
+    ExecutionAuditPort, ExecutionEvidenceLinks, ExecutionSandboxPort, ExecutionSnapshotLink,
+    PlacementAdmissionPort, PolicyRevocationPort, SecretBrokerPort, SecurityError, TaskLeasePort,
+    TenantAuthorizationPort, WorkloadIdentityPort,
 };
 use agentd_core::types::{
     AuthenticatedWorkload, CapabilityAdmission, CapabilityToken, CapabilityValidationRequest,
-    ExecutionSandboxProfile, ExecutionSecurityScope, PlacementCandidate, PlacementPolicy,
-    ProtectedAction, ProtectedResource, ProtectedResourceKind, SandboxCleanupRequest,
-    SandboxExecuteRequest, SandboxExecution, SandboxPrepareRequest, SandboxTerminalReason,
-    SecretCheckoutRequest, SecretLease, SecretSelector, SecurityAuditContext, SecurityCheckpoint,
-    SecurityDenialReason, SecurityEpochRequest, SecurityEpochStatus, TaskRunId,
-    TenantAuthorization, TenantAuthorizationRequest, WorkloadIdentityRequest,
+    ExecutionSandboxProfile, ExecutionSecurityScope, PlacementAdmission, ProtectedAction,
+    ProtectedResource, ProtectedResourceKind, SandboxCleanupRequest, SandboxExecuteRequest,
+    SandboxExecution, SandboxPrepareRequest, SandboxTerminalReason, SecretCheckoutRequest,
+    SecretLease, SecretSelector, SecurityAuditContext, SecurityCheckpoint, SecurityDenialReason,
+    SecurityEpochRequest, SecurityEpochStatus, TaskRunId, TenantAuthorization,
+    TenantAuthorizationRequest, WorkloadIdentityRequest,
 };
 use agentd_surface::http::AuthConfig;
 use clap::ValueEnum;
@@ -36,26 +37,30 @@ pub enum SecurityRuntimeMode {
 pub enum SecurityProviderKind {
     WorkloadIdentity,
     ExecutionScope,
+    PlacementAdmission,
     TenantAuthorization,
     TaskLease,
     AttemptCapability,
     SecretBroker,
     ExecutionSandbox,
     ExecutionAudit,
+    ContentRedaction,
     PolicyRevocation,
     TrustedClock,
 }
 
 impl SecurityProviderKind {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 12] = [
         Self::WorkloadIdentity,
         Self::ExecutionScope,
+        Self::PlacementAdmission,
         Self::TenantAuthorization,
         Self::TaskLease,
         Self::AttemptCapability,
         Self::SecretBroker,
         Self::ExecutionSandbox,
         Self::ExecutionAudit,
+        Self::ContentRedaction,
         Self::PolicyRevocation,
         Self::TrustedClock,
     ];
@@ -65,12 +70,14 @@ impl SecurityProviderKind {
         match self {
             Self::WorkloadIdentity => "workload_identity",
             Self::ExecutionScope => "execution_scope",
+            Self::PlacementAdmission => "placement_admission",
             Self::TenantAuthorization => "tenant_authorization",
             Self::TaskLease => "task_lease",
             Self::AttemptCapability => "attempt_capability",
             Self::SecretBroker => "secret_broker",
             Self::ExecutionSandbox => "execution_sandbox",
             Self::ExecutionAudit => "execution_audit",
+            Self::ContentRedaction => "content_redaction",
             Self::PolicyRevocation => "policy_revocation",
             Self::TrustedClock => "trusted_clock",
         }
@@ -113,8 +120,6 @@ pub struct EnterpriseWorkerOperation {
     pub sandbox_prepare_token: CapabilityToken,
     pub sandbox_execute_token: CapabilityToken,
     pub secret: Option<EnterpriseSecretRequest>,
-    pub placement_policy: PlacementPolicy,
-    pub placement_candidate: PlacementCandidate,
     pub profile: ExecutionSandboxProfile,
     pub argv: Vec<String>,
     pub env: BTreeMap<String, String>,
@@ -125,12 +130,14 @@ pub struct EnterpriseWorkerOperation {
 pub struct EnterpriseSecurityProviders {
     workload_identity: Option<Arc<dyn WorkloadIdentityPort>>,
     execution_scope: Option<Arc<dyn ExecutionSecurityScopePort>>,
+    placement_admission: Option<Arc<dyn PlacementAdmissionPort>>,
     tenant_authorization: Option<Arc<dyn TenantAuthorizationPort>>,
     task_lease: Option<Arc<dyn TaskLeasePort>>,
     attempt_capability: Option<Arc<dyn AttemptCapabilityPort>>,
     secret_broker: Option<Arc<dyn SecretBrokerPort>>,
     execution_sandbox: Option<Arc<dyn ExecutionSandboxPort>>,
     execution_audit: Option<Arc<dyn ExecutionAuditPort>>,
+    content_redaction: Option<Arc<dyn ContentRedactionPort>>,
     policy_revocation: Option<Arc<dyn PolicyRevocationPort>>,
     trusted_clock: Option<Arc<dyn Clock>>,
 }
@@ -156,24 +163,28 @@ impl EnterpriseSecurityProviders {
     pub fn new(
         workload_identity: Arc<dyn WorkloadIdentityPort>,
         execution_scope: Arc<dyn ExecutionSecurityScopePort>,
+        placement_admission: Arc<dyn PlacementAdmissionPort>,
         tenant_authorization: Arc<dyn TenantAuthorizationPort>,
         task_lease: Arc<dyn TaskLeasePort>,
         attempt_capability: Arc<dyn AttemptCapabilityPort>,
         secret_broker: Arc<dyn SecretBrokerPort>,
         execution_sandbox: Arc<dyn ExecutionSandboxPort>,
         execution_audit: Arc<dyn ExecutionAuditPort>,
+        content_redaction: Arc<dyn ContentRedactionPort>,
         policy_revocation: Arc<dyn PolicyRevocationPort>,
         trusted_clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
             workload_identity: Some(workload_identity),
             execution_scope: Some(execution_scope),
+            placement_admission: Some(placement_admission),
             tenant_authorization: Some(tenant_authorization),
             task_lease: Some(task_lease),
             attempt_capability: Some(attempt_capability),
             secret_broker: Some(secret_broker),
             execution_sandbox: Some(execution_sandbox),
             execution_audit: Some(execution_audit),
+            content_redaction: Some(content_redaction),
             policy_revocation: Some(policy_revocation),
             trusted_clock: Some(trusted_clock),
         }
@@ -184,12 +195,14 @@ impl EnterpriseSecurityProviders {
         match kind {
             SecurityProviderKind::WorkloadIdentity => self.workload_identity = None,
             SecurityProviderKind::ExecutionScope => self.execution_scope = None,
+            SecurityProviderKind::PlacementAdmission => self.placement_admission = None,
             SecurityProviderKind::TenantAuthorization => self.tenant_authorization = None,
             SecurityProviderKind::TaskLease => self.task_lease = None,
             SecurityProviderKind::AttemptCapability => self.attempt_capability = None,
             SecurityProviderKind::SecretBroker => self.secret_broker = None,
             SecurityProviderKind::ExecutionSandbox => self.execution_sandbox = None,
             SecurityProviderKind::ExecutionAudit => self.execution_audit = None,
+            SecurityProviderKind::ContentRedaction => self.content_redaction = None,
             SecurityProviderKind::PolicyRevocation => self.policy_revocation = None,
             SecurityProviderKind::TrustedClock => self.trusted_clock = None,
         }
@@ -200,12 +213,14 @@ impl EnterpriseSecurityProviders {
         match kind {
             SecurityProviderKind::WorkloadIdentity => self.workload_identity.is_some(),
             SecurityProviderKind::ExecutionScope => self.execution_scope.is_some(),
+            SecurityProviderKind::PlacementAdmission => self.placement_admission.is_some(),
             SecurityProviderKind::TenantAuthorization => self.tenant_authorization.is_some(),
             SecurityProviderKind::TaskLease => self.task_lease.is_some(),
             SecurityProviderKind::AttemptCapability => self.attempt_capability.is_some(),
             SecurityProviderKind::SecretBroker => self.secret_broker.is_some(),
             SecurityProviderKind::ExecutionSandbox => self.execution_sandbox.is_some(),
             SecurityProviderKind::ExecutionAudit => self.execution_audit.is_some(),
+            SecurityProviderKind::ContentRedaction => self.content_redaction.is_some(),
             SecurityProviderKind::PolicyRevocation => self.policy_revocation.is_some(),
             SecurityProviderKind::TrustedClock => self.trusted_clock.is_some(),
         }
@@ -221,12 +236,14 @@ impl EnterpriseSecurityProviders {
         Ok(EnterpriseSecurityPipeline {
             workload_identity: take_provider(&mut self.workload_identity),
             execution_scope: take_provider(&mut self.execution_scope),
+            placement_admission: take_provider(&mut self.placement_admission),
             tenant_authorization: take_provider(&mut self.tenant_authorization),
             task_lease: take_provider(&mut self.task_lease),
             attempt_capability: take_provider(&mut self.attempt_capability),
             secret_broker: take_provider(&mut self.secret_broker),
             execution_sandbox: take_provider(&mut self.execution_sandbox),
             execution_audit: take_provider(&mut self.execution_audit),
+            content_redaction: take_provider(&mut self.content_redaction),
             policy_revocation: take_provider(&mut self.policy_revocation),
             trusted_clock: take_provider(&mut self.trusted_clock),
         })
@@ -293,12 +310,14 @@ fn auth_is_open(auth: &AuthConfig) -> bool {
 pub struct EnterpriseSecurityPipeline {
     workload_identity: Arc<dyn WorkloadIdentityPort>,
     execution_scope: Arc<dyn ExecutionSecurityScopePort>,
+    placement_admission: Arc<dyn PlacementAdmissionPort>,
     tenant_authorization: Arc<dyn TenantAuthorizationPort>,
     task_lease: Arc<dyn TaskLeasePort>,
     attempt_capability: Arc<dyn AttemptCapabilityPort>,
     secret_broker: Arc<dyn SecretBrokerPort>,
     execution_sandbox: Arc<dyn ExecutionSandboxPort>,
     execution_audit: Arc<dyn ExecutionAuditPort>,
+    content_redaction: Arc<dyn ContentRedactionPort>,
     policy_revocation: Arc<dyn PolicyRevocationPort>,
     trusted_clock: Arc<dyn Clock>,
 }
@@ -452,16 +471,23 @@ impl EnterpriseSecurityPipeline {
                 .deny(&workload, &scope, "scope", error, operation.observed_at)
                 .await;
         }
+        let placement = self
+            .run_stage(
+                &workload,
+                &scope,
+                "placement",
+                operation.observed_at,
+                self.placement_admission
+                    .admit_placement(&workload, &scope, &operation.profile, operation.observed_at)
+                    .await,
+            )
+            .await?;
         self.run_stage(
             &workload,
             &scope,
             "placement",
             operation.observed_at,
-            operation
-                .placement_policy
-                .evaluate(&operation.placement_candidate)
-                .map(|_| ())
-                .map_err(SecurityError::Denied),
+            validate_placement_admission(&workload, &scope, &operation.profile, &placement),
         )
         .await?;
         self.run_stage(
@@ -497,9 +523,50 @@ impl EnterpriseSecurityPipeline {
                 operation.observed_at,
             )
             .await?;
-        let (mut terminal_guard, execution, observed_at) = self
+        let (mut terminal_guard, mut execution, observed_at) = self
             .run_sandbox(&workload, &scope, operation, observed_at)
             .await?;
+        let observed_at = self
+            .admit_output(&workload, &scope, &mut terminal_guard, observed_at)
+            .await?;
+        execution.stdout = match self
+            .content_redaction
+            .redact_content(&execution.stdout)
+            .await
+        {
+            Ok(stdout) => stdout,
+            Err(error) => {
+                return self
+                    .deny_and_teardown(
+                        &workload,
+                        &scope,
+                        "redaction",
+                        error,
+                        &mut terminal_guard,
+                        observed_at,
+                    )
+                    .await;
+            }
+        };
+        execution.stderr = match self
+            .content_redaction
+            .redact_content(&execution.stderr)
+            .await
+        {
+            Ok(stderr) => stderr,
+            Err(error) => {
+                return self
+                    .deny_and_teardown(
+                        &workload,
+                        &scope,
+                        "redaction",
+                        error,
+                        &mut terminal_guard,
+                        observed_at,
+                    )
+                    .await;
+            }
+        };
         self.finish_success(&workload, &scope, &mut terminal_guard, observed_at)
             .await?;
         Ok(execution)
@@ -837,16 +904,17 @@ impl EnterpriseSecurityPipeline {
         if observed_at < 0 || observed_at >= scope.valid_until {
             return Err(SecurityError::Denied(SecurityDenialReason::LeaseRejected));
         }
+        let request = SecurityEpochRequest {
+            checkpoint,
+            organization_ref: scope.organization_ref.clone(),
+            project_ref: scope.project_ref.clone(),
+            execution_snapshot_ref: scope.execution_snapshot_ref.clone(),
+            pinned_epoch: scope.policy_revocation_epoch,
+            observed_at,
+        };
         let status = self
             .policy_revocation
-            .check_security_epoch(&SecurityEpochRequest {
-                checkpoint,
-                organization_ref: scope.organization_ref.clone(),
-                project_ref: scope.project_ref.clone(),
-                execution_snapshot_ref: scope.execution_snapshot_ref.clone(),
-                pinned_epoch: scope.policy_revocation_epoch,
-                observed_at,
-            })
+            .check_security_epoch(&request)
             .await?;
         if status.observed_at > observed_at {
             return Err(SecurityError::Unavailable(
@@ -854,9 +922,59 @@ impl EnterpriseSecurityPipeline {
             ));
         }
         status
+            .validate_request(&request)
+            .map_err(SecurityError::Denied)?;
+        status
             .validate_pinned_epoch(scope.policy_revocation_epoch)
             .map_err(SecurityError::Denied)?;
         Ok(status)
+    }
+
+    async fn admit_output(
+        &self,
+        workload: &AuthenticatedWorkload,
+        scope: &ExecutionSecurityScope,
+        terminal_guard: &mut SandboxTerminalGuard,
+        previous_observed_at: i64,
+    ) -> Result<i64, SecurityError> {
+        let mut observed_at = previous_observed_at;
+        for checkpoint in [
+            SecurityCheckpoint::ArtifactAcceptance,
+            SecurityCheckpoint::Delivery,
+            SecurityCheckpoint::Release,
+        ] {
+            observed_at = match self.fresh_observed_at(observed_at) {
+                Ok(current) => current,
+                Err(error) => {
+                    return self
+                        .deny_and_teardown(
+                            workload,
+                            scope,
+                            "clock",
+                            error,
+                            terminal_guard,
+                            observed_at,
+                        )
+                        .await;
+                }
+            };
+            if let Err(error) = self
+                .check_revocation_checkpoint(scope, checkpoint, observed_at)
+                .await
+            {
+                return self
+                    .deny_and_teardown(
+                        workload,
+                        scope,
+                        "revocation",
+                        error,
+                        terminal_guard,
+                        observed_at,
+                    )
+                    .await;
+            }
+        }
+        Ok(observed_at)
     }
 
     async fn finish_success(
@@ -1105,18 +1223,52 @@ fn validate_resolved_scope(
         || operation.observed_at < workload.not_before
         || operation.observed_at >= workload.not_after
         || operation.observed_at >= scope.valid_until
-        || workload.trust_domain != operation.placement_candidate.worker_trust_domain
-        || scope.sandbox_profile_id != operation.profile.profile_id
-        || scope.egress_profile_id != operation.placement_candidate.egress_profile_id
-        || operation.profile.image_digest != operation.placement_candidate.image_digest
-        || operation.profile.tenant_cache_namespace
-            != operation.placement_candidate.tenant_cache_namespace
         || !matches!(
             operation.scope_request.resource.kind,
             ProtectedResourceKind::Execution
         )
     {
         return Err(SecurityError::Denied(SecurityDenialReason::LeaseRejected));
+    }
+    Ok(())
+}
+
+fn validate_placement_admission(
+    workload: &AuthenticatedWorkload,
+    scope: &ExecutionSecurityScope,
+    profile: &ExecutionSandboxProfile,
+    admission: &PlacementAdmission,
+) -> Result<(), SecurityError> {
+    let evaluated = admission
+        .policy
+        .evaluate(&admission.candidate)
+        .map_err(SecurityError::Denied)?;
+    if evaluated != *admission {
+        return Err(SecurityError::Denied(
+            SecurityDenialReason::PlacementClassificationDenied,
+        ));
+    }
+    if workload.trust_domain != admission.candidate.worker_trust_domain {
+        return Err(SecurityError::Denied(
+            SecurityDenialReason::PlacementTrustDomainDenied,
+        ));
+    }
+    if scope.sandbox_profile_id != profile.profile_id
+        || profile.image_digest != admission.candidate.image_digest
+    {
+        return Err(SecurityError::Denied(
+            SecurityDenialReason::SandboxProfileDenied,
+        ));
+    }
+    if scope.egress_profile_id != admission.candidate.egress_profile_id {
+        return Err(SecurityError::Denied(
+            SecurityDenialReason::PlacementEgressDenied,
+        ));
+    }
+    if profile.tenant_cache_namespace != admission.candidate.tenant_cache_namespace {
+        return Err(SecurityError::Denied(
+            SecurityDenialReason::PlacementCacheIsolationDenied,
+        ));
     }
     Ok(())
 }

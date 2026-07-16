@@ -111,4 +111,11 @@ fn redaction_rejects_empty_values_empty_matches_and_invalid_patterns() {
             .expect_err("invalid regex"),
         RedactionError::InvalidPattern { index: 0 }
     );
+
+    let boundary = ContentRedactor::compile(vec![], vec![r"\b".to_string()], limits())
+        .expect("boundary does not match empty input");
+    assert_eq!(
+        boundary.redact(b"word").expect_err("zero-length match"),
+        RedactionError::ZeroLengthMatch
+    );
 }

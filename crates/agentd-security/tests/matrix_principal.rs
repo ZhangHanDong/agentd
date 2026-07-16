@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
+use agentd_core::ports::Clock;
 use agentd_core::types::{
     AuthorityKey, EnterprisePrincipalId, MatrixDeviceBinding, MatrixDeviceStatus,
     MatrixPrincipalResolveRequest, MatrixTrustPolicy, OrganizationRef, PrincipalKind,
@@ -12,6 +14,25 @@ use agentd_store::principal_repo::{
     MatrixAppserviceBinding, MatrixUserBinding, PrincipalUpsert,
     SqliteEnterprisePrincipalRepository,
 };
+
+#[derive(Debug)]
+struct TestClock(AtomicI64);
+
+impl TestClock {
+    fn new(now: i64) -> Self {
+        Self(AtomicI64::new(now))
+    }
+
+    fn set(&self, now: i64) {
+        self.0.store(now, Ordering::SeqCst);
+    }
+}
+
+impl Clock for TestClock {
+    fn now_unix(&self) -> i64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
 
 async fn fixture() -> (
     tempfile::TempDir,
@@ -68,9 +89,9 @@ async fn matrix_resolver_requires_trusted_homeserver_and_human_device() {
     let (_dir, repo, policy, id) = fixture().await;
     let resolver = MatrixPrincipalResolver::new(
         Arc::clone(&repo),
+        Arc::new(TestClock::new(120)),
         MatrixPrincipalResolverConfig {
             trust_policy: policy,
-            require_human_device: true,
         },
     );
     let accepted = resolver
@@ -79,7 +100,7 @@ async fn matrix_resolver_requires_trusted_homeserver_and_human_device() {
             homeserver: "matrix.example".to_string(),
             device_id: Some("DEVICE-A".to_string()),
             appservice_id: None,
-            observed_at: 120,
+            observed_at: -1,
         })
         .await
         .expect("trusted human identity");
@@ -119,6 +140,7 @@ async fn matrix_resolver_requires_trusted_homeserver_and_human_device() {
 #[tokio::test]
 async fn matrix_resolver_allows_trusted_appservice_without_device_and_propagates_disablement() {
     let (_dir, repo, policy, _human_id) = fixture().await;
+    let clock = Arc::new(TestClock::new(120));
     let id = EnterprisePrincipalId::new();
     let authority = AuthorityKey::new("specify:matrix-principal-test").expect("authority");
     repo.upsert_principal(PrincipalUpsert {
@@ -141,9 +163,9 @@ async fn matrix_resolver_allows_trusted_appservice_without_device_and_propagates
     .expect("appservice binding");
     let resolver = MatrixPrincipalResolver::new(
         Arc::clone(&repo),
+        Arc::clone(&clock),
         MatrixPrincipalResolverConfig {
             trust_policy: policy,
-            require_human_device: true,
         },
     );
     let accepted = resolver
@@ -161,6 +183,7 @@ async fn matrix_resolver_allows_trusted_appservice_without_device_and_propagates
     repo.disable_principal(&id, 130)
         .await
         .expect("disable principal");
+    clock.set(131);
     let denied = resolver
         .resolve(&MatrixPrincipalResolveRequest {
             user_id: "@ac_worker:matrix.example".to_string(),

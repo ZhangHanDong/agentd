@@ -1,7 +1,8 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
-use agentd_core::ports::EnterprisePrincipalPort as _;
+use agentd_core::ports::{Clock, EnterprisePrincipalPort as _};
 use agentd_core::types::{
     AuthorityKey, EnterprisePrincipalId, MatrixTrustPolicy, OidcPrincipalResolveRequest,
     OrganizationRef, PrincipalKind, SecurityDenialReason,
@@ -20,13 +21,41 @@ use rsa::traits::PublicKeyParts as _;
 use serde::Serialize;
 
 #[derive(Clone, Copy, Serialize)]
+#[serde(untagged)]
+enum Audience<'a> {
+    One(&'a str),
+    Many(&'a [&'a str]),
+}
+
+#[derive(Clone, Copy, Serialize)]
 struct Claims<'a> {
     iss: &'a str,
     sub: &'a str,
-    aud: &'a str,
+    aud: Audience<'a>,
     exp: i64,
     nbf: i64,
     iat: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    azp: Option<&'a str>,
+}
+
+#[derive(Debug)]
+struct TestClock(AtomicI64);
+
+impl TestClock {
+    fn new(now: i64) -> Self {
+        Self(AtomicI64::new(now))
+    }
+
+    fn set(&self, now: i64) {
+        self.0.store(now, Ordering::SeqCst);
+    }
+}
+
+impl Clock for TestClock {
+    fn now_unix(&self) -> i64 {
+        self.0.load(Ordering::SeqCst)
+    }
 }
 
 struct TestKey {
@@ -104,6 +133,7 @@ fn config(jwk: OidcJwk) -> OidcProviderConfig {
     OidcProviderConfig {
         issuer: "https://identity.example".to_string(),
         audiences: BTreeSet::from(["agentd-control-plane".to_string()]),
+        authorized_parties: BTreeSet::from(["agentd-cli".to_string()]),
         keys: vec![jwk],
     }
 }
@@ -112,23 +142,52 @@ fn config(jwk: OidcJwk) -> OidcProviderConfig {
 async fn oidc_authenticator_verifies_signature_claims_and_principal_lifecycle() {
     let (_dir, repo, id) = fixture().await;
     let key = test_key();
-    let authenticator =
-        OidcAuthenticator::new(Arc::clone(&repo), config(key.jwk.clone())).expect("authenticator");
+    let clock = Arc::new(TestClock::new(120));
+    let authenticator = OidcAuthenticator::new(
+        Arc::clone(&repo),
+        Arc::clone(&clock),
+        config(key.jwk.clone()),
+    )
+    .expect("authenticator");
     let valid_claims = Claims {
         iss: "https://identity.example",
         sub: "subject-a",
-        aud: "agentd-control-plane",
+        aud: Audience::One("agentd-control-plane"),
         exp: 200,
         nbf: 100,
         iat: 100,
+        azp: None,
     };
     let valid_token = token(&key.encoding, &valid_claims);
     let identity = authenticator
-        .authenticate(&valid_token, 120)
+        .authenticate(&valid_token)
         .await
         .expect("valid identity");
     assert_eq!(identity.principal.id, id);
     assert_eq!(identity.expires_at, 200, "token expiry caps repository ttl");
+
+    let multiple_audiences = ["agentd-control-plane", "agentd-cli"];
+    let missing_azp = Claims {
+        aud: Audience::Many(&multiple_audiences),
+        ..valid_claims
+    };
+    assert_eq!(
+        authenticator
+            .authenticate(&token(&key.encoding, &missing_azp))
+            .await
+            .expect_err("multiple audiences require an authorized party")
+            .denial_reason(),
+        Some(SecurityDenialReason::IdentityUntrusted)
+    );
+    let authorized_multi_audience = Claims {
+        aud: Audience::Many(&multiple_audiences),
+        azp: Some("agentd-cli"),
+        ..valid_claims
+    };
+    authenticator
+        .authenticate(&token(&key.encoding, &authorized_multi_audience))
+        .await
+        .expect("configured authorized party");
 
     for claims in [
         Claims {
@@ -136,7 +195,7 @@ async fn oidc_authenticator_verifies_signature_claims_and_principal_lifecycle() 
             ..valid_claims
         },
         Claims {
-            aud: "other-service",
+            aud: Audience::One("other-service"),
             ..valid_claims
         },
         Claims {
@@ -145,7 +204,7 @@ async fn oidc_authenticator_verifies_signature_claims_and_principal_lifecycle() 
         },
     ] {
         let denied = authenticator
-            .authenticate(&token(&key.encoding, &claims), 120)
+            .authenticate(&token(&key.encoding, &claims))
             .await
             .expect_err("invalid claims must fail closed");
         assert_eq!(
@@ -160,7 +219,7 @@ async fn oidc_authenticator_verifies_signature_claims_and_principal_lifecycle() 
     };
     assert_eq!(
         authenticator
-            .authenticate(&token(&key.encoding, &expired), 120)
+            .authenticate(&token(&key.encoding, &expired))
             .await
             .expect_err("expired token")
             .denial_reason(),
@@ -170,9 +229,10 @@ async fn oidc_authenticator_verifies_signature_claims_and_principal_lifecycle() 
     repo.disable_principal(&id, 130)
         .await
         .expect("disable principal");
+    clock.set(131);
     assert_eq!(
         authenticator
-            .authenticate(&valid_token, 131)
+            .authenticate(&valid_token)
             .await
             .expect_err("disabled principal")
             .denial_reason(),
@@ -184,15 +244,20 @@ async fn oidc_authenticator_verifies_signature_claims_and_principal_lifecycle() 
 async fn oidc_authenticator_rejects_algorithm_confusion_unknown_kid_and_redacts_token() {
     let (_dir, repo, _id) = fixture().await;
     let key = test_key();
-    let authenticator =
-        OidcAuthenticator::new(Arc::clone(&repo), config(key.jwk)).expect("authenticator");
+    let authenticator = OidcAuthenticator::new(
+        Arc::clone(&repo),
+        Arc::new(TestClock::new(120)),
+        config(key.jwk),
+    )
+    .expect("authenticator");
     let claims = Claims {
         iss: "https://identity.example",
         sub: "subject-a",
-        aud: "agentd-control-plane",
+        aud: Audience::One("agentd-control-plane"),
         exp: 200,
         nbf: 100,
         iat: 100,
+        azp: None,
     };
 
     let mut unknown_header = Header::new(Algorithm::RS256);
@@ -200,7 +265,7 @@ async fn oidc_authenticator_rejects_algorithm_confusion_unknown_kid_and_redacts_
     let unknown =
         jsonwebtoken::encode(&unknown_header, &claims, &key.encoding).expect("unknown-kid token");
     let unknown_error = authenticator
-        .authenticate(&unknown, 120)
+        .authenticate(&unknown)
         .await
         .expect_err("unknown kid");
     assert_eq!(
@@ -218,7 +283,7 @@ async fn oidc_authenticator_rejects_algorithm_confusion_unknown_kid_and_redacts_
     )
     .expect("HMAC token");
     let confused_error = authenticator
-        .authenticate(&confused, 120)
+        .authenticate(&confused)
         .await
         .expect_err("algorithm confusion");
     assert_eq!(

@@ -3,9 +3,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use agentd_core::ports::{EnterprisePrincipalPort, SecurityError};
+use agentd_core::ports::{Clock, EnterprisePrincipalPort, SecurityError};
 use agentd_core::types::{
-    EnterpriseRequestIdentity, OidcPrincipalResolveRequest, SecurityDenialReason,
+    EnterpriseAuthentication, EnterpriseRequestIdentity, OidcPrincipalResolveRequest,
+    SecurityDenialReason,
 };
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
@@ -37,6 +38,7 @@ pub struct OidcJwk {
 pub struct OidcProviderConfig {
     pub issuer: String,
     pub audiences: BTreeSet<String>,
+    pub authorized_parties: BTreeSet<String>,
     pub keys: Vec<OidcJwk>,
 }
 
@@ -45,29 +47,36 @@ struct PreparedJwk {
     decoding_key: DecodingKey,
 }
 
-pub struct OidcAuthenticator<R> {
+pub struct OidcAuthenticator<R, C> {
     repository: Arc<R>,
+    clock: Arc<C>,
     config: OidcProviderConfig,
     keys: BTreeMap<String, PreparedJwk>,
 }
 
-impl<R> std::fmt::Debug for OidcAuthenticator<R> {
+impl<R, C> std::fmt::Debug for OidcAuthenticator<R, C> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("OidcAuthenticator")
             .field("issuer", &self.config.issuer)
             .field("audiences", &self.config.audiences)
+            .field("authorized_parties", &self.config.authorized_parties)
             .field("key_ids", &self.keys.keys().collect::<Vec<_>>())
             .field("repository", &std::any::type_name::<R>())
             .finish()
     }
 }
 
-impl<R> OidcAuthenticator<R>
+impl<R, C> OidcAuthenticator<R, C>
 where
     R: EnterprisePrincipalPort,
+    C: Clock,
 {
-    pub fn new(repository: Arc<R>, config: OidcProviderConfig) -> Result<Self, SecurityError> {
+    pub fn new(
+        repository: Arc<R>,
+        clock: Arc<C>,
+        config: OidcProviderConfig,
+    ) -> Result<Self, SecurityError> {
         validate_config(&config)?;
         let mut keys = BTreeMap::new();
         for jwk in &config.keys {
@@ -91,6 +100,7 @@ where
         }
         Ok(Self {
             repository,
+            clock,
             config,
             keys,
         })
@@ -104,8 +114,13 @@ where
     pub async fn authenticate(
         &self,
         token: &str,
-        observed_at: i64,
     ) -> Result<EnterpriseRequestIdentity, SecurityError> {
+        let observed_at = self.clock.now_unix();
+        if observed_at < 0 {
+            return Err(SecurityError::Unavailable(
+                "trusted OIDC clock returned invalid time".to_string(),
+            ));
+        }
         if token.is_empty() {
             return Err(untrusted());
         }
@@ -129,11 +144,24 @@ where
         let mut identity = self
             .repository
             .resolve_oidc(&OidcPrincipalResolveRequest {
-                issuer: claims.iss,
-                subject: claims.sub,
+                issuer: claims.iss.clone(),
+                subject: claims.sub.clone(),
                 observed_at,
             })
             .await?;
+        identity
+            .principal
+            .ensure_active()
+            .map_err(SecurityError::Denied)?;
+        if identity.authenticated_at != observed_at
+            || !matches!(
+                &identity.authentication,
+                EnterpriseAuthentication::Oidc { issuer, subject }
+                    if issuer == &claims.iss && subject == &claims.sub
+            )
+        {
+            return Err(untrusted());
+        }
         identity.expires_at = identity.expires_at.min(claims.exp);
         if identity.expires_at <= observed_at {
             return Err(SecurityError::Denied(SecurityDenialReason::IdentityExpired));
@@ -145,6 +173,9 @@ where
         if claims.iss != self.config.issuer
             || claims.sub.trim().is_empty()
             || !claims.aud.matches(&self.config.audiences)
+            || !claims
+                .aud
+                .authorized_party_is_valid(claims.azp.as_deref(), &self.config.authorized_parties)
             || claims
                 .nbf
                 .is_some_and(|not_before| not_before > observed_at)
@@ -167,6 +198,7 @@ struct OidcClaims {
     exp: i64,
     nbf: Option<i64>,
     iat: Option<i64>,
+    azp: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -184,6 +216,24 @@ impl AudienceClaim {
                 .iter()
                 .any(|audience| configured.contains(audience)),
         }
+    }
+
+    fn authorized_party_is_valid(
+        &self,
+        authorized_party: Option<&str>,
+        configured: &BTreeSet<String>,
+    ) -> bool {
+        let audiences = match self {
+            Self::One(audience) => std::slice::from_ref(audience),
+            Self::Many(audiences) => audiences.as_slice(),
+        };
+        let distinct_count = audiences.iter().collect::<BTreeSet<_>>().len();
+        if distinct_count > 1 && authorized_party.is_none() {
+            return false;
+        }
+        authorized_party.is_none_or(|party| {
+            configured.contains(party) && audiences.iter().any(|audience| audience == party)
+        })
     }
 }
 

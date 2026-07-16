@@ -62,7 +62,14 @@ fn ad_e1_candidate_assigns_every_security_capability_to_code() {
         ),
         (
             "crates/agentd-bin/src/security.rs",
-            &["check_revocation_checkpoint", "placement_policy"][..],
+            &[
+                "PlacementAdmissionPort",
+                "ContentRedactionPort",
+                "validate_placement_admission",
+                "SecurityCheckpoint::ArtifactAcceptance",
+                "SecurityCheckpoint::Delivery",
+                "SecurityCheckpoint::Release",
+            ][..],
         ),
     ];
 
@@ -71,6 +78,32 @@ fn ad_e1_candidate_assigns_every_security_capability_to_code() {
         for symbol in symbols {
             assert!(source.contains(symbol), "{path} does not own {symbol}");
         }
+    }
+}
+
+#[test]
+fn ad_e1_production_pipeline_owns_trusted_placement_output_redaction_and_closed_checkpoints() {
+    let operation = read("crates/agentd-bin/src/security.rs");
+    let evidence = read("crates/agentd-bin/tests/execution_security.rs");
+
+    assert!(!operation.contains("pub placement_policy:"));
+    assert!(!operation.contains("pub placement_candidate:"));
+    for proof in [
+        ".admit_placement(",
+        "content_redaction",
+        "admit_output",
+        "validate_request(&request)",
+    ] {
+        assert!(operation.contains(proof), "production pipeline missing {proof}");
+    }
+    for proof in [
+        "production_security_gate_orders_checks_and_stops_on_failure",
+        "transient-output-secret",
+        "SecurityCheckpoint::ArtifactAcceptance",
+        "SecurityCheckpoint::Delivery",
+        "SecurityCheckpoint::Release",
+    ] {
+        assert!(evidence.contains(proof), "pipeline evidence missing {proof}");
     }
 }
 

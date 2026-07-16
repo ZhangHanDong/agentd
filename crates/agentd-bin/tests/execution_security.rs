@@ -10,26 +10,27 @@ use agentd_bin::security::{
 };
 use agentd_bin::{AgentdCli, DaemonConfig, daemon};
 use agentd_core::ports::{
-    AttemptCapabilityPort, AuditPage, AuditReadRequest, Clock, ExecutionAuditAppend,
-    ExecutionAuditPort, ExecutionAuditRecord, ExecutionEvidenceError, ExecutionSandboxPort,
-    PolicyRevocationPort, SecretBrokerPort, SecurityError, TaskLeaseCloseRequest,
-    TaskLeaseDispatchRequest, TaskLeaseError, TaskLeasePort, TaskLeaseRenewRequest,
-    TenantAuthorizationPort, WorkloadIdentityPort,
+    AttemptCapabilityPort, AuditPage, AuditReadRequest, Clock, ContentRedactionPort,
+    ExecutionAuditAppend, ExecutionAuditPort, ExecutionAuditRecord, ExecutionEvidenceError,
+    ExecutionSandboxPort, PlacementAdmissionPort, PolicyRevocationPort, SecretBrokerPort,
+    SecurityError, TaskLeaseCloseRequest, TaskLeaseDispatchRequest, TaskLeaseError, TaskLeasePort,
+    TaskLeaseRenewRequest, TenantAuthorizationPort, WorkloadIdentityPort,
 };
 use agentd_core::test_support::FixedClock;
 use agentd_core::types::{
     AttemptCapabilityId, AuthenticatedWorkload, AuthorityKey, CapabilityAdmission,
     CapabilityIssueRequest, CapabilityToken, CapabilityValidationRequest, DataClassification,
     EgressPolicy, ExecutionSandboxProfile, ExecutionSecurityScope, FencingToken, LeaseId,
-    LeaseStatus, OciSandboxRuntime, OrganizationRef, PlacementCandidate, PlacementPolicy,
-    PreparedSandbox, ProjectExecutionSnapshotRef, ProjectRef, ProtectedResource,
+    LeaseStatus, OciSandboxRuntime, OrganizationRef, PlacementAdmission, PlacementCandidate,
+    PlacementPolicy, PreparedSandbox, ProjectExecutionSnapshotRef, ProjectRef, ProtectedResource,
     ProtectedResourceKind, RbacPolicyVersionRef, RunId, SandboxCacheSharing, SandboxCleanupRequest,
     SandboxExecuteRequest, SandboxExecution, SandboxLimits, SandboxLinuxCapabilities, SandboxMount,
     SandboxMountAccess, SandboxPrepareRequest, SandboxPrivilegeEscalation, SandboxRootFilesystem,
     SandboxWorkspace, SecretCheckoutRequest, SecretLease, SecretMaterial, SecretSelector,
-    SecurityAuditContext, SecurityDenialReason, SecurityEpochRequest, SecurityEpochStatus,
-    TaskLeaseClaim, TaskLeaseGrant, TaskRunId, TenantAuthorization, TenantAuthorizationRequest,
-    WorkerId, WorkerIncarnationId, WorkloadIdentityRequest, WorkloadRole,
+    SecurityAuditContext, SecurityCheckpoint, SecurityDenialReason, SecurityEpochRequest,
+    SecurityEpochStatus, TaskLeaseClaim, TaskLeaseGrant, TaskRunId, TenantAuthorization,
+    TenantAuthorizationRequest, WorkerId, WorkerIncarnationId, WorkloadIdentityRequest,
+    WorkloadRole,
 };
 use agentd_surface::http::{AgentTokenMode, AuthConfig};
 use clap::Parser;
@@ -40,6 +41,7 @@ use tokio::sync::Notify;
 enum FailureStage {
     Identity,
     Scope,
+    Placement,
     Revocation,
     Authorization,
     Lease,
@@ -47,6 +49,7 @@ enum FailureStage {
     Secret,
     SandboxPrepare,
     SandboxExecute,
+    Redaction,
     Audit,
     Teardown,
 }
@@ -62,6 +65,7 @@ struct RecordingPorts {
     sandbox_execute_started: Notify,
     teardown_completed: Notify,
     observations: Mutex<Vec<(&'static str, i64)>>,
+    checkpoints: Mutex<Vec<SecurityCheckpoint>>,
 }
 
 impl RecordingPorts {
@@ -80,6 +84,7 @@ impl RecordingPorts {
             sandbox_execute_started: Notify::new(),
             teardown_completed: Notify::new(),
             observations: Mutex::new(Vec::new()),
+            checkpoints: Mutex::new(Vec::new()),
         }
     }
 
@@ -94,6 +99,7 @@ impl RecordingPorts {
             sandbox_execute_started: Notify::new(),
             teardown_completed: Notify::new(),
             observations: Mutex::new(Vec::new()),
+            checkpoints: Mutex::new(Vec::new()),
         }
     }
 
@@ -108,6 +114,7 @@ impl RecordingPorts {
             sandbox_execute_started: Notify::new(),
             teardown_completed: Notify::new(),
             observations: Mutex::new(Vec::new()),
+            checkpoints: Mutex::new(Vec::new()),
         }
     }
 
@@ -122,6 +129,7 @@ impl RecordingPorts {
             sandbox_execute_started: Notify::new(),
             teardown_completed: Notify::new(),
             observations: Mutex::new(Vec::new()),
+            checkpoints: Mutex::new(Vec::new()),
         }
     }
 
@@ -153,6 +161,10 @@ impl RecordingPorts {
 
     fn observations(&self) -> Vec<(&'static str, i64)> {
         self.observations.lock().expect("observations").clone()
+    }
+
+    fn checkpoints(&self) -> Vec<SecurityCheckpoint> {
+        self.checkpoints.lock().expect("checkpoints").clone()
     }
 
     fn fail_security(&self, stage: FailureStage) -> Result<(), SecurityError> {
@@ -200,6 +212,27 @@ impl ExecutionSecurityScopePort for RecordingPorts {
 }
 
 #[async_trait::async_trait]
+impl PlacementAdmissionPort for RecordingPorts {
+    async fn admit_placement(
+        &self,
+        authenticated: &AuthenticatedWorkload,
+        resolved_scope: &ExecutionSecurityScope,
+        sandbox_profile: &ExecutionSandboxProfile,
+        observed_at: i64,
+    ) -> Result<PlacementAdmission, SecurityError> {
+        self.record("placement");
+        self.fail_security(FailureStage::Placement)?;
+        assert_eq!(authenticated, &workload());
+        assert_eq!(resolved_scope, &scope());
+        assert_eq!(sandbox_profile, &profile());
+        assert_eq!(observed_at, self.observed_at);
+        placement_policy()
+            .evaluate(&placement_candidate())
+            .map_err(SecurityError::Denied)
+    }
+}
+
+#[async_trait::async_trait]
 impl TenantAuthorizationPort for RecordingPorts {
     async fn authorize_tenant(
         &self,
@@ -226,9 +259,17 @@ impl PolicyRevocationPort for RecordingPorts {
     ) -> Result<SecurityEpochStatus, SecurityError> {
         self.record("revocation");
         self.observe("revocation", request.observed_at);
+        self.checkpoints
+            .lock()
+            .expect("checkpoints")
+            .push(request.checkpoint);
         self.fail_security(FailureStage::Revocation)?;
         assert_eq!(request.pinned_epoch, 9);
         Ok(SecurityEpochStatus {
+            checkpoint: request.checkpoint,
+            organization_ref: request.organization_ref.clone(),
+            project_ref: request.project_ref.clone(),
+            execution_snapshot_ref: request.execution_snapshot_ref.clone(),
             current_epoch: 9,
             observed_at: request.observed_at,
         })
@@ -382,7 +423,7 @@ impl ExecutionSandboxPort for RecordingPorts {
         self.fail_security(FailureStage::SandboxExecute)?;
         Ok(SandboxExecution {
             exit_code: 0,
-            stdout: b"ok".to_vec(),
+            stdout: b"ok transient-output-secret".to_vec(),
             stderr: Vec::new(),
         })
     }
@@ -400,6 +441,17 @@ impl ExecutionSandboxPort for RecordingPorts {
         } else {
             Ok(())
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl ContentRedactionPort for RecordingPorts {
+    async fn redact_content(&self, content: &[u8]) -> Result<Vec<u8>, SecurityError> {
+        self.record("redaction");
+        self.fail_security(FailureStage::Redaction)?;
+        Ok(String::from_utf8_lossy(content)
+            .replace("transient-output-secret", "[REDACTED]")
+            .into_bytes())
     }
 }
 
@@ -458,12 +510,14 @@ fn providers_with_clock(
     EnterpriseSecurityProviders::new(
         Arc::clone(ports) as Arc<dyn WorkloadIdentityPort>,
         Arc::clone(ports) as Arc<dyn ExecutionSecurityScopePort>,
+        Arc::clone(ports) as Arc<dyn PlacementAdmissionPort>,
         Arc::clone(ports) as Arc<dyn TenantAuthorizationPort>,
         Arc::clone(ports) as Arc<dyn TaskLeasePort>,
         Arc::clone(ports) as Arc<dyn AttemptCapabilityPort>,
         Arc::clone(ports) as Arc<dyn SecretBrokerPort>,
         Arc::clone(ports) as Arc<dyn ExecutionSandboxPort>,
         Arc::clone(ports) as Arc<dyn ExecutionAuditPort>,
+        Arc::clone(ports) as Arc<dyn ContentRedactionPort>,
         Arc::clone(ports) as Arc<dyn PolicyRevocationPort>,
         clock,
     )
@@ -657,8 +711,6 @@ fn operation() -> EnterpriseWorkerOperation {
             selector: SecretSelector::new("repository/app-token").expect("secret selector"),
             capability_token: CapabilityToken::new([b'C'; 32]),
         }),
-        placement_policy: placement_policy(),
-        placement_candidate: placement_candidate(),
         profile: profile(),
         argv: vec!["cargo".to_string(), "test".to_string()],
         env: BTreeMap::from([("CI".to_string(), "1".to_string())]),
@@ -700,13 +752,21 @@ fn expected_failure_calls(failure: FailureStage) -> Vec<&'static str> {
     let mut calls = match failure {
         FailureStage::Identity => vec!["identity"],
         FailureStage::Scope => vec!["identity", "scope"],
-        FailureStage::Revocation => vec!["identity", "scope", "revocation"],
+        FailureStage::Placement => vec!["identity", "scope", "placement"],
+        FailureStage::Revocation => vec!["identity", "scope", "placement", "revocation"],
         FailureStage::Authorization => {
-            vec!["identity", "scope", "revocation", "authorization"]
+            vec![
+                "identity",
+                "scope",
+                "placement",
+                "revocation",
+                "authorization",
+            ]
         }
         FailureStage::Lease => vec![
             "identity",
             "scope",
+            "placement",
             "revocation",
             "authorization",
             "revocation",
@@ -715,6 +775,7 @@ fn expected_failure_calls(failure: FailureStage) -> Vec<&'static str> {
         FailureStage::Capability => vec![
             "identity",
             "scope",
+            "placement",
             "revocation",
             "authorization",
             "revocation",
@@ -724,6 +785,7 @@ fn expected_failure_calls(failure: FailureStage) -> Vec<&'static str> {
         FailureStage::Secret => vec![
             "identity",
             "scope",
+            "placement",
             "revocation",
             "authorization",
             "revocation",
@@ -734,6 +796,7 @@ fn expected_failure_calls(failure: FailureStage) -> Vec<&'static str> {
         FailureStage::SandboxPrepare => vec![
             "identity",
             "scope",
+            "placement",
             "revocation",
             "authorization",
             "revocation",
@@ -745,9 +808,10 @@ fn expected_failure_calls(failure: FailureStage) -> Vec<&'static str> {
             "capability",
             "sandbox",
         ],
-        FailureStage::SandboxExecute | FailureStage::Audit | FailureStage::Teardown => vec![
+        FailureStage::SandboxExecute => vec![
             "identity",
             "scope",
+            "placement",
             "revocation",
             "authorization",
             "revocation",
@@ -761,12 +825,35 @@ fn expected_failure_calls(failure: FailureStage) -> Vec<&'static str> {
             "revocation",
             "lease",
             "capability",
+        ],
+        FailureStage::Redaction | FailureStage::Audit | FailureStage::Teardown => vec![
+            "identity",
+            "scope",
+            "placement",
+            "revocation",
+            "authorization",
+            "revocation",
+            "lease",
+            "capability",
+            "secret",
+            "revocation",
+            "lease",
+            "capability",
+            "sandbox",
+            "revocation",
+            "lease",
+            "capability",
+            "revocation",
+            "redaction",
         ],
     };
     calls.push("audit");
     if matches!(
         failure,
-        FailureStage::SandboxExecute | FailureStage::Audit | FailureStage::Teardown
+        FailureStage::SandboxExecute
+            | FailureStage::Redaction
+            | FailureStage::Audit
+            | FailureStage::Teardown
     ) {
         calls.push("teardown");
     }
@@ -778,6 +865,7 @@ async fn production_security_gate_orders_checks_and_stops_on_failure() {
     for failure in [
         FailureStage::Identity,
         FailureStage::Scope,
+        FailureStage::Placement,
         FailureStage::Revocation,
         FailureStage::Authorization,
         FailureStage::Lease,
@@ -785,6 +873,7 @@ async fn production_security_gate_orders_checks_and_stops_on_failure() {
         FailureStage::Secret,
         FailureStage::SandboxPrepare,
         FailureStage::SandboxExecute,
+        FailureStage::Redaction,
         FailureStage::Audit,
         FailureStage::Teardown,
     ] {
@@ -805,11 +894,26 @@ async fn production_security_gate_orders_checks_and_stops_on_failure() {
         .await
         .expect("secure operation");
     assert_eq!(result.exit_code, 0);
+    assert_eq!(result.stdout, b"ok [REDACTED]");
+    assert!(!String::from_utf8_lossy(&result.stdout).contains("transient-output-secret"));
+    assert_eq!(
+        ports.checkpoints(),
+        vec![
+            SecurityCheckpoint::Dispatch,
+            SecurityCheckpoint::LeaseRenewal,
+            SecurityCheckpoint::LeaseRenewal,
+            SecurityCheckpoint::LeaseRenewal,
+            SecurityCheckpoint::ArtifactAcceptance,
+            SecurityCheckpoint::Delivery,
+            SecurityCheckpoint::Release,
+        ]
+    );
     assert_eq!(
         ports.calls(),
         vec![
             "identity",
             "scope",
+            "placement",
             "revocation",
             "authorization",
             "revocation",
@@ -823,6 +927,8 @@ async fn production_security_gate_orders_checks_and_stops_on_failure() {
             "revocation",
             "lease",
             "capability",
+            "revocation",
+            "redaction",
             "audit",
             "teardown",
         ]
@@ -875,7 +981,14 @@ async fn production_security_gate_audits_provider_unavailability_with_stable_rea
     );
     assert_eq!(
         ports.calls(),
-        vec!["identity", "scope", "revocation", "authorization", "audit"]
+        vec![
+            "identity",
+            "scope",
+            "placement",
+            "revocation",
+            "authorization",
+            "audit",
+        ]
     );
 }
 
@@ -913,6 +1026,7 @@ async fn production_security_gate_preserves_audit_and_teardown_failures() {
         vec![
             "identity",
             "scope",
+            "placement",
             "revocation",
             "authorization",
             "revocation",
@@ -967,6 +1081,7 @@ async fn production_security_gate_cleans_up_when_operation_is_cancelled() {
         vec![
             "identity",
             "scope",
+            "placement",
             "revocation",
             "authorization",
             "revocation",

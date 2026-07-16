@@ -42,8 +42,8 @@ pub use project_authority::{
 };
 pub use revocation::PolicyRevocationPort;
 pub use security::{
-    AttemptCapabilityPort, ExecutionSandboxPort, SecretBrokerPort, SecurityError,
-    TenantAuthorizationPort, WorkloadIdentityPort,
+    AttemptCapabilityPort, ContentRedactionPort, ExecutionSandboxPort, PlacementAdmissionPort,
+    SecretBrokerPort, SecurityError, TenantAuthorizationPort, WorkloadIdentityPort,
 };
 pub use store::{RunStatus, Store};
 pub use task_lease::{

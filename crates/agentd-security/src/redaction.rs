@@ -6,6 +6,8 @@ use std::fmt;
 use regex_automata::{Input, meta::Regex};
 use thiserror::Error;
 
+use agentd_core::ports::{ContentRedactionPort, SecurityError};
+
 const REPLACEMENT: &[u8] = b"[REDACTED]";
 const MAX_EXACT_RULES: usize = 1_024;
 const MAX_PATTERN_RULES: usize = 128;
@@ -33,6 +35,8 @@ pub enum RedactionError {
     InputTooLarge,
     #[error("redaction output exceeds the configured bound")]
     OutputTooLarge,
+    #[error("redaction policy produced a zero-length match")]
+    ZeroLengthMatch,
 }
 
 pub struct ContentRedactor {
@@ -118,6 +122,9 @@ impl ContentRedactor {
                 else {
                     break;
                 };
+                if matched.is_empty() {
+                    return Err(RedactionError::ZeroLengthMatch);
+                }
                 let best = &mut best_end_by_start[matched.start()];
                 *best = Some(best.map_or(matched.end(), |end| end.max(matched.end())));
                 search_start = matched.start() + 1;
@@ -158,6 +165,17 @@ impl ContentRedactor {
             bytes: output,
             replacement_count,
         })
+    }
+}
+
+#[async_trait::async_trait]
+impl ContentRedactionPort for ContentRedactor {
+    async fn redact_content(&self, content: &[u8]) -> Result<Vec<u8>, SecurityError> {
+        self.redact(content)
+            .map(RedactedContent::into_bytes)
+            .map_err(|_| {
+                SecurityError::Unavailable("required content redaction failed".to_string())
+            })
     }
 }
 

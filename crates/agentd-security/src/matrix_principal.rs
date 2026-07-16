@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use agentd_core::ports::{EnterprisePrincipalPort, SecurityError};
+use agentd_core::ports::{Clock, EnterprisePrincipalPort, SecurityError};
 use agentd_core::types::{
     EnterpriseAuthentication, EnterpriseRequestIdentity, MatrixPrincipalResolveRequest,
     MatrixTrustPolicy, SecurityDenialReason,
@@ -11,50 +11,60 @@ use agentd_core::types::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatrixPrincipalResolverConfig {
     pub trust_policy: MatrixTrustPolicy,
-    pub require_human_device: bool,
 }
 
 #[derive(Debug)]
-pub struct MatrixPrincipalResolver<R> {
+pub struct MatrixPrincipalResolver<R, C> {
     repository: Arc<R>,
+    clock: Arc<C>,
     config: MatrixPrincipalResolverConfig,
 }
 
-impl<R> MatrixPrincipalResolver<R>
+impl<R, C> MatrixPrincipalResolver<R, C>
 where
     R: EnterprisePrincipalPort,
+    C: Clock,
 {
     #[must_use]
-    pub fn new(repository: Arc<R>, config: MatrixPrincipalResolverConfig) -> Self {
-        Self { repository, config }
+    pub fn new(repository: Arc<R>, clock: Arc<C>, config: MatrixPrincipalResolverConfig) -> Self {
+        Self {
+            repository,
+            clock,
+            config,
+        }
     }
 
     pub async fn resolve(
         &self,
         request: &MatrixPrincipalResolveRequest,
     ) -> Result<EnterpriseRequestIdentity, SecurityError> {
+        let observed_at = self.clock.now_unix();
+        if observed_at < 0 {
+            return Err(SecurityError::Unavailable(
+                "trusted Matrix clock returned invalid time".to_string(),
+            ));
+        }
+        let mut request = request.clone();
+        request.observed_at = observed_at;
         self.config
             .trust_policy
-            .authorize_source(request)
+            .authorize_source(&request)
             .map_err(SecurityError::Denied)?;
-        validate_user_id(request)?;
-        if self.config.require_human_device
-            && request.appservice_id.is_none()
-            && request.device_id.is_none()
-        {
+        validate_user_id(&request)?;
+        if request.appservice_id.is_none() && request.device_id.is_none() {
             return Err(SecurityError::Denied(
                 SecurityDenialReason::MatrixDeviceRequired,
             ));
         }
 
-        let identity = self.repository.resolve_matrix(request).await?;
+        let identity = self.repository.resolve_matrix(&request).await?;
         identity
             .principal
             .ensure_active()
             .map_err(SecurityError::Denied)?;
         if identity.authenticated_at != request.observed_at
             || identity.expires_at <= request.observed_at
-            || !authentication_matches(&identity, request)
+            || !authentication_matches(&identity, &request)
         {
             return Err(SecurityError::Denied(
                 SecurityDenialReason::IdentityUntrusted,

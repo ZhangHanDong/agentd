@@ -1,12 +1,12 @@
 //! Authenticated remote secret-broker transport with immutable scope validation.
 
-use std::fmt;
+use std::{fmt, time::Duration};
 
 use agentd_core::ports::{SecretBrokerPort, SecurityError};
 use agentd_core::types::{
     AttemptCapabilityId, OrganizationRef, ProjectExecutionSnapshotRef, ProjectRef, ProtectedAction,
-    ProtectedResourceKind, SecretCheckoutRequest, SecretLease, SecretMaterial, SecretSelector,
-    SecurityDenialReason, TaskLeaseClaim, WorkerIncarnationId,
+    ProtectedResourceKind, RbacPolicyVersionRef, SecretCheckoutRequest, SecretLease,
+    SecretMaterial, SecretSelector, SecurityDenialReason, TaskLeaseClaim, WorkerIncarnationId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -16,7 +16,10 @@ pub struct RemoteSecretScope {
     pub organization_ref: OrganizationRef,
     pub project_ref: ProjectRef,
     pub execution_snapshot_ref: ProjectExecutionSnapshotRef,
+    pub rbac_policy_version_ref: RbacPolicyVersionRef,
+    pub policy_revocation_epoch: u64,
     pub capability_id: AttemptCapabilityId,
+    pub checkout_id: String,
     pub worker_incarnation_id: WorkerIncarnationId,
     pub task_lease_claim: TaskLeaseClaim,
     pub requested_expires_at: i64,
@@ -59,7 +62,10 @@ impl RemoteSecretRequest {
                 organization_ref: admission.scope.organization_ref.clone(),
                 project_ref: admission.scope.project_ref.clone(),
                 execution_snapshot_ref: admission.scope.execution_snapshot_ref.clone(),
+                rbac_policy_version_ref: admission.scope.rbac_policy_version_ref.clone(),
+                policy_revocation_epoch: admission.scope.policy_revocation_epoch,
                 capability_id: admission.id.clone(),
+                checkout_id: format!("sc_{}", ulid::Ulid::new()),
                 worker_incarnation_id: admission.scope.worker_incarnation_id.clone(),
                 task_lease_claim: admission.scope.task_lease_claim.clone(),
                 requested_expires_at,
@@ -71,6 +77,7 @@ impl RemoteSecretRequest {
 
 pub struct RemoteSecretResponse {
     pub scope: RemoteSecretScope,
+    pub secret_version: String,
     pub material: SecretMaterial,
     pub expires_at: i64,
 }
@@ -80,6 +87,7 @@ impl fmt::Debug for RemoteSecretResponse {
         formatter
             .debug_struct("RemoteSecretResponse")
             .field("scope", &self.scope)
+            .field("secret_version", &self.secret_version)
             .field("material", &"[REDACTED]")
             .field("expires_at", &self.expires_at)
             .finish()
@@ -104,12 +112,17 @@ pub trait SecretBrokerTransport: Send + Sync {
 
 pub struct RemoteSecretBroker<T> {
     transport: T,
+    timeout: Duration,
 }
 
 impl<T> RemoteSecretBroker<T> {
-    #[must_use]
-    pub const fn new(transport: T) -> Self {
-        Self { transport }
+    pub fn new(transport: T, timeout: Duration) -> Result<Self, SecurityError> {
+        if timeout.is_zero() || timeout > Duration::from_secs(30) {
+            return Err(SecurityError::Invalid(
+                "remote secret timeout must be within 1ns..=30s".to_string(),
+            ));
+        }
+        Ok(Self { transport, timeout })
     }
 
     #[must_use]
@@ -137,12 +150,12 @@ where
         request: &SecretCheckoutRequest,
     ) -> Result<SecretLease, SecurityError> {
         let remote_request = RemoteSecretRequest::from_checkout(request)?;
-        let response = self
-            .transport
-            .checkout(&remote_request)
+        let response = tokio::time::timeout(self.timeout, self.transport.checkout(&remote_request))
             .await
+            .map_err(|_| secret_unavailable())?
             .map_err(|_| secret_unavailable())?;
         if response.scope != remote_request.scope
+            || response.secret_version.trim().is_empty()
             || response.expires_at <= request.observed_at
             || response.expires_at > remote_request.scope.requested_expires_at
             || response.material.expose_secret().is_empty()

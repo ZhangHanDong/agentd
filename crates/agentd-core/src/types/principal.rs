@@ -304,14 +304,32 @@ pub struct SecurityEpochRequest {
     pub observed_at: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecurityEpochStatus {
+    pub checkpoint: SecurityCheckpoint,
+    pub organization_ref: OrganizationRef,
+    pub project_ref: ProjectRef,
+    pub execution_snapshot_ref: ProjectExecutionSnapshotRef,
     pub current_epoch: u64,
     pub observed_at: i64,
 }
 
 impl SecurityEpochStatus {
-    pub fn validate_pinned_epoch(self, pinned_epoch: u64) -> Result<(), SecurityDenialReason> {
+    pub fn validate_request(
+        &self,
+        request: &SecurityEpochRequest,
+    ) -> Result<(), SecurityDenialReason> {
+        if self.checkpoint != request.checkpoint
+            || self.organization_ref != request.organization_ref
+            || self.project_ref != request.project_ref
+            || self.execution_snapshot_ref != request.execution_snapshot_ref
+        {
+            return Err(SecurityDenialReason::SnapshotMismatch);
+        }
+        Ok(())
+    }
+
+    pub fn validate_pinned_epoch(&self, pinned_epoch: u64) -> Result<(), SecurityDenialReason> {
         match self.current_epoch.cmp(&pinned_epoch) {
             std::cmp::Ordering::Equal => Ok(()),
             std::cmp::Ordering::Greater => Err(SecurityDenialReason::PolicyEpochStale),

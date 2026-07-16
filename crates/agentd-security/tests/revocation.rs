@@ -47,6 +47,22 @@ fn request(checkpoint: SecurityCheckpoint) -> SecurityEpochRequest {
     }
 }
 
+fn status(
+    checkpoint: SecurityCheckpoint,
+    current_epoch: u64,
+    observed_at: i64,
+) -> SecurityEpochStatus {
+    let request = request(checkpoint);
+    SecurityEpochStatus {
+        checkpoint: request.checkpoint,
+        organization_ref: request.organization_ref,
+        project_ref: request.project_ref,
+        execution_snapshot_ref: request.execution_snapshot_ref,
+        current_epoch,
+        observed_at,
+    }
+}
+
 #[tokio::test]
 async fn checker_enforces_every_closed_checkpoint_at_equal_epoch() {
     for checkpoint in [
@@ -57,10 +73,7 @@ async fn checker_enforces_every_closed_checkpoint_at_equal_epoch() {
         SecurityCheckpoint::Release,
     ] {
         let authority = FakeAuthority {
-            result: Mutex::new(Some(Ok(SecurityEpochStatus {
-                current_epoch: 9,
-                observed_at: 199,
-            }))),
+            result: Mutex::new(Some(Ok(status(checkpoint, 9, 199)))),
             requests: Mutex::new(Vec::new()),
         };
         let checker = AuthorityRevocationChecker::new(authority, 30).expect("checker");
@@ -86,24 +99,15 @@ async fn checker_enforces_every_closed_checkpoint_at_equal_epoch() {
 async fn checker_denies_advanced_regressed_unavailable_and_malformed_epochs() {
     let cases = [
         (
-            Ok(SecurityEpochStatus {
-                current_epoch: 10,
-                observed_at: 199,
-            }),
+            Ok(status(SecurityCheckpoint::Release, 10, 199)),
             SecurityError::Denied(SecurityDenialReason::PolicyEpochStale),
         ),
         (
-            Ok(SecurityEpochStatus {
-                current_epoch: 8,
-                observed_at: 199,
-            }),
+            Ok(status(SecurityCheckpoint::Release, 8, 199)),
             SecurityError::Denied(SecurityDenialReason::PolicyEpochRegressed),
         ),
         (
-            Ok(SecurityEpochStatus {
-                current_epoch: 9,
-                observed_at: 201,
-            }),
+            Ok(status(SecurityCheckpoint::Release, 9, 201)),
             SecurityError::Unavailable(
                 "policy revocation authority returned invalid state".to_string(),
             ),

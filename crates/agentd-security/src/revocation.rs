@@ -3,6 +3,8 @@
 use agentd_core::ports::{PolicyRevocationPort, SecurityError};
 use agentd_core::types::{SecurityEpochRequest, SecurityEpochStatus};
 
+const MAX_OBSERVATION_AGE_SECONDS: i64 = 60;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecurityEpochAuthorityError {
     Unavailable,
@@ -25,9 +27,9 @@ pub struct AuthorityRevocationChecker<A> {
 
 impl<A> AuthorityRevocationChecker<A> {
     pub fn new(authority: A, max_observation_age_seconds: i64) -> Result<Self, SecurityError> {
-        if max_observation_age_seconds <= 0 {
+        if !(1..=MAX_OBSERVATION_AGE_SECONDS).contains(&max_observation_age_seconds) {
             return Err(SecurityError::Invalid(
-                "policy revocation observation age must be positive".to_string(),
+                "policy revocation observation age is outside the supported bound".to_string(),
             ));
         }
         Ok(Self {
@@ -81,6 +83,9 @@ where
                 "policy revocation authority observation is stale".to_string(),
             ));
         }
+        status
+            .validate_request(request)
+            .map_err(SecurityError::Denied)?;
         status
             .validate_pinned_epoch(request.pinned_epoch)
             .map_err(SecurityError::Denied)?;

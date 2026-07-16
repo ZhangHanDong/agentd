@@ -83,6 +83,10 @@ fn matrix_trust_and_device_revocation_fail_closed() {
 #[test]
 fn policy_epoch_and_placement_are_closed_contracts() {
     let epoch = SecurityEpochStatus {
+        checkpoint: SecurityCheckpoint::Dispatch,
+        organization_ref: organization(),
+        project_ref: project(),
+        execution_snapshot_ref: snapshot(),
         current_epoch: 9,
         observed_at: 140,
     };
@@ -163,6 +167,10 @@ impl PolicyRevocationPort for RecordingPrincipalPort {
     ) -> Result<SecurityEpochStatus, SecurityError> {
         assert_eq!(request.checkpoint, SecurityCheckpoint::Dispatch);
         Ok(SecurityEpochStatus {
+            checkpoint: request.checkpoint,
+            organization_ref: request.organization_ref.clone(),
+            project_ref: request.project_ref.clone(),
+            execution_snapshot_ref: request.execution_snapshot_ref.clone(),
             current_epoch: request.pinned_epoch,
             observed_at: request.observed_at,
         })
