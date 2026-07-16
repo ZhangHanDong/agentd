@@ -608,6 +608,22 @@ Exit gate:
 - optional certification failure does not block delivery under `gate=none`;
 - policy-required certification blocks release without taking over execution.
 
+Implementation status (2026-07-17): AD-E4 code-complete candidate. Core defines
+versioned canonical signed execution evidence, immutable certification
+request/result contracts, delivery/certification/release/revocation mappings,
+exact Forge admission, and snapshot-pinned Skill Hub package hashes. Migration
+`0020` adds immutable key lifecycle, evidence, request/result event, state,
+Forge, trust-observation, and installation history. The security adapter signs
+only Builder/Worker evidence and verifies Ed25519 `did:key` OpenFab results and
+Skill Hub status with historical key-revocation semantics. The fail-closed
+service checks trusted time and current Specify revocation epochs at Forge and
+install boundaries; the authenticated HTTPS adapter provides bounded,
+idempotent certification and exact package-version transport. Agentd does not
+author OpenFab verdicts or trust signatures. This is not an AD-E4 or FSF-5 exit:
+deployed OpenFab interoperability, independent verification, outage/replay,
+real key rotation, gate/Forge drills, Skill Hub yank/revoke, and operator sign-off
+remain in the final manual checklist.
+
 ### AD-E5: Native Runtime
 
 Depends on: AD-E2.

@@ -88,7 +88,7 @@ async fn migration_is_idempotent_on_reopen() {
         .fetch_one(s2.pool())
         .await
         .expect("schema version row");
-    assert_eq!(version, "19");
+    assert_eq!(version, "20");
 }
 
 #[tokio::test]

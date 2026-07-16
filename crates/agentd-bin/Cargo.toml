@@ -42,6 +42,8 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 rmcp = { workspace = true }
+reqwest = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 # The in-memory port fakes (FakeBackend/MempalStub/FixedClock/RecordingCommandRunner)

@@ -45,6 +45,7 @@ pub enum ResourceKind {
     RbacPolicy,
     QuotaPolicy,
     CertificationPolicy,
+    SkillPackage,
     MatrixRoom,
     ExecutionSnapshot,
 }
@@ -65,6 +66,7 @@ impl ResourceKind {
             Self::RbacPolicy => "rbac_policy",
             Self::QuotaPolicy => "quota_policy",
             Self::CertificationPolicy => "certification_policy",
+            Self::SkillPackage => "skill_package",
             Self::MatrixRoom => "matrix_room",
             Self::ExecutionSnapshot => "execution_snapshot",
         }
@@ -199,6 +201,7 @@ typed_authority_ref!(ProductWorkflowRef, ProductWorkflow);
 typed_authority_ref!(RbacPolicyVersionRef, RbacPolicy);
 typed_authority_ref!(QuotaPolicyVersionRef, QuotaPolicy);
 typed_authority_ref!(CertificationPolicyVersionRef, CertificationPolicy);
+typed_authority_ref!(SkillPackageVersionRef, SkillPackage);
 typed_authority_ref!(MatrixRoomRef, MatrixRoom);
 typed_authority_ref!(ProjectExecutionSnapshotRef, ExecutionSnapshot);
 
@@ -244,6 +247,29 @@ pub enum OfflineRecoveryPolicy {
     AllowPinnedUntilExpiry,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum CertificationGate {
+    None,
+    Machine,
+    Human { required: u16, eligible: u16 },
+}
+
+impl Default for CertificationGate {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillPackageBinding {
+    pub package_ref: SkillPackageVersionRef,
+    pub archive_sha256: String,
+    pub manifest_sha256: String,
+    pub dependency_lock_sha256: String,
+    pub permissions_sha256: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectExecutionSnapshot {
     pub snapshot_ref: ProjectExecutionSnapshotRef,
@@ -261,6 +287,10 @@ pub struct ProjectExecutionSnapshot {
     pub rbac_policy_version_ref: RbacPolicyVersionRef,
     pub quota_policy_version_ref: QuotaPolicyVersionRef,
     pub certification_policy_version_ref: Option<CertificationPolicyVersionRef>,
+    #[serde(default)]
+    pub certification_gate: CertificationGate,
+    #[serde(default)]
+    pub skill_packages: Vec<SkillPackageBinding>,
     pub placement_policy: PlacementPolicy,
     pub policy_revocation_epoch: u64,
     pub issued_at: i64,
@@ -295,6 +325,28 @@ impl ProjectExecutionSnapshot {
             return Err(ProjectAuthorityValidationError::InvalidPlacementPolicy);
         }
         validate_sha256(&self.content_sha256, "snapshot content sha256")?;
+        match self.certification_gate {
+            CertificationGate::None => {}
+            CertificationGate::Machine if self.certification_policy_version_ref.is_some() => {}
+            CertificationGate::Human { required, eligible }
+                if self.certification_policy_version_ref.is_some()
+                    && required > 0
+                    && required <= eligible => {}
+            _ => return Err(ProjectAuthorityValidationError::InvalidCertificationGate),
+        }
+        let mut skill_packages = HashSet::new();
+        for package in &self.skill_packages {
+            if !skill_packages.insert(package.package_ref.clone()) {
+                return Err(ProjectAuthorityValidationError::DuplicateSkillPackage);
+            }
+            validate_sha256(&package.archive_sha256, "skill archive sha256")?;
+            validate_sha256(&package.manifest_sha256, "skill manifest sha256")?;
+            validate_sha256(
+                &package.dependency_lock_sha256,
+                "skill dependency lock sha256",
+            )?;
+            validate_sha256(&package.permissions_sha256, "skill permissions sha256")?;
+        }
 
         for reference in self.authority_owned_refs() {
             if reference.authority_key() != &self.authority_key {
@@ -439,6 +491,10 @@ pub enum ProjectAuthorityValidationError {
     EmptyCommandClasses,
     #[error("a Matrix room may have at most one command binding per snapshot")]
     DuplicateCommandRoom,
+    #[error("certification gate requires a valid policy and N-of-M threshold")]
+    InvalidCertificationGate,
+    #[error("skill package versions must be unique within an execution snapshot")]
+    DuplicateSkillPackage,
 }
 
 fn validate_text(value: &str, field: &'static str) -> Result<(), ProjectAuthorityValidationError> {

@@ -2,6 +2,7 @@
 
 #![warn(clippy::unwrap_used, clippy::panic)]
 
+pub mod evidence_signing;
 pub mod identity;
 pub mod matrix_principal;
 pub mod oidc;

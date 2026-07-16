@@ -55,12 +55,15 @@ getrandom = "0.4"
 hex = "0.4"
 jsonwebtoken = "9.3"
 regex-automata = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 subtle = "2.6"
 zeroize = "1.9"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pki-types = "1.15"
 url = "2"
 x509-parser = "0.17"
+ed25519-dalek = "2"
+bs58 = "0.5"
 
 # Pin major external deps used across crates so versions don't drift
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "macros", "migrate"] }

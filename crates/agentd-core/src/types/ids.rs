@@ -58,6 +58,11 @@ id_newtype!(FleetOutboxId, "fo");
 id_newtype!(ArtifactUploadId, "au");
 id_newtype!(MatrixCommandId, "mc");
 id_newtype!(MatrixGatewayOutboxId, "mo");
+id_newtype!(EvidenceEnvelopeId, "ee");
+id_newtype!(CertificationRequestId, "cr");
+id_newtype!(CertificationResultId, "ce");
+id_newtype!(SkillInstallationId, "si");
+id_newtype!(ForgeAdmissionId, "fr");
 
 impl NodeId {
     /// `NodeId`s in DOT files are operator-authored; preserve as-is.

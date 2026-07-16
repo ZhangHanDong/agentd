@@ -15,9 +15,11 @@ pub use enterprise::{
 };
 pub use handle::{AgentHandle, AgentStatus, BackendKind, CliKind, LaunchStrategy, SpawnRequest};
 pub use ids::{
-    AgentId, AgentProfileId, ArtifactUploadId, AuditEventId, ExecutionArtifactId, FleetOutboxId,
-    LeaseId, MatrixCommandId, MatrixGatewayOutboxId, NodeId, ReviewRunId, RunId, RuntimeAttemptId,
-    RuntimeSessionId, TaskRunId, WorkerId, WorkerIncarnationId,
+    AgentId, AgentProfileId, ArtifactUploadId, AuditEventId, CertificationRequestId,
+    CertificationResultId, EvidenceEnvelopeId, ExecutionArtifactId, FleetOutboxId,
+    ForgeAdmissionId, LeaseId, MatrixCommandId, MatrixGatewayOutboxId, NodeId, ReviewRunId, RunId,
+    RuntimeAttemptId, RuntimeSessionId, SkillInstallationId, TaskRunId, WorkerId,
+    WorkerIncarnationId,
 };
 pub use outcome::{Artifact, ArtifactKind, MempalWrite, Outcome, Status};
 pub use principal::{
@@ -28,12 +30,13 @@ pub use principal::{
     SecurityCheckpoint, SecurityEpochRequest, SecurityEpochStatus,
 };
 pub use project_authority::{
-    AuthorityKey, AuthorityResourceRef, CertificationPolicyVersionRef, FrozenSpecVersionRef,
-    IssueRef, MatrixRoomRef, OfflineRecoveryPolicy, OrganizationRef, ProductWorkflowRef,
-    ProjectAuthorityValidationError, ProjectExecutionSnapshot, ProjectExecutionSnapshotRef,
-    ProjectRef, ProjectRoomBindingRef, QuotaPolicyVersionRef, RbacPolicyVersionRef,
-    RepositoryBinding, RepositoryRef, RepositoryRole, RequirementRef, ResourceKind, RoomBinding,
-    RoomBindingRole, TeamRef,
+    AuthorityKey, AuthorityResourceRef, CertificationGate, CertificationPolicyVersionRef,
+    FrozenSpecVersionRef, IssueRef, MatrixRoomRef, OfflineRecoveryPolicy, OrganizationRef,
+    ProductWorkflowRef, ProjectAuthorityValidationError, ProjectExecutionSnapshot,
+    ProjectExecutionSnapshotRef, ProjectRef, ProjectRoomBindingRef, QuotaPolicyVersionRef,
+    RbacPolicyVersionRef, RepositoryBinding, RepositoryRef, RepositoryRole, RequirementRef,
+    ResourceKind, RoomBinding, RoomBindingRole, SkillPackageBinding, SkillPackageVersionRef,
+    TeamRef,
 };
 pub use security::{
     AttemptCapabilityId, AuthenticatedWorkload, AuthorizedResourceScope, CapabilityAdmission,

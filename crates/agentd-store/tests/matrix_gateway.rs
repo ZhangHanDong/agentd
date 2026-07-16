@@ -9,12 +9,13 @@ use agentd_core::ports::{
     MatrixTransportProvenance, NormalizedMatrixCommand, PolicyRevocationPort, SecurityError,
 };
 use agentd_core::types::{
-    AuthorityKey, CertificationPolicyVersionRef, DataClassification, EnterpriseRequestIdentity,
-    FrozenSpecVersionRef, MatrixPrincipalResolveRequest, MatrixRoomRef, MatrixTrustPolicy,
-    OfflineRecoveryPolicy, OrganizationRef, PlacementPolicy, PrincipalKind, ProductWorkflowRef,
-    ProjectExecutionSnapshot, ProjectExecutionSnapshotRef, ProjectRef, ProjectRoomBindingRef,
-    QuotaPolicyVersionRef, RbacPolicyVersionRef, RepositoryBinding, RepositoryRef, RepositoryRole,
-    RoomBinding, RoomBindingRole, SecurityEpochRequest, SecurityEpochStatus, TeamRef,
+    AuthorityKey, CertificationGate, CertificationPolicyVersionRef, DataClassification,
+    EnterpriseRequestIdentity, FrozenSpecVersionRef, MatrixPrincipalResolveRequest, MatrixRoomRef,
+    MatrixTrustPolicy, OfflineRecoveryPolicy, OrganizationRef, PlacementPolicy, PrincipalKind,
+    ProductWorkflowRef, ProjectExecutionSnapshot, ProjectExecutionSnapshotRef, ProjectRef,
+    ProjectRoomBindingRef, QuotaPolicyVersionRef, RbacPolicyVersionRef, RepositoryBinding,
+    RepositoryRef, RepositoryRole, RoomBinding, RoomBindingRole, SecurityEpochRequest,
+    SecurityEpochStatus, TeamRef,
 };
 use agentd_store::principal_repo::{PrincipalUpsert, SqliteEnterprisePrincipalRepository};
 use agentd_store::{SqliteStore, matrix_gateway::SqliteMatrixGateway};
@@ -151,6 +152,8 @@ fn snapshot() -> ProjectExecutionSnapshot {
         certification_policy_version_ref: Some(
             CertificationPolicyVersionRef::new(authority, "cert-a", "1").expect("cert"),
         ),
+        certification_gate: CertificationGate::Machine,
+        skill_packages: Vec::new(),
         placement_policy: PlacementPolicy {
             data_classification: DataClassification::Restricted,
             allowed_regions: BTreeSet::from(["eu-west-1".to_string()]),

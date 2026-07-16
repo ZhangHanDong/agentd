@@ -17,6 +17,7 @@ pub mod agent_profile_repo;
 pub mod agent_repo;
 pub mod agent_scheduler_repo;
 pub mod artifact_repo;
+pub mod certification_control_plane;
 pub mod checkpoint_repo;
 pub mod error;
 pub mod event_repo;

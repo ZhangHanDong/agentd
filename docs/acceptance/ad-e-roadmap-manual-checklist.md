@@ -45,10 +45,16 @@
 
 ## AD-E4
 
+- [ ] Run `cargo test -p agentd-security --test evidence_signing`, `cargo test -p agentd-store --test openfab_certification`, and `cargo test -p agentd-bin --test openfab`; retain complete output and binary/source revisions.
 - [ ] Export a signed evidence envelope and independently verify immutable project/source/spec/artifact/policy/skill digests in OpenFab.
-- [ ] Rotate/revoke builder and worker keys; verify historical evidence remains resolvable while new revoked evidence is rejected.
-- [ ] Exercise `gate=none`, required machine verification, human/N-of-M certification, delivery, release, and revocation mappings.
-- [ ] Install approved Skill Hub packages and deny yanked/revoked/unapproved package versions without rewriting historical evidence.
+- [ ] Capture and compare canonical payload bytes, payload SHA-256, Ed25519 signature, signer DID/key id/role, trusted signing window, snapshot ref, evidence storage ref, OpenFab signed ref, and independently calculated subject/spec/policy/skill digests.
+- [ ] Rotate/revoke Builder, Worker, and OpenFab trust keys; verify evidence signed before revocation remains resolvable, signatures at/after revocation are denied, successor keys are used, and no private key enters SQLite/log/audit.
+- [ ] Interrupt before/after request persistence, HTTP submission, OpenFab result publication, result polling, and result persistence; prove request/result events replay independently without duplicate certification or mismatched idempotency acceptance.
+- [ ] Exercise `gate=none` with unavailable/failing optional certification and prove delivery/release remains non-blocking; then exercise required machine and human/N-of-M gates and prove absent/fail/stale/revoked/wrong-subject/wrong-policy/wrong-snapshot results block Forge merge/release.
+- [ ] Walk produced, delivered, machine-attested, human-certified, released, and revoked state mappings; reject stale previous-state and illegal transition replays.
+- [ ] Install approved/signed Skill Hub packages pinned by exact archive/manifest/dependency-lock/permissions hashes; deny draft/in-review/yanked/revoked/deprecated, expired, mutable, wrong-version, wrong-hash, and stale trust records.
+- [ ] Yank and revoke an installed package, then prove the signed trust observation at install remains historically verifiable while a new install is denied.
+- [ ] Verify HTTPS/bearer/timeout/no-redirect/1-MiB response bounds and credential redaction; exercise 401/403/404/409/429/5xx and malformed/mismatched response handling.
 - [ ] FSF-5 operator sign-off recorded.
 
 ## AD-E5

@@ -5,6 +5,7 @@
 
 pub mod agent_allocator;
 pub mod backend;
+pub mod certification;
 pub mod clock;
 pub mod command_runner;
 pub mod execution_evidence;
@@ -24,6 +25,19 @@ pub use agent_allocator::{
     DirectAgentAllocator,
 };
 pub use backend::AgentBackend;
+pub use certification::{
+    CertificationError, CertificationPort, CertificationRequest, CertificationResultPayload,
+    CertificationStatePort, CertificationStateTransition, CertificationVerdict,
+    DeliveryCertificationState, EXECUTION_EVIDENCE_ENVELOPE_SCHEMA_VERSION,
+    EvidenceArtifactSubject, EvidenceEnvelopeStorePort, EvidenceSignerRole, EvidenceSigningPort,
+    EvidenceVerificationPort, ExecutionEvidenceEnvelopePayload, ForgeAdmission,
+    ForgeAdmissionRequest, ForgeOperation, ImmutableEvidenceRef,
+    OPENFAB_CERTIFICATION_SCHEMA_VERSION, SignedCertificationResult,
+    SignedExecutionEvidenceEnvelope, SigningKeyTrustPort, SkillHubPort, SkillInstallAdmission,
+    SkillInstallRequest, SkillPackageEvidenceRef, SkillPackageTrustPayload,
+    SkillPackageTrustRecord, SkillPackageTrustStatus, TrustedSigningKey, canonical_json,
+    canonical_sha256,
+};
 pub use clock::Clock;
 pub use command_runner::{CommandError, CommandOutput, CommandRunner, RunOpts};
 pub use execution_evidence::{

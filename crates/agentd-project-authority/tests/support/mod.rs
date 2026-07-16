@@ -4,11 +4,11 @@ use std::collections::BTreeSet;
 
 use agentd_core::ports::ProjectSnapshotResolveRequest;
 use agentd_core::types::{
-    AuthorityKey, CertificationPolicyVersionRef, DataClassification, FrozenSpecVersionRef,
-    MatrixRoomRef, OfflineRecoveryPolicy, OrganizationRef, PlacementPolicy, ProductWorkflowRef,
-    ProjectExecutionSnapshot, ProjectExecutionSnapshotRef, ProjectRef, ProjectRoomBindingRef,
-    QuotaPolicyVersionRef, RbacPolicyVersionRef, RepositoryBinding, RepositoryRef, RepositoryRole,
-    RequirementRef, RoomBinding, RoomBindingRole, TeamRef,
+    AuthorityKey, CertificationGate, CertificationPolicyVersionRef, DataClassification,
+    FrozenSpecVersionRef, MatrixRoomRef, OfflineRecoveryPolicy, OrganizationRef, PlacementPolicy,
+    ProductWorkflowRef, ProjectExecutionSnapshot, ProjectExecutionSnapshotRef, ProjectRef,
+    ProjectRoomBindingRef, QuotaPolicyVersionRef, RbacPolicyVersionRef, RepositoryBinding,
+    RepositoryRef, RepositoryRole, RequirementRef, RoomBinding, RoomBindingRole, TeamRef,
 };
 
 pub fn authority(value: &str) -> AuthorityKey {
@@ -71,6 +71,8 @@ pub fn snapshot(
             CertificationPolicyVersionRef::new(authority_key, "cert-policy-1", "15")
                 .expect("certification policy ref"),
         ),
+        certification_gate: CertificationGate::Machine,
+        skill_packages: Vec::new(),
         placement_policy: PlacementPolicy {
             data_classification: DataClassification::Restricted,
             allowed_regions: BTreeSet::from(["eu-west-1".to_string()]),

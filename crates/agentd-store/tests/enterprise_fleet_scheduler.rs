@@ -8,14 +8,14 @@ use agentd_core::ports::{
     SecurityError, WorkerAvailability,
 };
 use agentd_core::types::{
-    ArtifactUploadId, AuthenticatedWorkload, AuthorityKey, CertificationPolicyVersionRef,
-    DataClassification, ExecutionArtifactId, FrozenSpecVersionRef, MatrixRoomRef, NodeId,
-    OfflineRecoveryPolicy, OrganizationRef, PlacementPolicy, ProductWorkflowRef,
-    ProjectExecutionSnapshot, ProjectExecutionSnapshotRef, ProjectRef, ProjectRoomBindingRef,
-    ProtectedAction, QuotaPolicyVersionRef, RbacPolicyVersionRef, RepositoryBinding, RepositoryRef,
-    RepositoryRole, RoomBinding, RoomBindingRole, RunId, SecurityCheckpoint, SecurityEpochRequest,
-    SecurityEpochStatus, TaskRunId, TeamRef, WorkerId, WorkerIncarnationId, WorkerStatus,
-    WorkloadRole,
+    ArtifactUploadId, AuthenticatedWorkload, AuthorityKey, CertificationGate,
+    CertificationPolicyVersionRef, DataClassification, ExecutionArtifactId, FrozenSpecVersionRef,
+    MatrixRoomRef, NodeId, OfflineRecoveryPolicy, OrganizationRef, PlacementPolicy,
+    ProductWorkflowRef, ProjectExecutionSnapshot, ProjectExecutionSnapshotRef, ProjectRef,
+    ProjectRoomBindingRef, ProtectedAction, QuotaPolicyVersionRef, RbacPolicyVersionRef,
+    RepositoryBinding, RepositoryRef, RepositoryRole, RoomBinding, RoomBindingRole, RunId,
+    SecurityCheckpoint, SecurityEpochRequest, SecurityEpochStatus, TaskRunId, TeamRef, WorkerId,
+    WorkerIncarnationId, WorkerStatus, WorkloadRole,
 };
 use agentd_store::fleet_scheduler::SqliteFleetScheduler;
 use agentd_store::worker_repo::{self, WorkerCreate, WorkerRegistration};
@@ -147,6 +147,8 @@ fn snapshot() -> ProjectExecutionSnapshot {
         certification_policy_version_ref: Some(
             CertificationPolicyVersionRef::new(authority, "cert-a", "1").expect("cert"),
         ),
+        certification_gate: CertificationGate::Machine,
+        skill_packages: Vec::new(),
         placement_policy: PlacementPolicy {
             data_classification: DataClassification::Restricted,
             allowed_regions: BTreeSet::from(["eu-west-1".to_string()]),
