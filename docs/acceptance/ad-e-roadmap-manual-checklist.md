@@ -35,8 +35,12 @@
 
 - [ ] Bind a Robrix project through Specify and dispatch through the native agentd Matrix gateway with no agent-chat process.
 - [ ] Replay Matrix sync and command inbox across restart; prove one canonical command id creates at most one run id.
+- [ ] Race command ingress against observe/shadow/canary/active/drain/rollback transitions; prove mode, ACL, snapshot, previous cursor, command, optional run, outbox, and next cursor commit as one transaction.
 - [ ] Verify inviter/sender/appservice ACL, attachment content addressing, bounded summaries, raw-transcript exclusion, and actionable failure links.
+- [ ] Stop after Matrix send and before delivery acknowledgement, then restart; prove the semantic outbox retries by canonical outbox id and no execution is duplicated.
+- [ ] Compare Robrix project/run/task/artifact/approval/evidence projections with the canonical agentd records and prove prompts, answers, findings, logs, and transcripts are absent.
 - [ ] Execute observe, shadow-read-only, canary, per-project cursor/authority cutover, drain, rollback, and retire procedures.
+- [ ] Resolve every digest-only project/room/principal/task/message/cursor/run mapping in the rollback manifest and verify in-flight ownership returns to the intended control plane.
 - [ ] FSF-4 operator sign-off recorded.
 
 ## AD-E4

@@ -558,6 +558,25 @@ Exit gate:
 This is the control-plane/workflow cutover. The transitional runtime may still
 exist until AD-E5 passes.
 
+Implementation status (2026-07-17): AD-E3 code-complete candidate. Core now
+defines authenticated Matrix provenance, canonical command/outbox ids, closed
+cutover modes, typed semantic summaries, reliable delivery, and bounded Robrix
+project/run/task/artifact/approval/evidence projections. Migration `0019` owns
+Specify-bound project rooms, immutable command/inbox records, transactional
+cursor/run/outbox handoff, durable delivery acknowledgement, and cutover
+history plus digest-only legacy state mappings and rollback manifests, without
+raw command bodies, attachment bytes, logs, or transcripts.
+`SqliteMatrixGateway` enforces inviter/sender/appservice, live principal,
+organization, current revocation epoch, snapshot, command ACL, mode, and cursor
+conditions inside the write transaction; observe and shadow create no execution
+side effects, while replay reuses the canonical command/run/outbox identity.
+`AgentdMatrixGateway`
+uses authenticated transport provenance and trusted time, content-addresses
+attachments, and fails startup closed unless identity, storage, delivery, and
+clock providers are present. This is not an AD-E3 or FSF-4 exit: real
+homeserver/Robrix dispatch, restart replay, canary rollback, service cutover,
+and operator sign-off evidence remains in the final manual checklist.
+
 ### AD-E4: OpenFab Evidence and Skill Integration
 
 Depends on: AD-E1; integrates with AD-E2 and AD-E3.

@@ -2,7 +2,10 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use agentd_core::ports::Clock;
+use agentd_core::ports::{
+    Clock, MatrixGatewayDenialReason, MatrixGatewayError, MatrixGatewayIdentityPort,
+    MatrixTransportProvenance,
+};
 use agentd_core::types::{
     AuthorityKey, EnterprisePrincipalId, MatrixDeviceBinding, MatrixDeviceStatus,
     MatrixPrincipalResolveRequest, MatrixTrustPolicy, OrganizationRef, PrincipalKind,
@@ -197,5 +200,40 @@ async fn matrix_resolver_allows_trusted_appservice_without_device_and_propagates
     assert_eq!(
         denied.denial_reason(),
         Some(SecurityDenialReason::PrincipalDisabled)
+    );
+}
+
+#[tokio::test]
+async fn matrix_gateway_identity_rejects_forged_transport_before_principal_lookup() {
+    let (_dir, repo, policy, _id) = fixture().await;
+    let resolver = MatrixPrincipalResolver::new(
+        Arc::clone(&repo),
+        Arc::new(TestClock::new(120)),
+        MatrixPrincipalResolverConfig {
+            trust_policy: policy,
+        },
+    );
+    let provenance = MatrixTransportProvenance {
+        event_id: "$forged".to_string(),
+        room_id: "!project-a:matrix.example".to_string(),
+        sender_user_id: "@forged:matrix.example".to_string(),
+        homeserver: "matrix.example".to_string(),
+        device_id: Some("DEVICE-A".to_string()),
+        appservice_id: None,
+        authenticated_sender_user_id: "@alex:matrix.example".to_string(),
+        authenticated_appservice_id: None,
+        inviter_user_id: Some("@admin:matrix.example".to_string()),
+        origin_server_ts: 119,
+        transport_authenticated: true,
+        previous_sync_cursor: "s0".to_string(),
+        sync_cursor: "s1".to_string(),
+    };
+    let error = resolver
+        .authenticate_matrix_source(&provenance)
+        .await
+        .expect_err("forged sender");
+    assert_eq!(
+        error,
+        MatrixGatewayError::Denied(MatrixGatewayDenialReason::TransportIdentityMismatch)
     );
 }

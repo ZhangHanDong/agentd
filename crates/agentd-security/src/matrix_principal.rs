@@ -2,7 +2,10 @@
 
 use std::sync::Arc;
 
-use agentd_core::ports::{Clock, EnterprisePrincipalPort, SecurityError};
+use agentd_core::ports::{
+    Clock, EnterprisePrincipalPort, MatrixGatewayDenialReason, MatrixGatewayError,
+    MatrixGatewayIdentityPort, MatrixTransportProvenance, SecurityError,
+};
 use agentd_core::types::{
     EnterpriseAuthentication, EnterpriseRequestIdentity, MatrixPrincipalResolveRequest,
     MatrixTrustPolicy, SecurityDenialReason,
@@ -11,6 +14,45 @@ use agentd_core::types::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatrixPrincipalResolverConfig {
     pub trust_policy: MatrixTrustPolicy,
+}
+
+#[async_trait::async_trait]
+impl<R, C> MatrixGatewayIdentityPort for MatrixPrincipalResolver<R, C>
+where
+    R: EnterprisePrincipalPort,
+    C: Clock,
+{
+    async fn authenticate_matrix_source(
+        &self,
+        provenance: &MatrixTransportProvenance,
+    ) -> Result<EnterpriseRequestIdentity, MatrixGatewayError> {
+        if !provenance.transport_authenticated {
+            return Err(MatrixGatewayError::Denied(
+                MatrixGatewayDenialReason::TransportUnauthenticated,
+            ));
+        }
+        if provenance.sender_user_id != provenance.authenticated_sender_user_id
+            || provenance.appservice_id != provenance.authenticated_appservice_id
+        {
+            return Err(MatrixGatewayError::Denied(
+                MatrixGatewayDenialReason::TransportIdentityMismatch,
+            ));
+        }
+        self.resolve(&MatrixPrincipalResolveRequest {
+            user_id: provenance.authenticated_sender_user_id.clone(),
+            homeserver: provenance.homeserver.clone(),
+            device_id: provenance.device_id.clone(),
+            appservice_id: provenance.authenticated_appservice_id.clone(),
+            observed_at: 0,
+        })
+        .await
+        .map_err(|error| match error {
+            SecurityError::Denied(_) | SecurityError::Invalid(_) => {
+                MatrixGatewayError::Denied(MatrixGatewayDenialReason::PrincipalUnauthorized)
+            }
+            SecurityError::Unavailable(message) => MatrixGatewayError::Unavailable(message),
+        })
+    }
 }
 
 #[derive(Debug)]

@@ -56,6 +56,8 @@ id_newtype!(AuditEventId, "ae");
 id_newtype!(LeaseId, "ls");
 id_newtype!(FleetOutboxId, "fo");
 id_newtype!(ArtifactUploadId, "au");
+id_newtype!(MatrixCommandId, "mc");
+id_newtype!(MatrixGatewayOutboxId, "mo");
 
 impl NodeId {
     /// `NodeId`s in DOT files are operator-authored; preserve as-is.

@@ -12,6 +12,7 @@ pub mod daemon;
 pub mod fleet;
 pub mod host;
 pub mod matrix_bridge;
+pub mod matrix_gateway;
 pub mod mempal;
 pub mod security;
 pub mod stdio_mcp;

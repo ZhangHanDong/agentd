@@ -26,6 +26,7 @@ pub mod execution_evidence_control_plane;
 pub mod fleet_scheduler;
 pub mod human_wait_repo;
 pub mod matrix_bridge_repo;
+pub mod matrix_gateway;
 pub mod message_repo;
 pub mod outbox_repo;
 pub mod outcome_repo;

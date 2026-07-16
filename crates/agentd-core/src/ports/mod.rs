@@ -9,6 +9,7 @@ pub mod clock;
 pub mod command_runner;
 pub mod execution_evidence;
 pub mod fleet_scheduler;
+pub mod matrix_gateway;
 pub mod mempal;
 pub mod principal;
 pub mod project_authority;
@@ -42,6 +43,17 @@ pub use fleet_scheduler::{
     FleetReapSummary, FleetRenewRequest, FleetSchedulerError, FleetSchedulerPort,
     FleetSideEffectAdmission, FleetSideEffectRequest, FleetSubmitRequest, FleetTaskRecord,
     FleetTaskRequirements, WorkerAvailability,
+};
+pub use matrix_gateway::{
+    MatrixAttachmentRef, MatrixCommandClass, MatrixCommandDisposition, MatrixCommandReceipt,
+    MatrixExecutionSummaryStatus, MatrixGatewayCommandRequest, MatrixGatewayCutoverRequest,
+    MatrixGatewayDeliveryPort, MatrixGatewayDenialReason, MatrixGatewayError,
+    MatrixGatewayIdentityPort, MatrixGatewayMappingKind, MatrixGatewayMode,
+    MatrixGatewayOutboxRecord, MatrixGatewayPort, MatrixGatewayProjectConfig,
+    MatrixGatewayRollbackManifest, MatrixGatewayStateMapping, MatrixGatewayStateMappingRequest,
+    MatrixGatewaySummaryPublish, MatrixTransportProvenance, NormalizedMatrixCommand,
+    RobrixApprovalView, RobrixArtifactView, RobrixCommandView, RobrixEvidenceView,
+    RobrixProjectView, RobrixRunView, RobrixTaskView,
 };
 pub use mempal::{DrawerHit, MempalClient};
 pub use principal::EnterprisePrincipalPort;
