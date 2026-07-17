@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "runtimeAuthority": "agentd-native",
+  "dispatchMode": "pull",
+  "workerInboundRequired": false,
+  "imageReferencePolicy": "digest-only",
+  "workloadIdentity": "mtls-or-equivalent",
+  "secretsSource": "agentd-secret-broker",
+  "requiredDimensions": [
+    "tenant",
+    "project",
+    "trustDomain",
+    "region",
+    "zone",
+    "workerPool",
+    "capacityClass"
+  ],
+  "legacyRuntimeAccepted": false,
+  "offlineImportOnly": true
+}

@@ -1,0 +1,48 @@
+services:
+  agentd:
+    image: "${AGENTD_IMAGE:?set AGENTD_IMAGE to an immutable digest, for example registry/agentd@sha256:...}"
+    command:
+      - agentd
+      - --security-mode
+      - enterprise
+      - --db-path
+      - /var/lib/agentd/agentd.db
+      - --repo-dir
+      - /var/lib/agentd/repository
+      - --worktree-base
+      - /var/lib/agentd/worktrees
+      - --workflows-dir
+      - /etc/agentd/workflows
+      - --port
+      - "8787"
+    environment:
+      AGENTD_NATIVE_RUNTIME: "1"
+      RUST_LOG: "${RUST_LOG:-agentd=info}"
+    env_file:
+      - path: ./agentd.env
+        required: false
+    ports:
+      - "127.0.0.1:${AGENTD_PORT:-8787}:8787"
+    volumes:
+      - agentd-state:/var/lib/agentd
+      - ../../workflows:/etc/agentd/workflows:ro
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+      - /run/agentd:mode=0700
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 45s
+    healthcheck:
+      test: ["CMD", "agentctl", "health", "--daemon-url", "http://127.0.0.1:8787"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 20s
+
+volumes:
+  agentd-state:

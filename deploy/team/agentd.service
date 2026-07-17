@@ -1,0 +1,32 @@
+[Unit]
+Description=agentd native execution control plane
+Documentation=https://127.0.0.1:8787/healthz
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=agentd
+Group=agentd
+Environment=AGENTD_NATIVE_RUNTIME=1
+EnvironmentFile=-/etc/agentd/agentd.env
+ExecStart=/usr/local/bin/agentd --security-mode enterprise --db-path /var/lib/agentd/agentd.db --repo-dir /var/lib/agentd/repository --worktree-base /var/lib/agentd/worktrees --workflows-dir /etc/agentd/workflows --port 8787
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=45s
+KillSignal=SIGTERM
+StateDirectory=agentd
+RuntimeDirectory=agentd
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/agentd /run/agentd
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

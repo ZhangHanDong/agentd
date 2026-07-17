@@ -1,4 +1,4 @@
-//! Native interactive runtime contracts, independent of legacy spawn/tmux backends.
+//! Native interactive process, session, and attempt contracts.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

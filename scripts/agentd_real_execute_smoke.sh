@@ -11,8 +11,8 @@ PORT="18789"
 WAIT_SECONDS="600"
 STATE_DIR=""
 SPEC_FILE="$ROOT/.agentd/run/frozen.spec.md"
-IMPLEMENTER_ROLE="implementer"
-REVIEWERS="claude-sec,codex-perf,gemini-readability"
+IMPLEMENTER_ROLE="codex-impl"
+REVIEWERS="codex-sec,codex-perf,codex-readability"
 RUNTIME_MATRIX="${AGENTD_REAL_EXECUTE_RUNTIMES:-}"
 IMPLEMENTER_ROLE_EXPLICIT="0"
 REVIEWERS_EXPLICIT="0"
@@ -28,9 +28,9 @@ Options:
   --spec-file FILE     Frozen spec to copy into .agentd/run/frozen.spec.md
   --implementer-role ROLE
                        Role name for the execute.dot implement node
-                       (default: implementer)
+                       (default: codex-impl)
   --reviewers CSV      Comma-separated reviewer roles
-                       (default: claude-sec,codex-perf,gemini-readability)
+                       (default: codex-sec,codex-perf,codex-readability)
   --wait-seconds N     Execute-mode wait for terminal run state (default: 600)
   -h, --help           Show this help
 
@@ -38,13 +38,13 @@ Environment:
   AGENTD_REAL_EXECUTE_RUNTIMES
                        Optional comma-separated runtime matrix with exactly four
                        entries: implementer, security reviewer, performance
-                       reviewer, readability reviewer. Supported values:
-                       codex, claude. Example:
+                       reviewer, readability reviewer. Every entry must be
+                       codex. Example:
                        codex,codex,codex,codex
 
-Real execution requires AGENTD_REAL_EXECUTE_SMOKE=1 and may use paid/authenticated
-Claude Code or Codex plus GitHub PR creation. Dry-run and preflight-only never
-start the daemon, tmux, Claude, Codex, or gh.
+Real execution requires AGENTD_REAL_EXECUTE_SMOKE=1 and uses authenticated Codex
+plus GitHub PR creation. Non-Codex runtimes are rejected. Dry-run and preflight-only
+never start the daemon, Codex, or gh.
 EOF
 }
 
@@ -176,10 +176,6 @@ runtime_role_for_slot() {
         codex:security) printf 'codex-sec\n' ;;
         codex:performance) printf 'codex-perf\n' ;;
         codex:readability) printf 'codex-readability\n' ;;
-        claude:implementer) printf 'claude-impl\n' ;;
-        claude:security) printf 'claude-sec\n' ;;
-        claude:performance) printf 'claude-perf\n' ;;
-        claude:readability) printf 'claude-readability\n' ;;
         *)
             echo "internal error: unsupported runtime matrix slot $runtime:$slot" >&2
             return 2
@@ -211,11 +207,11 @@ apply_runtime_matrix() {
         local runtime
         runtime="$(trim_space "${runtimes[$i]}")"
         case "$runtime" in
-            codex|claude)
+            codex)
                 roles[$i]="$(runtime_role_for_slot "$runtime" "${slots[$i]}")"
                 ;;
             *)
-                echo "invalid AGENTD_REAL_EXECUTE_RUNTIMES entry '$runtime': supported values are codex,claude" >&2
+                echo "invalid AGENTD_REAL_EXECUTE_RUNTIMES entry '$runtime': only codex is allowed" >&2
                 return 2
                 ;;
         esac
@@ -241,34 +237,11 @@ validate_runtime_roles() {
     fi
 }
 
-role_cli_kind() {
-    case "$1" in
-        codex-*) printf 'codex\n' ;;
-        *) printf 'claude\n' ;;
-    esac
-}
-
-selected_roles_require_cli() {
-    local cli="$1"
-    if [[ "$(role_cli_kind "$IMPLEMENTER_ROLE")" == "$cli" ]]; then
-        return 0
-    fi
-
-    local reviewer
-    while IFS= read -r reviewer; do
-        if [[ "$(role_cli_kind "$reviewer")" == "$cli" ]]; then
-            return 0
-        fi
-    done < <(reviewer_roles)
-
-    return 1
-}
-
 prepare_smoke_workflow() {
     mkdir -p "$SMOKE_WORKFLOWS_DIR"
     sed \
         -e "s|role=\"implementer\"|role=\"$IMPLEMENTER_ROLE\"|" \
-        -e "s|reviewers=\"claude-sec,codex-perf,gemini-readability\"|reviewers=\"$REVIEWERS\"|" \
+        -E -e "s|reviewers=\"[^\"]*\"|reviewers=\"$REVIEWERS\"|" \
         "$SHIPPED_WORKFLOWS_DIR/execute.dot" >"$SMOKE_EXECUTE_WORKFLOW"
 }
 
@@ -288,7 +261,7 @@ workflow_template: $SMOKE_EXECUTE_WORKFLOW_LABEL
 health: $HEALTH_URL
 
 preflight:
-  verify local tools, selected agent runtimes, gh auth, and git history readiness
+  verify local tools, Codex auth, gh auth, and git history readiness
   compare HEAD with origin/main before starting daemon or agents
   bash scripts/agentd_pr_history_status.sh HEAD main
 
@@ -336,22 +309,12 @@ preflight_base_history() {
 
 preflight() {
     need_tool cargo
-    need_tool tmux
     need_tool agent-spec
     need_tool curl
     need_tool git
     need_tool gh
 
-    if selected_roles_require_cli codex; then
-        need_tool codex
-    fi
-    if selected_roles_require_cli claude; then
-        need_tool claude
-        if ! claude --help 2>&1 | grep -q -- "--mcp-config"; then
-            echo "claude prerequisite failed: --mcp-config not present in claude --help" >&2
-            return 1
-        fi
-    fi
+    need_tool codex
     if ! gh auth status >/dev/null 2>&1; then
         echo "gh prerequisite failed: gh auth status did not succeed" >&2
         return 1
@@ -434,7 +397,7 @@ run_execute() {
 
     cargo build -p agentd-bin -p agentctl
 
-    AGENTD_CLAUDE_AUTO_TRUST_WORKSPACE=1 "$AGENTD_BIN" \
+    "$AGENTD_BIN" \
         --db-path "$DB_PATH" \
         --port "$PORT" \
         --workflows-dir "$WORKFLOWS_DIR" \

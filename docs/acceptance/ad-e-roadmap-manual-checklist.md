@@ -72,8 +72,12 @@
 
 ## AD-E6
 
+- Candidate inventory: migrations `0022`/`0023`, `CutoverService`,
+  `agentctl cutover`, native daemon composition, `agentd-worktree`, checked-in
+  local/team/fleet assets, and `docs/operations/final-cutover-runbook.md`.
 - [ ] Complete shadow decision comparison and supported-state import with stable id mappings.
 - [ ] Drain in-flight runs, hand off cursors, install local/team/fleet services, and execute doctor/backup/restore/rollback.
+- [ ] Confirm the real execute and native runtime smokes invoke Codex only, with Claude credentials unset and no tmux dependency.
 - [ ] Confirm parity audit has no required missing/partial row except an explicit approved product-scope decision.
 - [ ] Remove agent-chat/tmux production config, startup entrypoints, runtime dependencies, docs, and operator procedures; retain only approved offline import compatibility.
 - [ ] Human legacy-removal authorization and FSF-6 final-cutover sign-off recorded.

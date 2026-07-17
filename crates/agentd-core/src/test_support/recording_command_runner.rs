@@ -1,5 +1,4 @@
-//! A [`CommandRunner`] that records argv and replays scripted outputs. P0.3's
-//! real tmux backend is tested against this exact shape.
+//! A [`CommandRunner`] that records argv and replays scripted outputs.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;

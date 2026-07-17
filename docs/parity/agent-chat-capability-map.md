@@ -3,9 +3,27 @@
 Status: P263 reconciled baseline. This is the authoritative local map for replacing
 `/Users/zhangalex/Work/Projects/consult/agent-chat` with agentd.
 
-Current conclusion: agentd cannot fully replace agent-chat yet. The required
-replacement rows below have no `unknown` status, but many are still `partial`
-or `missing`; those rows are the work queue for future specs.
+Current conclusion: the AD-E6 code candidate implements the production cutover
+and removes legacy runtime authority, but agentd cannot be declared a complete
+replacement until the deferred acceptance pass and human retirement sign-off.
+The row statuses below describe accepted evidence, so they intentionally remain
+`partial` until that pass rather than treating unexecuted code as acceptance.
+
+AD-E6 candidate disposition (2026-07-17):
+
+- native runtime, registry lifecycle, scheduler dispatch, migration, service
+  packaging, doctor, backup/restore, rollback, and cursor handoff are implemented
+  candidates awaiting the final manual evidence run;
+- production startup and operator paths retain no agent-chat/tmux authority;
+  legacy names and pane fields below are historical evidence, while the only
+  executable compatibility boundary is the read-only offline importer;
+- real homeserver, OpenFab, OCI, identity, secret, outage, and recovery rows are
+  acceptance dependencies, not hidden compatibility fallbacks;
+- multi-region scale, Kubernetes rollout, autoscaling, retention/legal hold,
+  disaster recovery, and enterprise load profiles are explicit AD-E7 product
+  scope and do not block AD-E6 code completion;
+- no remaining `partial` or `missing` row is implicitly waived. A product owner
+  must approve its disposition during final sign-off before legacy retirement.
 
 P263 freezes P200-P262 in this worktree as the only authoritative implemented
 range. Conflicting sibling-worktree P202-P228 artifacts count only through the
@@ -54,4 +72,4 @@ sequence.
 | artifact_audit_provenance | enterprise_audit | required | /Users/zhangalex/Work/Projects/consult/agent-chat/lib/mcp-server-core.js | partial | P268/P271 add immutable artifact/audit/usage contracts and fenced rejection audit. AD-E2 adds fenced upload acknowledgements. The AD-E4 candidate adds canonical signed Builder/Worker evidence, immutable request/result event ledgers, OpenFab Ed25519 verification, current-policy/exact-subject Forge admission, certification state history, and authenticated bounded HTTPS transport while preserving `OpenFabCertificationAuthority` ownership of verdicts and signatures. Deployed OpenFab interoperability, object storage, outage/replay drills, cutover, and operator acceptance remain pending. | AD-E2/AD-E4 |
 | openfab_certification_protocol | enterprise_certification | required | no agent-chat equivalent | partial | The AD-E4 candidate binds immutable snapshot/source/spec/evidence/policy/skill digests, stores request and externally signed result as separate exact-idempotent events, verifies registered OpenFab `did:key` signatures, enforces gate=none/machine/human N-of-M Forge semantics, and fails startup closed without signer/verifier/store/state/transport/revocation/clock providers. Real OpenFab service deployment, independent verification, failure injection, and FSF-5 sign-off remain pending. | AD-E4 |
 | skill_hub_package_trust | enterprise_supply_chain | required | no agent-chat equivalent | partial | The AD-E4 candidate pins exact package/version/archive/manifest/dependency-lock/permissions hashes in Specify snapshots and evidence, resolves signed time-bounded OpenFab trust over HTTPS, admits only approved/signed package versions, and preserves immutable trust-at-install history after yank/revoke. Real Skill Hub publication, package installation, status transition drills, and operator acceptance remain pending. | AD-E4 |
-| operational_doctor_health | enterprise_operations | required | /Users/zhangalex/Work/Projects/consult/agent-chat/server.js | missing | `AgentdControlPlane` must expose project-authority, worker, lease, queue, runtime, artifact, Matrix, and recovery diagnostics without requiring raw-log inspection. Planned P279. | AD-E2/AD-E7 |
+| operational_doctor_health | enterprise_operations | required | /Users/zhangalex/Work/Projects/consult/agent-chat/server.js | partial | The AD-E6 code candidate adds bounded structured doctor output over schema, cutover, worker, lease, queue, native runtime, artifact, Matrix, and recovery state without raw-log inspection. AD-E7 adds fleet-scale capacity/SLO projections. Production outage drills, dashboard comparison, and operator acceptance remain pending. | AD-E6/AD-E7 |

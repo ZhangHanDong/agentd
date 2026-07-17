@@ -53,7 +53,7 @@ pub struct NativeRuntimeCompositionConfig {
     pub max_transcript_object_bytes: u64,
 }
 
-/// Compose the production native runtime without any tmux dependency.
+/// Compose the production native runtime from durable and injected providers.
 pub fn compose_native_runtime(
     store: &SqliteStore,
     sandbox: Arc<dyn InteractiveSandboxPort>,

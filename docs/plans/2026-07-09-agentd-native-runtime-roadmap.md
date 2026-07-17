@@ -2,7 +2,7 @@
 
 - Status: canonical single active roadmap; feature-branch candidate baseline
   committed; FSF-0 acceptance and PRD/ADR ratification still gate integration
-- Revised: 2026-07-12
+- Revised: 2026-07-17
 - Scope: agentd execution control plane, workers, runtime, Matrix gateway, and
   agent-chat replacement boundaries
 
@@ -332,11 +332,10 @@ strict Clippy, diff/secret inspection, and the `--ai-mode off` agent-spec
 lifecycle have passed. The lifecycle recorded 13 business scenarios plus the
 worktree boundary guard (`14/14`) at quality score `1.0`. The OCI selector used
 its guarded no-container default; real-container evidence is still pending.
-This prose is candidate evidence, not an acceptance record. AD-E0, AD-E1,
-FSF-0, and FSF-2 remain incomplete. AD-E2 worker fleet remains incomplete;
-AD-E3 Matrix cutover remains incomplete; AD-E4 OpenFab transport remains
-incomplete; AD-E5 native runtime remains incomplete; and AD-E7 scale remains
-incomplete.
+This prose is candidate evidence, not an acceptance record. AD-E0 through AD-E6
+now have isolated code candidates, but their FSF gates remain open pending the
+single deferred verification and operator-sign-off pass. AD-E7 scale remains
+the active implementation phase.
 
 | Older replacement-worktree candidate | Newer agentd-worktree candidate | AD-E0 disposition |
 | --- | --- | --- |
@@ -676,6 +675,22 @@ Exit gate:
 ### AD-E6: Final agent-chat Cutover and Removal
 
 Depends on: AD-E3, AD-E4, and AD-E5.
+
+Implementation status (2026-07-17): AD-E6 code-complete candidate. Migrations
+`0022` and `0023` add a durable cutover ledger, stable legacy-ID mappings,
+shadow receipts, cursor handoff, service-installation evidence, and native agent
+runtime authority. `CutoverService` and `agentctl cutover` cover canonical
+plan/import/shadow/drain/handoff/activate/retire/rollback, structured doctor,
+digest-manifested backup, offline verified restore, and local/team/fleet service
+installation. Production workflow dispatch now owns native logical sessions and
+attempts; git worktrees are independent of process hosting; checked-in service
+assets start only agentd; and agent-chat compatibility is constrained to the
+offline importer. The old tmux crate and real Claude/tmux smoke are removed, and
+real acceptance scripts permit Codex only.
+
+This is not an AD-E6 or FSF-6 exit. No cutover command, failure drill, real
+runtime smoke, service installation, restoration, or human retirement approval
+has been accepted yet. All execution is deferred to the final manual checklist.
 
 Purpose: finish replacement only after control-plane and runtime cutovers both
 pass.
