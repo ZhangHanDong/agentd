@@ -624,11 +624,25 @@ fn real_execute_smoke_script_declares_evidence_artifacts() {
         "daemon.log",
         "agentctl.out",
         "run_snapshot.json",
+        "runtime_snapshot.txt",
         "events.snapshot",
         "summary.txt",
     ] {
         assert!(body.contains(artifact), "script should name {artifact}");
     }
+}
+
+#[test]
+fn real_execute_smoke_waits_for_native_runtime_shutdown_before_success() {
+    let body = fs::read_to_string(script_path()).expect("read execute smoke script");
+    assert!(
+        body.contains("wait_for_native_runtime_shutdown")
+            && body.contains("runtime_sessions")
+            && body.contains("runtime_attempts")
+            && body.contains("native_agent_runtime_bindings")
+            && body.contains("timeout_waiting_for_native_runtime_shutdown"),
+        "real execute smoke should gate success on durable native runtime shutdown"
+    );
 }
 
 fn write_fake_tool(dir: &Path, name: &str, body: &str) {

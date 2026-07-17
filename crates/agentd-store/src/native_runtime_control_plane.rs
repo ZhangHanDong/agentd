@@ -623,17 +623,40 @@ impl RuntimeLedgerPort for SqliteNativeRuntimeControlPlane {
                 ));
             }
             if binding.get::<bool, _>("synthetic_task") {
+                let execution_task_id = binding.get::<String, _>("execution_task_id");
+                let synthetic_run_id: String =
+                    sqlx::query_scalar("SELECT run_id FROM task_runs WHERE id = ?")
+                        .bind(&execution_task_id)
+                        .fetch_one(&mut *transaction)
+                        .await
+                        .map_err(storage_error)?;
                 let task_update = sqlx::query(
                     "UPDATE task_runs SET finished_at = ?, status = 'finished' WHERE id = ?",
                 )
                 .bind(report.finished_at)
-                .bind(binding.get::<String, _>("execution_task_id"))
+                .bind(execution_task_id)
                 .execute(&mut *transaction)
                 .await
                 .map_err(storage_error)?;
                 if task_update.rows_affected() != 1 {
                     return Err(NativeRuntimeError::Unavailable(
                         "synthetic native agent task disappeared while finishing runtime"
+                            .to_string(),
+                    ));
+                }
+                let run_update = sqlx::query(
+                    "UPDATE runs SET status = 'finished', finished_at = ?, last_heartbeat = ? \
+                     WHERE id = ? AND status = 'running'",
+                )
+                .bind(report.finished_at)
+                .bind(report.finished_at)
+                .bind(synthetic_run_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(storage_error)?;
+                if run_update.rows_affected() != 1 {
+                    return Err(NativeRuntimeError::Unavailable(
+                        "synthetic native agent run disappeared while finishing runtime"
                             .to_string(),
                     ));
                 }

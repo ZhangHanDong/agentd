@@ -1,5 +1,6 @@
 //! Durable local authority and process bindings for the native agent backend.
 
+use agentd_core::ports::RunStatus;
 use agentd_core::types::{
     AgentProfileId, CapabilityAdmission, RunId, RuntimeAttemptId, RuntimeSessionId, TaskRunId,
     WorkerId, WorkerIncarnationId,
@@ -254,6 +255,15 @@ pub async fn finish_native_agent_binding(
         .await?
         .ok_or(StoreError::NotFound)?;
     if binding.status == "active" {
+        let synthetic_run_id = if binding.synthetic_task {
+            sqlx::query_scalar::<_, String>("SELECT run_id FROM task_runs WHERE id = ?")
+                .bind(binding.execution_task_id.as_str())
+                .fetch_optional(pool)
+                .await?
+                .map(RunId::from_string)
+        } else {
+            None
+        };
         sqlx::query(
             "UPDATE native_agent_runtime_bindings SET status = 'finished', finished_at = ? \
              WHERE runtime_session_id = ? AND status = 'active'",
@@ -264,6 +274,12 @@ pub async fn finish_native_agent_binding(
         .await?;
         if binding.synthetic_task {
             task_repo::complete_task_run(pool, &binding.execution_task_id).await?;
+            run_repo::update_run_status(
+                pool,
+                &synthetic_run_id.ok_or(StoreError::NotFound)?,
+                RunStatus::Finished,
+            )
+            .await?;
         }
     }
     native_agent_binding(pool, session_id)

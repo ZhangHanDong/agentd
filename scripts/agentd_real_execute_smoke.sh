@@ -9,6 +9,7 @@ MODE="dry-run"
 RUN_ID="real-execute-smoke-$(date +%Y%m%d%H%M%S)"
 PORT="18789"
 WAIT_SECONDS="600"
+RUNTIME_DRAIN_SECONDS="60"
 STATE_DIR=""
 SPEC_FILE="$ROOT/.agentd/run/frozen.spec.md"
 IMPLEMENTER_ROLE="codex-impl"
@@ -143,6 +144,7 @@ PREFLIGHT_LOG="$STATE_DIR/preflight.log"
 DAEMON_LOG="$STATE_DIR/daemon.log"
 AGENTCTL_OUT="$STATE_DIR/agentctl.out"
 RUN_SNAPSHOT="$STATE_DIR/run_snapshot.json"
+RUNTIME_SNAPSHOT="$STATE_DIR/runtime_snapshot.txt"
 EVENTS_SNAPSHOT="$STATE_DIR/events.snapshot"
 SUMMARY="$STATE_DIR/summary.txt"
 DAEMON_PID=""
@@ -294,11 +296,13 @@ evidence:
   daemon.log
   agentctl.out
   run_snapshot.json
+  runtime_snapshot.txt
   events.snapshot
   summary.txt
 
 success criterion:
   execute.dot reaches a terminal run state after real agents implement/review,
+  all native runtime sessions, attempts, and agent bindings reach terminal state,
   publish_branch pushes agentd/<task_run_id>, and open_pr either opens a PR or
   fails with a captured preflight error from scripts/agentd_open_pr.sh.
 EOF
@@ -322,6 +326,7 @@ preflight() {
     need_tool curl
     need_tool git
     need_tool gh
+    need_tool sqlite3
 
     need_tool codex
     if ! gh auth status >/dev/null 2>&1; then
@@ -355,6 +360,42 @@ capture_events() {
     curl -fsS --max-time 2 "$DAEMON_URL/runs/$RUN_ID/events?from_seq=0" >"$EVENTS_SNAPSHOT" 2>/dev/null || true
 }
 
+capture_runtime_state() {
+    sqlite3 -header -column "$DB_PATH" >"$RUNTIME_SNAPSHOT" <<'SQL'
+SELECT id, status, terminal_reason, current_attempt_id, updated_at
+FROM runtime_sessions ORDER BY created_at, id;
+SELECT id, status, pid, exit_code, finished_at
+FROM runtime_attempts ORDER BY started_at, id;
+SELECT agent_id, status, finished_at
+FROM native_agent_runtime_bindings ORDER BY created_at, runtime_session_id;
+SQL
+}
+
+wait_for_native_runtime_shutdown() {
+    local deadline=$((SECONDS + RUNTIME_DRAIN_SECONDS))
+    while (( SECONDS < deadline )); do
+        local live_sessions live_attempts live_bindings
+        read -r live_sessions live_attempts live_bindings < <(
+            sqlite3 -separator ' ' "$DB_PATH" \
+                "SELECT \
+                    (SELECT COUNT(*) FROM runtime_sessions \
+                     WHERE status IN ('starting', 'running', 'resume_pending')), \
+                    (SELECT COUNT(*) FROM runtime_attempts \
+                     WHERE status IN ('starting', 'running')), \
+                    (SELECT COUNT(*) FROM native_agent_runtime_bindings \
+                     WHERE status = 'active');"
+        )
+        if [[ "$live_sessions" == "0" && "$live_attempts" == "0" && "$live_bindings" == "0" ]]; then
+            capture_runtime_state
+            return 0
+        fi
+        sleep 1
+    done
+    capture_runtime_state
+    echo "timed out waiting for native runtimes to reach terminal state" >&2
+    return 1
+}
+
 canonical_file_path() {
     local path="$1"
     local dir
@@ -373,6 +414,7 @@ write_summary() {
         echo "frozen_spec: $FROZEN_SPEC_COPY"
         echo "plan: $PLAN_COPY"
         echo "run_snapshot: $RUN_SNAPSHOT"
+        echo "runtime_snapshot: $RUNTIME_SNAPSHOT"
         echo "events_snapshot: $EVENTS_SNAPSHOT"
         echo "daemon_log: $DAEMON_LOG"
         echo "agentctl_out: $AGENTCTL_OUT"
@@ -449,6 +491,11 @@ run_execute() {
     fi
 
     if grep -q '"status":"finished"' "$RUN_SNAPSHOT"; then
+        if ! wait_for_native_runtime_shutdown; then
+            write_summary "timeout_waiting_for_native_runtime_shutdown"
+            return 1
+        fi
+        capture_events
         write_summary "finished"
         echo "real execute smoke finished; evidence: $STATE_DIR"
         return 0

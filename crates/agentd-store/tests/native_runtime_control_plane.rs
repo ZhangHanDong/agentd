@@ -19,6 +19,7 @@ struct Fixture {
     _directory: tempfile::TempDir,
     pool: SqlitePool,
     control_plane: SqliteNativeRuntimeControlPlane,
+    run_id: RunId,
     task_id: TaskRunId,
     profile_id: AgentProfileId,
     incarnation_id: WorkerIncarnationId,
@@ -79,6 +80,7 @@ async fn fixture() -> Fixture {
         _directory: directory,
         pool: store.pool().clone(),
         control_plane: SqliteNativeRuntimeControlPlane::new(store.pool().clone()),
+        run_id,
         task_id,
         profile_id,
         incarnation_id,
@@ -150,7 +152,7 @@ async fn native_runtime_ledger_keeps_session_identity_global_events_and_transcri
         "INSERT INTO native_agent_runtime_bindings \
          (runtime_session_id, runtime_attempt_id, agent_id, execution_task_id, synthetic_task, \
           capability_json, worktree, status, created_at, finished_at) \
-         VALUES (?, ?, 'codex-worker', ?, 0, '{}', '/workspace', 'active', 11, NULL)",
+         VALUES (?, ?, 'codex-worker', ?, 1, '{}', '/workspace', 'active', 11, NULL)",
     )
     .bind(session_id.as_str())
     .bind(attempt_id.as_str())
@@ -242,6 +244,20 @@ async fn native_runtime_ledger_keeps_session_identity_global_events_and_transcri
     .await
     .expect("finished native binding");
     assert_eq!(binding, ("finished".to_string(), Some(14)));
+    let synthetic_task: (String, Option<i64>) =
+        sqlx::query_as("SELECT status, finished_at FROM task_runs WHERE id = ?")
+            .bind(fixture.task_id.as_str())
+            .fetch_one(&fixture.pool)
+            .await
+            .expect("finished synthetic task");
+    assert_eq!(synthetic_task, ("finished".to_string(), Some(14)));
+    let synthetic_run: (String, Option<i64>) =
+        sqlx::query_as("SELECT status, finished_at FROM runs WHERE id = ?")
+            .bind(fixture.run_id.as_str())
+            .fetch_one(&fixture.pool)
+            .await
+            .expect("finished synthetic run");
+    assert_eq!(synthetic_run, ("finished".to_string(), Some(14)));
     assert_eq!(
         fixture
             .control_plane
