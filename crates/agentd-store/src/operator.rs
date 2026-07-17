@@ -225,6 +225,137 @@ pub async fn run_doctor(
         "backup_manifest_absent",
         DoctorStatus::Warn,
     ));
+    let enterprise_members = count(pool, "SELECT COUNT(*) FROM enterprise_control_plane_members").await?;
+    let ready_control_plane = count_with_i64(
+        pool,
+        "SELECT COUNT(*) FROM enterprise_control_plane_members \
+         WHERE status = 'ready' AND observed_at >= ?",
+        observed_at.saturating_sub(60),
+    )
+    .await?;
+    checks.push(DoctorCheck {
+        name: "enterprise_control_plane".to_string(),
+        status: if ready_control_plane >= 2 {
+            DoctorStatus::Pass
+        } else if enterprise_members == 0 {
+            DoctorStatus::Warn
+        } else {
+            DoctorStatus::Fail
+        },
+        code: if ready_control_plane >= 2 {
+            "control_plane_quorum_ready".to_string()
+        } else if enterprise_members == 0 {
+            "enterprise_not_configured".to_string()
+        } else {
+            "control_plane_quorum_unavailable".to_string()
+        },
+        count: Some(ready_control_plane),
+    });
+    let live_leader = count_with_i64(
+        pool,
+        "SELECT COUNT(*) FROM enterprise_control_plane_leadership WHERE expires_at > ?",
+        observed_at,
+    )
+    .await?;
+    checks.push(DoctorCheck {
+        name: "enterprise_leadership".to_string(),
+        status: if live_leader == 1 {
+            DoctorStatus::Pass
+        } else if enterprise_members == 0 {
+            DoctorStatus::Warn
+        } else {
+            DoctorStatus::Fail
+        },
+        code: if live_leader == 1 {
+            "leadership_live".to_string()
+        } else if enterprise_members == 0 {
+            "enterprise_not_configured".to_string()
+        } else {
+            "leadership_unavailable".to_string()
+        },
+        count: Some(live_leader),
+    });
+    let degraded_rollouts = count(
+        pool,
+        "SELECT COUNT(*) FROM enterprise_worker_image_rollouts WHERE status = 'degraded'",
+    )
+    .await?;
+    checks.push(DoctorCheck {
+        name: "enterprise_rollout".to_string(),
+        status: if degraded_rollouts == 0 {
+            DoctorStatus::Pass
+        } else {
+            DoctorStatus::Warn
+        },
+        code: if degraded_rollouts == 0 {
+            "rollouts_healthy".to_string()
+        } else {
+            "rollouts_degraded".to_string()
+        },
+        count: Some(degraded_rollouts),
+    });
+    let missing_replica_regions = count(
+        pool,
+        "SELECT COUNT(*) FROM enterprise_artifact_replication_plans AS plan, \
+         json_each(plan.required_regions_json) AS required \
+         WHERE NOT EXISTS (SELECT 1 FROM enterprise_artifact_replica_acknowledgements AS ack \
+           WHERE ack.replication_id = plan.replication_id AND ack.region = required.value \
+             AND ack.status = 'available')",
+    )
+    .await?;
+    checks.push(DoctorCheck {
+        name: "enterprise_replication".to_string(),
+        status: if missing_replica_regions == 0 {
+            DoctorStatus::Pass
+        } else {
+            DoctorStatus::Warn
+        },
+        code: if missing_replica_regions == 0 {
+            "replicas_complete".to_string()
+        } else {
+            "replicas_pending".to_string()
+        },
+        count: Some(missing_replica_regions),
+    });
+    let active_slo_breaches = count_with_i64(
+        pool,
+        "SELECT COUNT(*) FROM enterprise_service_level_measurements \
+         WHERE status = 'breached' AND window_ends_at >= ?",
+        observed_at,
+    )
+    .await?;
+    checks.push(DoctorCheck {
+        name: "enterprise_slo".to_string(),
+        status: if active_slo_breaches == 0 {
+            DoctorStatus::Pass
+        } else {
+            DoctorStatus::Fail
+        },
+        code: if active_slo_breaches == 0 {
+            "slo_within_objective".to_string()
+        } else {
+            "slo_breached".to_string()
+        },
+        count: Some(active_slo_breaches),
+    });
+    let dr_checkpoints = count(pool, "SELECT COUNT(*) FROM enterprise_dr_checkpoints").await?;
+    checks.push(count_check(
+        "enterprise_dr",
+        dr_checkpoints,
+        dr_checkpoints > 0,
+        "dr_checkpoint_available",
+        "dr_checkpoint_absent",
+        DoctorStatus::Warn,
+    ));
+    let load_models = count(pool, "SELECT COUNT(*) FROM enterprise_load_models").await?;
+    checks.push(count_check(
+        "enterprise_load_model",
+        load_models,
+        load_models > 0,
+        "load_model_pinned",
+        "load_model_absent",
+        DoctorStatus::Warn,
+    ));
     let ok = checks
         .iter()
         .all(|check| check.status != DoctorStatus::Fail);
@@ -239,6 +370,19 @@ pub async fn run_doctor(
 async fn count(pool: &SqlitePool, query: &str) -> Result<u64, StoreError> {
     let value = sqlx::query_scalar::<_, i64>(query).fetch_one(pool).await?;
     u64::try_from(value)
+        .map_err(|_| StoreError::Invariant("doctor count is negative".to_string()))
+}
+
+async fn count_with_i64(
+    pool: &SqlitePool,
+    query: &str,
+    value: i64,
+) -> Result<u64, StoreError> {
+    let count = sqlx::query_scalar::<_, i64>(query)
+        .bind(value)
+        .fetch_one(pool)
+        .await?;
+    u64::try_from(count)
         .map_err(|_| StoreError::Invariant("doctor count is negative".to_string()))
 }
 

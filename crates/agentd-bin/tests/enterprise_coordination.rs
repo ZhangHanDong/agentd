@@ -25,6 +25,8 @@ fn daemon_config(root: &std::path::Path, specify_url: String) -> DaemonConfig {
         agent_tokens: vec!["worker=worker-token".to_string()],
         agent_token_mode: "hard".to_string(),
         enterprise: EnterpriseDaemonConfig {
+            enterprise_control_plane_only: true,
+            enterprise_bind_address: None,
             control_plane_instance_id: Some(
                 "ci_01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string(),
             ),

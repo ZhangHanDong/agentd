@@ -6,11 +6,16 @@
 
 use agentd_core::CoreError;
 use agentd_core::ports::{
-    RuntimeEvent, RuntimeInputAck, RuntimeKeyInput, RuntimeResizeRequest, RuntimeShutdownReport,
+    ArtifactReplicaAcknowledgement, ArtifactReplicationPlan, CapacityObservation,
+    DisasterRecoveryCheckpoint, DisasterRecoveryDrill, EnterpriseOperationalSnapshot,
+    FleetExplain, LegalHold, LoadModelRegistration, RetentionPolicy, RuntimeEvent,
+    RuntimeInputAck, RuntimeKeyInput, RuntimeResizeRequest, RuntimeShutdownReport,
     RuntimeShutdownRequest, RuntimeSnapshot, RuntimeTextInput, RuntimeView, RuntimeWaitRequest,
+    ServiceLevelMeasurement, TenantKeyVersion, WorkerImageRollout, WorkerImageZoneObservation,
+    ZonePoolPolicy,
 };
 use agentd_core::types::{
-    CapabilityAdmission, NodeId, ReviewRunId, RunId, RuntimeSessionId, TaskRunId,
+    CapabilityAdmission, LegalHoldId, NodeId, ReviewRunId, RunId, RuntimeSessionId, TaskRunId,
 };
 use agentd_core::{EngineEvent, RunProgress};
 use serde::{Deserialize, Serialize};
@@ -898,6 +903,29 @@ fn default_clear_runtime() -> bool {
     true
 }
 
+/// One leader-authorized AD-E7 operator mutation. The surface keeps the
+/// command typed while the production host owns leadership and persistence.
+#[derive(Debug, Clone)]
+pub enum EnterpriseMutation {
+    DeclareRollout(WorkerImageRollout),
+    ObserveRollout(WorkerImageZoneObservation),
+    UpsertZonePool(ZonePoolPolicy),
+    RecommendCapacity(CapacityObservation),
+    CreateReplicationPlan(ArtifactReplicationPlan),
+    AcknowledgeReplica(ArtifactReplicaAcknowledgement),
+    RegisterTenantKey(TenantKeyVersion),
+    SetRetentionPolicy(RetentionPolicy),
+    PlaceLegalHold(LegalHold),
+    ReleaseLegalHold {
+        legal_hold_id: LegalHoldId,
+        released_at: i64,
+    },
+    RecordDrCheckpoint(DisasterRecoveryCheckpoint),
+    RecordDrDrill(DisasterRecoveryDrill),
+    RegisterLoadModel(LoadModelRegistration),
+    RecordServiceLevel(ServiceLevelMeasurement),
+}
+
 /// The seam: deliver engine events and read the bits the tools need.
 #[async_trait::async_trait]
 pub trait RunHost: Send + Sync {
@@ -966,6 +994,33 @@ pub trait RunHost: Send + Sync {
         run_id: &RunId,
         after_seq: i64,
     ) -> Result<Vec<EventRecord>, CoreError>;
+
+    /// Read the bounded, redacted AD-E7 operational snapshot.
+    async fn enterprise_status(
+        &self,
+        _observed_at: i64,
+    ) -> Result<EnterpriseOperationalSnapshot, CoreError> {
+        Err(CoreError::Backend(
+            "enterprise scale control plane is not configured".to_string(),
+        ))
+    }
+
+    /// Explain the exact durable fleet decision for one execution task.
+    async fn enterprise_explain(
+        &self,
+        _execution_task_id: &TaskRunId,
+    ) -> Result<Option<FleetExplain>, CoreError> {
+        Err(CoreError::Backend(
+            "enterprise fleet scheduler is not configured".to_string(),
+        ))
+    }
+
+    /// Apply one leader-authorized enterprise operator mutation.
+    async fn enterprise_mutate(&self, _mutation: EnterpriseMutation) -> Result<Value, CoreError> {
+        Err(CoreError::Backend(
+            "enterprise mutation authority is not configured".to_string(),
+        ))
+    }
 
     /// Register or update a local agent record.
     ///

@@ -287,6 +287,14 @@ pub struct DaemonConfig {
 
 #[derive(Debug, Clone, Args)]
 pub struct EnterpriseDaemonConfig {
+    /// Run an authenticated enterprise control plane without local execution providers.
+    #[arg(long, global = true)]
+    pub enterprise_control_plane_only: bool,
+
+    /// Enterprise listener address; must be explicit for non-loopback deployment.
+    #[arg(long, global = true)]
+    pub enterprise_bind_address: Option<String>,
+
     /// Stable enterprise control-plane instance id (`ci_<ULID>`).
     #[arg(long, global = true)]
     pub control_plane_instance_id: Option<String>,
@@ -331,6 +339,8 @@ pub struct EnterpriseDaemonConfig {
 impl Default for EnterpriseDaemonConfig {
     fn default() -> Self {
         Self {
+            enterprise_control_plane_only: false,
+            enterprise_bind_address: None,
             control_plane_instance_id: None,
             enterprise_region: None,
             enterprise_zone: None,

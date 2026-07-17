@@ -73,7 +73,11 @@ impl EnterpriseControlPlaneConfig {
             return Ok(None);
         }
         let enterprise = &config.enterprise;
-        let instance_id = required(&enterprise.control_plane_instance_id, "control-plane instance id")?;
+        let instance_id = enterprise
+            .control_plane_instance_id
+            .as_ref()
+            .map(|value| value.trim().to_string())
+            .unwrap_or_else(|| ControlPlaneInstanceId::new().to_string());
         if instance_id.len() != 29 || !instance_id.starts_with("ci_") {
             return Err(EnterpriseStartupError::Invalid(
                 "control-plane instance id must be ci_<26-character ULID>".to_string(),
@@ -117,9 +121,48 @@ impl EnterpriseControlPlaneConfig {
 }
 
 pub struct EnterpriseCoordinatorHandle {
-    leadership: Arc<RwLock<Option<ControlPlaneLeadershipLease>>>,
+    leadership_gate: EnterpriseLeadershipGate,
     shutdown_tx: watch::Sender<bool>,
     task: JoinHandle<()>,
+}
+
+#[derive(Clone)]
+pub struct EnterpriseLeadershipGate {
+    instance_id: ControlPlaneInstanceId,
+    leadership: Arc<RwLock<Option<ControlPlaneLeadershipLease>>>,
+}
+
+impl std::fmt::Debug for EnterpriseLeadershipGate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EnterpriseLeadershipGate")
+            .field("instance_id", &self.instance_id)
+            .field("leadership", &"[SHARED]")
+            .finish()
+    }
+}
+
+impl EnterpriseLeadershipGate {
+    pub async fn authorize_mutation(
+        &self,
+        observed_at: i64,
+    ) -> Result<ControlPlaneLeadershipLease, EnterpriseStartupError> {
+        let lease = self.leadership.read().await.clone().ok_or_else(|| {
+            EnterpriseStartupError::Coordination(
+                "this control-plane instance is not the current leader".to_string(),
+            )
+        })?;
+        if lease.instance_id != self.instance_id || lease.expires_at <= observed_at {
+            return Err(EnterpriseStartupError::Coordination(
+                "enterprise leadership is stale or expired".to_string(),
+            ));
+        }
+        Ok(lease)
+    }
+
+    pub async fn leadership(&self) -> Option<ControlPlaneLeadershipLease> {
+        self.leadership.read().await.clone()
+    }
 }
 
 impl std::fmt::Debug for EnterpriseCoordinatorHandle {
@@ -133,7 +176,12 @@ impl std::fmt::Debug for EnterpriseCoordinatorHandle {
 
 impl EnterpriseCoordinatorHandle {
     pub async fn leadership(&self) -> Option<ControlPlaneLeadershipLease> {
-        self.leadership.read().await.clone()
+        self.leadership_gate.leadership().await
+    }
+
+    #[must_use]
+    pub fn leadership_gate(&self) -> EnterpriseLeadershipGate {
+        self.leadership_gate.clone()
     }
 
     pub async fn shutdown(self) {
@@ -182,6 +230,10 @@ pub async fn start_enterprise_coordination(
         }
     };
     let leadership = Arc::new(RwLock::new(leadership));
+    let leadership_gate = EnterpriseLeadershipGate {
+        instance_id: config.instance_id.clone(),
+        leadership: Arc::clone(&leadership),
+    };
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let task_leadership = Arc::clone(&leadership);
     let task = tokio::spawn(async move {
@@ -229,7 +281,7 @@ pub async fn start_enterprise_coordination(
         }
     });
     Ok(Some(EnterpriseCoordinatorHandle {
-        leadership,
+        leadership_gate,
         shutdown_tx,
         task,
     }))

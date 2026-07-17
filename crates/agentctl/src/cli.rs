@@ -33,6 +33,83 @@ pub enum Cmd {
     /// Native runtime inspection and control.
     #[command(subcommand)]
     Runtime(RuntimeCmd),
+    /// Enterprise scale, rollout, compliance, and recovery operations.
+    #[command(subcommand)]
+    Enterprise(EnterpriseCmd),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EnterpriseCmd {
+    /// Read the bounded enterprise operational snapshot.
+    Status(EnterpriseDaemonArgs),
+    /// Explain one durable fleet task and its exact policy block.
+    Explain(EnterpriseExplainArgs),
+    /// Declare a digest-pinned signed worker image rollout.
+    Rollout(EnterpriseMutationFileArgs),
+    /// Record one zone's signed-image rollout observation.
+    RolloutObserve(EnterpriseMutationFileArgs),
+    /// Create or update one zone pool policy.
+    ZonePolicy(EnterpriseMutationFileArgs),
+    /// Record one capacity observation and scaling recommendation.
+    Capacity(EnterpriseMutationFileArgs),
+    /// Declare a multi-region artifact replication plan.
+    ReplicationPlan(EnterpriseMutationFileArgs),
+    /// Acknowledge one immutable artifact replica.
+    ReplicaAck(EnterpriseMutationFileArgs),
+    /// Register an opaque tenant KMS key/version reference.
+    TenantKey(EnterpriseMutationFileArgs),
+    /// Set a versioned retention policy.
+    Retention(EnterpriseMutationFileArgs),
+    /// Place an immutable legal hold.
+    LegalHold(EnterpriseMutationFileArgs),
+    /// Release an active legal hold.
+    LegalHoldRelease(EnterpriseLegalHoldReleaseArgs),
+    /// Record an immutable disaster-recovery checkpoint.
+    DrCheckpoint(EnterpriseMutationFileArgs),
+    /// Record a disaster-recovery drill result.
+    DrDrill(EnterpriseMutationFileArgs),
+    /// Register a pinned factory load model.
+    LoadModel(EnterpriseMutationFileArgs),
+    /// Record one service-level and error-budget measurement.
+    ServiceLevel(EnterpriseMutationFileArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct EnterpriseDaemonArgs {
+    /// Enterprise agentd base URL. HTTPS is required except explicit loopback development.
+    #[arg(long, default_value = "http://127.0.0.1:8787")]
+    pub daemon_url: String,
+    /// Operator bearer token. Falls back to `AGENTD_API_TOKEN`.
+    #[arg(long)]
+    pub api_token: Option<String>,
+    /// Permit plain HTTP only for an explicit loopback development daemon.
+    #[arg(long)]
+    pub allow_loopback_http: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct EnterpriseExplainArgs {
+    pub execution_task_id: String,
+    #[command(flatten)]
+    pub daemon: EnterpriseDaemonArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct EnterpriseMutationFileArgs {
+    /// JSON file containing the exact typed enterprise resource.
+    #[arg(long)]
+    pub file: PathBuf,
+    #[command(flatten)]
+    pub daemon: EnterpriseDaemonArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct EnterpriseLegalHoldReleaseArgs {
+    pub legal_hold_id: String,
+    #[arg(long)]
+    pub released_at: i64,
+    #[command(flatten)]
+    pub daemon: EnterpriseDaemonArgs,
 }
 
 #[derive(Debug, Subcommand)]

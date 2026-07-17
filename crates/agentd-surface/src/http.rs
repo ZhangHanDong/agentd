@@ -28,10 +28,16 @@ use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
 use agentd_core::ports::{
-    RuntimeDimensions, RuntimeEvent, RuntimeKey, RuntimeKeyInput, RuntimeResizeRequest,
-    RuntimeShutdownRequest, RuntimeTerminalReason, RuntimeTextInput, RuntimeWaitRequest,
+    ArtifactReplicaAcknowledgement, ArtifactReplicationPlan, CapacityObservation,
+    DisasterRecoveryCheckpoint, DisasterRecoveryDrill, LegalHold, LoadModelRegistration,
+    RetentionPolicy, RuntimeDimensions, RuntimeEvent, RuntimeKey, RuntimeKeyInput,
+    RuntimeResizeRequest, RuntimeShutdownRequest, RuntimeTerminalReason, RuntimeTextInput,
+    RuntimeWaitRequest, ServiceLevelMeasurement, TenantKeyVersion, WorkerImageRollout,
+    WorkerImageZoneObservation, ZonePoolPolicy,
 };
-use agentd_core::types::{CapabilityAdmission, RunId, RuntimeAttemptId, RuntimeSessionId};
+use agentd_core::types::{
+    CapabilityAdmission, LegalHoldId, RunId, RuntimeAttemptId, RuntimeSessionId, TaskRunId,
+};
 use agentd_core::{CoreError, RunProgress};
 
 use crate::error::SurfaceError;
@@ -40,7 +46,8 @@ use crate::host::{
     AgentChatTaskGraphCreateInput, AgentChatTaskGraphNodePatchInput, AgentChatTaskListFilters,
     AgentChatTaskPatchInput, AgentChatTaskTransitionInput, AgentHeartbeat, AgentIdentityPatch,
     AgentOffline, AgentRegistration, AgentRuntimeUpdate, DeliveryEventInput, DirectMessageInput,
-    EventRecord, GroupCreateInput, GroupMemberUpdate, LiveEvent, MatrixBridgeRoomInput,
+    EnterpriseMutation, EventRecord, GroupCreateInput, GroupMemberUpdate, LiveEvent,
+    MatrixBridgeRoomInput,
     MatrixInboundMessageInput, RelayServerHeartbeat, RelayStreamEventRecord, RunHost, RunSnapshot,
     SchedulerDispatchInput, SchedulerPoolFilters, SchedulerReleaseInput,
 };
@@ -192,6 +199,15 @@ pub fn router(state: AppState) -> Router {
         .route("/api/pool", get(get_pool))
         .route("/api/dispatch", post(dispatch_scheduler))
         .route("/api/dispatch/release", post(release_scheduler))
+        .route("/api/enterprise/status", get(enterprise_status))
+        .route(
+            "/api/enterprise/tasks/:id/explain",
+            get(enterprise_task_explain),
+        )
+        .route(
+            "/api/enterprise/mutations/:operation",
+            post(enterprise_mutation),
+        )
         .route("/api/groups", post(create_group).get(list_groups))
         .route("/api/groups/:name", get(get_group).delete(delete_group))
         .route("/api/groups/:name/members", post(update_group_members))
@@ -1087,6 +1103,112 @@ async fn release_scheduler(
     }
 }
 
+async fn enterprise_status(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(error) = require_operator_bearer(&state.auth, &headers) {
+        return error.into_response();
+    }
+    match state.host.enterprise_status(now_unix()).await {
+        Ok(snapshot) => Json(snapshot).into_response(),
+        Err(error) => enterprise_error_response(error),
+    }
+}
+
+async fn enterprise_task_explain(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = require_operator_bearer(&state.auth, &headers) {
+        return error.into_response();
+    }
+    let id = id.trim();
+    if !id.starts_with("tr_") || id.len() > 128 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid execution task id" })),
+        )
+            .into_response();
+    }
+    match state
+        .host
+        .enterprise_explain(&TaskRunId::from_string(id))
+        .await
+    {
+        Ok(Some(explanation)) => Json(explanation).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "execution task not found" })),
+        )
+            .into_response(),
+        Err(error) => enterprise_error_response(error),
+    }
+}
+
+async fn enterprise_mutation(
+    State(state): State<AppState>,
+    AxumPath(operation): AxumPath<String>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if let Err(error) = require_operator_bearer(&state.auth, &headers) {
+        return error.into_response();
+    }
+    let mutation = match parse_enterprise_mutation(&operation, body) {
+        Ok(mutation) => mutation,
+        Err(error) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response();
+        }
+    };
+    match state.host.enterprise_mutate(mutation).await {
+        Ok(result) => Json(json!({ "ok": true, "result": result })).into_response(),
+        Err(error) => enterprise_error_response(error),
+    }
+}
+
+fn parse_enterprise_mutation(operation: &str, body: Value) -> Result<EnterpriseMutation, String> {
+    fn decode<T: serde::de::DeserializeOwned>(body: Value) -> Result<T, String> {
+        serde_json::from_value(body).map_err(|error| error.to_string())
+    }
+
+    match operation {
+        "declare-rollout" => decode::<WorkerImageRollout>(body).map(EnterpriseMutation::DeclareRollout),
+        "observe-rollout" => decode::<WorkerImageZoneObservation>(body)
+            .map(EnterpriseMutation::ObserveRollout),
+        "upsert-zone-pool" => decode::<ZonePoolPolicy>(body).map(EnterpriseMutation::UpsertZonePool),
+        "recommend-capacity" => decode::<CapacityObservation>(body)
+            .map(EnterpriseMutation::RecommendCapacity),
+        "create-replication-plan" => decode::<ArtifactReplicationPlan>(body)
+            .map(EnterpriseMutation::CreateReplicationPlan),
+        "acknowledge-replica" => decode::<ArtifactReplicaAcknowledgement>(body)
+            .map(EnterpriseMutation::AcknowledgeReplica),
+        "register-tenant-key" => decode::<TenantKeyVersion>(body)
+            .map(EnterpriseMutation::RegisterTenantKey),
+        "set-retention-policy" => decode::<RetentionPolicy>(body)
+            .map(EnterpriseMutation::SetRetentionPolicy),
+        "place-legal-hold" => decode::<LegalHold>(body).map(EnterpriseMutation::PlaceLegalHold),
+        "release-legal-hold" => {
+            #[derive(Deserialize)]
+            struct ReleaseLegalHoldBody {
+                legal_hold_id: String,
+                released_at: i64,
+            }
+            decode::<ReleaseLegalHoldBody>(body).map(|value| EnterpriseMutation::ReleaseLegalHold {
+                legal_hold_id: LegalHoldId::from_string(value.legal_hold_id),
+                released_at: value.released_at,
+            })
+        }
+        "record-dr-checkpoint" => decode::<DisasterRecoveryCheckpoint>(body)
+            .map(EnterpriseMutation::RecordDrCheckpoint),
+        "record-dr-drill" => decode::<DisasterRecoveryDrill>(body)
+            .map(EnterpriseMutation::RecordDrDrill),
+        "register-load-model" => decode::<LoadModelRegistration>(body)
+            .map(EnterpriseMutation::RegisterLoadModel),
+        "record-service-level" => decode::<ServiceLevelMeasurement>(body)
+            .map(EnterpriseMutation::RecordServiceLevel),
+        _ => Err("unknown enterprise mutation operation".to_string()),
+    }
+}
+
 async fn get_agent_tasks(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
@@ -1660,6 +1782,14 @@ fn now_nanos() -> u128 {
         .as_nanos()
 }
 
+fn now_unix() -> i64 {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    i64::try_from(seconds).unwrap_or(i64::MAX)
+}
+
 fn guess_mime_from_path(path: &FsPath) -> &'static str {
     match path
         .extension()
@@ -1702,6 +1832,27 @@ fn runtime_error_response(error: CoreError) -> Response {
     } else if message.contains("conflict") || message.contains("cannot start") {
         StatusCode::CONFLICT
     } else if message.contains("invalid") || message.contains("exceeds") {
+        StatusCode::BAD_REQUEST
+    } else if message.contains("not configured") || message.contains("unavailable") {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    (status, Json(json!({ "error": message }))).into_response()
+}
+
+fn enterprise_error_response(error: CoreError) -> Response {
+    let message = error.to_string();
+    let status = if message.contains("not found") {
+        StatusCode::NOT_FOUND
+    } else if message.contains("not the current leader")
+        || message.contains("leadership is stale")
+        || message.contains("conflict")
+    {
+        StatusCode::CONFLICT
+    } else if message.contains("denied") {
+        StatusCode::FORBIDDEN
+    } else if message.contains("invalid") {
         StatusCode::BAD_REQUEST
     } else if message.contains("not configured") || message.contains("unavailable") {
         StatusCode::SERVICE_UNAVAILABLE

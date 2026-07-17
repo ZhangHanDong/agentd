@@ -101,12 +101,12 @@
 **Interfaces:**
 - Produces `/api/enterprise/status`, `/api/enterprise/tasks/:id/explain`, `agentctl enterprise status|explain|...`, dashboard scale view, and AD-E7 doctor checks.
 
-- [ ] Add bounded operator reads and authenticated mutations.
-- [ ] Expose leadership, zones, backlog, rollout, replica, budget, failure, and SLO state.
-- [ ] Add exact task/policy denial explanation using existing scheduler records.
-- [ ] Add CLI mutation/import commands for rollout, zone policy, replicas, keys, holds, DR, and load model.
-- [ ] Author route/CLI tests for final execution.
-- [ ] Commit without executing tests.
+- [x] Add bounded operator reads and authenticated mutations.
+- [x] Expose leadership, zones, backlog, rollout, replica, budget, failure, and SLO state.
+- [x] Add exact task/policy denial explanation using existing scheduler records.
+- [x] Add CLI mutation/import commands for rollout, zone policy, replicas, keys, holds, DR, and load model.
+- [x] Author route/CLI tests for final execution.
+- [x] Commit without executing tests.
 
 ### Task 5: Operations, Roadmap, And Final Evidence Contract
 

@@ -6,8 +6,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agentd_core::CoreError;
-use agentd_core::ports::WorktreeAllocator;
-use agentd_store::{FailedWorktreeCleanupCandidate, SqliteStore};
+use agentd_core::ports::{
+    AgentBackend, PolicyRevocationPort, SecurityError, WorktreeAllocator,
+};
+use agentd_core::types::{AgentHandle, SecurityEpochRequest, SecurityEpochStatus, SpawnRequest};
+use agentd_store::fleet_scheduler::SqliteFleetScheduler;
+use agentd_store::{
+    FailedWorktreeCleanupCandidate, SqliteEnterpriseScaleControlPlane, SqliteStore,
+};
 use agentd_surface::host::RunHost;
 use agentd_surface::http::{AppState, AuthConfig, MediaConfig, SchedulerConfig, router};
 use agentd_security::{ContentRedactor, RedactionLimits};
@@ -19,13 +25,45 @@ use crate::cli::DaemonConfig;
 use crate::clock::SystemClock;
 use crate::command_runner::TokioCommandRunner;
 use crate::host::ProductionRunHost;
+use crate::enterprise::{
+    EnterpriseControlPlaneConfig, EnterpriseLeadershipGate, start_enterprise_coordination,
+};
 use crate::native_backend::{
     LocalInteractiveSandbox, NativeAgentBackend, NativeAgentLifecycle,
     StandalonePolicyRevocation,
 };
 use crate::mempal::OfflineMempal;
 use crate::runtime::{NativeRuntimeCompositionConfig, compose_native_runtime};
-use crate::security::{SecurityRuntimeMode, build_security_runtime};
+use crate::security::{
+    SecurityRuntimeMode, build_security_runtime, validate_enterprise_control_plane_auth,
+};
+
+#[derive(Debug)]
+struct ControlPlaneOnlyBackend;
+
+#[async_trait::async_trait]
+impl AgentBackend for ControlPlaneOnlyBackend {
+    async fn spawn(&self, _request: SpawnRequest) -> Result<AgentHandle, CoreError> {
+        Err(CoreError::Backend(
+            "enterprise control-plane-only process cannot execute local agents".to_string(),
+        ))
+    }
+}
+
+#[derive(Debug)]
+struct FailClosedPolicyRevocation;
+
+#[async_trait::async_trait]
+impl PolicyRevocationPort for FailClosedPolicyRevocation {
+    async fn check_security_epoch(
+        &self,
+        _request: &SecurityEpochRequest,
+    ) -> Result<SecurityEpochStatus, SecurityError> {
+        Err(SecurityError::Unavailable(
+            "enterprise policy revocation provider is not configured".to_string(),
+        ))
+    }
+}
 
 /// Build the HTTP/SSE router over a host (testable via `tower::oneshot`).
 pub fn build_router(host: Arc<dyn RunHost>) -> Router {
@@ -151,6 +189,28 @@ pub async fn build_production_host(config: &DaemonConfig) -> Result<ProductionRu
     .with_worktree_allocator(Some(Box::new(worktree_pool))))
 }
 
+async fn build_enterprise_control_plane_host(
+    config: &DaemonConfig,
+    store: SqliteStore,
+    leadership: EnterpriseLeadershipGate,
+) -> Result<ProductionRunHost, CoreError> {
+    let scale = Arc::new(SqliteEnterpriseScaleControlPlane::new(store.pool().clone()));
+    let fleet = Arc::new(SqliteFleetScheduler::new(
+        store.pool().clone(),
+        Arc::new(FailClosedPolicyRevocation),
+    ));
+    Ok(ProductionRunHost::new(
+        store,
+        Box::new(ControlPlaneOnlyBackend),
+        Box::new(TokioCommandRunner::new()),
+        Box::new(OfflineMempal),
+        Box::new(SystemClock),
+        config.workflows_dir.clone(),
+    )
+    .with_enterprise_control_plane(scale, fleet, leadership)
+    .with_tool_cwd(config.repo_dir.clone()))
+}
+
 /// Run daemon boot-GC over the worktree pool while preserving worktrees that
 /// the durable store still references for non-finished runs.
 ///
@@ -245,6 +305,13 @@ pub async fn bind_listener(addr: SocketAddr) -> Result<tokio::net::TcpListener, 
 /// Returns any bind/store/serve error as a boxed error.
 pub async fn serve(config: DaemonConfig) -> Result<(), Box<dyn std::error::Error>> {
     let auth = config.auth_config();
+    if config.security_mode == SecurityRuntimeMode::Enterprise
+        && config.enterprise.enterprise_control_plane_only
+    {
+        validate_enterprise_control_plane_auth(&auth)?;
+        EnterpriseControlPlaneConfig::from_daemon(&config)?;
+        return serve_enterprise_control_plane(config, auth).await;
+    }
     build_security_runtime(config.security_mode, &auth, None)?;
     // After the pure security gate, bind before store/recovery work so the P1
     // already-running guard remains fail-fast in standalone mode.
@@ -278,6 +345,63 @@ pub async fn serve(config: DaemonConfig) -> Result<(), Box<dyn std::error::Error
     }
     let media_dir = media_dir_for_db(&config.db_path);
     let app = build_router_with_auth_and_media(Arc::new(host), auth, MediaConfig::new(media_dir));
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
     Ok(())
+}
+
+async fn serve_enterprise_control_plane(
+    config: DaemonConfig,
+    auth: AuthConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let bind_ip = config
+        .enterprise
+        .enterprise_bind_address
+        .as_deref()
+        .unwrap_or("127.0.0.1")
+        .parse::<std::net::IpAddr>()?;
+    let addr = SocketAddr::from((bind_ip, config.port));
+    let listener = bind_listener(addr).await?;
+    let store = SqliteStore::connect(&config.db_path).await?;
+    let coordinator = start_enterprise_coordination(&config, &store)
+        .await?
+        .ok_or_else(|| std::io::Error::other("enterprise coordinator was not constructed"))?;
+    let host = build_enterprise_control_plane_host(
+        &config,
+        store,
+        coordinator.leadership_gate(),
+    )
+    .await?;
+    let media_dir = media_dir_for_db(&config.db_path);
+    let app = build_router_with_auth_and_media(Arc::new(host), auth, MediaConfig::new(media_dir));
+    tracing::info!(%addr, "enterprise agentd control plane listening");
+    let result = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await;
+    coordinator.shutdown().await;
+    result?;
+    Ok(())
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let terminate = tokio::signal::unix::SignalKind::terminate();
+        match tokio::signal::unix::signal(terminate) {
+            Ok(mut signal) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = signal.recv() => {}
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }

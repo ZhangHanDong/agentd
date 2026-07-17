@@ -6,7 +6,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 
 use agentd_core::CoreError;
-use agentd_core::types::{NodeId, ReviewRunId, RunId};
+use agentd_core::ports::{EnterpriseOperationalSnapshot, FleetExplain};
+use agentd_core::types::{NodeId, ReviewRunId, RunId, TaskRunId};
 use agentd_core::{EngineEvent, RunProgress};
 use serde_json::Value;
 use tokio::sync::broadcast;
@@ -19,7 +20,7 @@ use crate::host::{
     AgentChatTaskTransitionInput, AgentDownResult, AgentHeartbeat, AgentLifecycleReport,
     AgentOffline, AgentRebindResult, AgentRecord, AgentRegistration, AgentRuntimeUpdate,
     AgentStartHandle, AgentStartResult, DeliveryEventInput, DeliveryEventRecord,
-    DirectMessageInput, EventRecord, GroupCreateInput, GroupMemberUpdate, GroupMessageInput,
+    DirectMessageInput, EnterpriseMutation, EventRecord, GroupCreateInput, GroupMemberUpdate, GroupMessageInput,
     GroupReadAdvance, GroupReadRequest, GroupReadResult, GroupRecord, InboxMessage, LiveEvent,
     MatrixBridgeRoomInput, MatrixBridgeRoomRecord, MatrixInboundMessageInput,
     MatrixInboundMessageResult, RelayServerHeartbeat, RelayServerRecord, RelayStreamEventRecord,
@@ -57,6 +58,9 @@ pub struct FakeRunHost {
     stream_events: Mutex<Vec<RelayStreamEventRecord>>,
     matrix_rooms: Mutex<HashMap<String, MatrixBridgeRoomRecord>>,
     matrix_events: Mutex<HashMap<String, MatrixInboundMessageResult>>,
+    enterprise_snapshot: Mutex<Option<EnterpriseOperationalSnapshot>>,
+    enterprise_explanations: Mutex<HashMap<String, FleetExplain>>,
+    enterprise_mutation_count: Mutex<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -117,6 +121,9 @@ impl Default for FakeRunHost {
             stream_events: Mutex::default(),
             matrix_rooms: Mutex::default(),
             matrix_events: Mutex::default(),
+            enterprise_snapshot: Mutex::default(),
+            enterprise_explanations: Mutex::default(),
+            enterprise_mutation_count: Mutex::default(),
         }
     }
 }
@@ -224,6 +231,28 @@ impl FakeRunHost {
             })
             .collect();
         *self.stream_events.lock().expect("stream events lock") = records;
+    }
+
+    pub fn set_enterprise_snapshot(&self, snapshot: EnterpriseOperationalSnapshot) {
+        *self
+            .enterprise_snapshot
+            .lock()
+            .expect("enterprise snapshot lock") = Some(snapshot);
+    }
+
+    pub fn set_enterprise_explain(&self, explanation: FleetExplain) {
+        self.enterprise_explanations
+            .lock()
+            .expect("enterprise explanation lock")
+            .insert(explanation.execution_task_id.to_string(), explanation);
+    }
+
+    #[must_use]
+    pub fn enterprise_mutation_count(&self) -> usize {
+        *self
+            .enterprise_mutation_count
+            .lock()
+            .expect("enterprise mutation count lock")
     }
 
     fn fake_insert_scheduler_reservation(
@@ -349,6 +378,38 @@ impl RunHost for FakeRunHost {
             .filter(|e| e.seq > after_seq)
             .cloned()
             .collect())
+    }
+
+    async fn enterprise_status(
+        &self,
+        _observed_at: i64,
+    ) -> Result<EnterpriseOperationalSnapshot, CoreError> {
+        self.enterprise_snapshot
+            .lock()
+            .expect("enterprise snapshot lock")
+            .clone()
+            .ok_or_else(|| CoreError::Backend("enterprise snapshot unavailable".to_string()))
+    }
+
+    async fn enterprise_explain(
+        &self,
+        execution_task_id: &TaskRunId,
+    ) -> Result<Option<FleetExplain>, CoreError> {
+        Ok(self
+            .enterprise_explanations
+            .lock()
+            .expect("enterprise explanation lock")
+            .get(execution_task_id.as_str())
+            .cloned())
+    }
+
+    async fn enterprise_mutate(&self, _mutation: EnterpriseMutation) -> Result<Value, CoreError> {
+        let mut count = self
+            .enterprise_mutation_count
+            .lock()
+            .expect("enterprise mutation count lock");
+        *count = count.saturating_add(1);
+        Ok(serde_json::json!({ "accepted": true }))
     }
 
     async fn register_agent(&self, input: AgentRegistration) -> Result<AgentRecord, CoreError> {

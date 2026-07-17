@@ -59,7 +59,7 @@
       .shell {
         min-height: 100vh;
         display: grid;
-        grid-template-rows: auto 1fr;
+        grid-template-rows: auto auto 1fr;
       }
 
       header {
@@ -130,6 +130,50 @@
         display: grid;
         grid-template-columns: minmax(240px, 320px) minmax(0, 1fr) minmax(280px, 420px);
         min-height: 0;
+      }
+
+      .enterprise-band {
+        min-height: 58px;
+        display: grid;
+        grid-template-columns: repeat(8, minmax(84px, 1fr));
+        border-bottom: 1px solid var(--line);
+        background: var(--panel);
+      }
+
+      .enterprise-metric {
+        min-width: 0;
+        padding: 8px 12px;
+        border-right: 1px solid var(--line);
+      }
+
+      .enterprise-metric:last-child {
+        border-right: 0;
+      }
+
+      .enterprise-label {
+        display: block;
+        color: var(--muted);
+        font-size: 11px;
+        text-transform: uppercase;
+      }
+
+      .enterprise-value {
+        display: block;
+        margin-top: 3px;
+        overflow: hidden;
+        color: var(--ink);
+        font-size: 14px;
+        font-weight: 680;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .enterprise-value.warn {
+        color: var(--warn);
+      }
+
+      .enterprise-value.fail {
+        color: var(--fail);
       }
 
       .pane {
@@ -322,6 +366,18 @@
       }
 
       @media (max-width: 980px) {
+        .enterprise-band {
+          grid-template-columns: repeat(4, minmax(76px, 1fr));
+        }
+
+        .enterprise-metric:nth-child(4) {
+          border-right: 0;
+        }
+
+        .enterprise-metric:nth-child(-n + 4) {
+          border-bottom: 1px solid var(--line);
+        }
+
         main {
           grid-template-columns: 1fr;
         }
@@ -348,6 +404,16 @@
           </button>
         </div>
       </header>
+      <section class="enterprise-band" id="enterprise-band" aria-label="Enterprise operations">
+        <div class="enterprise-metric"><span class="enterprise-label">Leader</span><span class="enterprise-value" data-enterprise="leader">-</span></div>
+        <div class="enterprise-metric"><span class="enterprise-label">Zones</span><span class="enterprise-value" data-enterprise="zones">-</span></div>
+        <div class="enterprise-metric"><span class="enterprise-label">Backlog</span><span class="enterprise-value" data-enterprise="backlog">-</span></div>
+        <div class="enterprise-metric"><span class="enterprise-label">Replicas</span><span class="enterprise-value" data-enterprise="replicas">-</span></div>
+        <div class="enterprise-metric"><span class="enterprise-label">Rollout</span><span class="enterprise-value" data-enterprise="rollout">-</span></div>
+        <div class="enterprise-metric"><span class="enterprise-label">Budget</span><span class="enterprise-value" data-enterprise="budget">-</span></div>
+        <div class="enterprise-metric"><span class="enterprise-label">Failures</span><span class="enterprise-value" data-enterprise="failures">-</span></div>
+        <div class="enterprise-metric"><span class="enterprise-label">SLO</span><span class="enterprise-value" data-enterprise="slo">-</span></div>
+      </section>
       <main>
         <section class="pane" aria-labelledby="runs-heading">
           <div class="pane-head">
@@ -381,6 +447,9 @@
       const refreshButton = document.getElementById("refresh");
       const runtimeLookup = document.getElementById("runtime-lookup");
       const runtimeSessionInput = document.getElementById("runtime-session");
+      const enterpriseValues = Object.fromEntries(
+        [...document.querySelectorAll("[data-enterprise]")].map((node) => [node.dataset.enterprise, node]),
+      );
       let selectedRunId = null;
       let eventSource = null;
       let runtimeEventSource = null;
@@ -416,6 +485,41 @@
         } catch (error) {
           renderEmpty(runsList, error.message);
           setStatus("error");
+        }
+      }
+
+      function setEnterpriseValue(name, value, state = "") {
+        const node = enterpriseValues[name];
+        if (!node) return;
+        node.textContent = value;
+        node.className = `enterprise-value ${state}`.trim();
+      }
+
+      async function loadEnterprise() {
+        try {
+          const response = await fetch("/api/enterprise/status");
+          if (!response.ok) throw new Error(String(response.status));
+          const snapshot = await response.json();
+          const leadership = snapshot.leadership || {};
+          const leader = leadership.instance_id || "follower";
+          const zoneCount = Array.isArray(snapshot.zones) ? snapshot.zones.length : 0;
+          const readyZones = Array.isArray(snapshot.zones)
+            ? snapshot.zones.filter((zone) => Number(zone.ready_workers || 0) > 0).length
+            : 0;
+          const warnings = Number(snapshot.service_level_warnings || 0);
+          const breaches = Number(snapshot.service_level_breaches || 0);
+          const failures = Number(snapshot.dead_letter_tasks || 0);
+          const degraded = Number(snapshot.degraded_rollouts || 0);
+          setEnterpriseValue("leader", leader);
+          setEnterpriseValue("zones", `${readyZones}/${zoneCount}`, readyZones < zoneCount ? "warn" : "");
+          setEnterpriseValue("backlog", String(snapshot.queued_tasks || 0));
+          setEnterpriseValue("replicas", String(snapshot.pending_replica_regions || 0), snapshot.pending_replica_regions ? "warn" : "");
+          setEnterpriseValue("rollout", degraded ? `${degraded} degraded` : `${snapshot.active_rollouts || 0} active`, degraded ? "fail" : "");
+          setEnterpriseValue("budget", warnings ? `${warnings} warning` : "within", warnings ? "warn" : "");
+          setEnterpriseValue("failures", String(failures), failures ? "fail" : "");
+          setEnterpriseValue("slo", breaches ? `${breaches} breached` : "within", breaches ? "fail" : "");
+        } catch {
+          Object.keys(enterpriseValues).forEach((name) => setEnterpriseValue(name, "unavailable", "warn"));
         }
       }
 
@@ -548,6 +652,7 @@
       }
 
       async function refreshDashboard() {
+        void loadEnterprise();
         if (selectedRunId) {
           await refreshSelectedRunState();
           return;
@@ -593,6 +698,7 @@
           void loadRuntime(sessionId);
         }
       });
+      loadEnterprise();
       loadRuns();
     </script>
   </body>

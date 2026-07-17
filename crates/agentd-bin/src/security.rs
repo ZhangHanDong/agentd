@@ -300,6 +300,21 @@ pub fn build_security_runtime(
     }
 }
 
+/// Validate the authenticated control-plane-only enterprise listener. This
+/// profile has no local execution path, so execution providers are composed in
+/// workers rather than injected into the HTTP control-plane process.
+pub fn validate_enterprise_control_plane_auth(
+    auth: &AuthConfig,
+) -> Result<(), SecurityStartupError> {
+    if auth_is_open(auth) {
+        return Err(SecurityStartupError::OpenAuth);
+    }
+    if auth.agent_token_mode == agentd_surface::http::AgentTokenMode::Audit {
+        return Err(SecurityStartupError::AuditOnlyAuth);
+    }
+    Ok(())
+}
+
 fn auth_is_open(auth: &AuthConfig) -> bool {
     auth.api_token
         .as_deref()

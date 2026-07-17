@@ -17,8 +17,9 @@ use agentd_core::handler::{HandlerRegistry, Ports};
 use agentd_core::handler::{agent_allocation_json, append_agent_allocation_prompt_context};
 use agentd_core::ports::{
     AgentAllocation, AgentAllocationRequest, AgentAllocationStatus, AgentAllocator, AgentBackend,
-    Clock, CommandRunner, DirectAgentAllocator, MempalClient, NativeRuntimeError, RunStatus,
-    RuntimeEvent, RuntimeInputAck, RuntimeKeyInput, RuntimeResizeRequest, RuntimeShutdownReport,
+    Clock, CommandRunner, DirectAgentAllocator, EnterpriseOperationalSnapshot, EnterpriseScalePort,
+    FleetExplain, FleetSchedulerPort, MempalClient, NativeRuntimeError, RunStatus, RuntimeEvent,
+    RuntimeInputAck, RuntimeKeyInput, RuntimeResizeRequest, RuntimeShutdownReport,
     RuntimeShutdownRequest, RuntimeSnapshot, RuntimeTextInput, RuntimeView, RuntimeWaitRequest,
     Store, WorktreeAllocator,
 };
@@ -59,6 +60,7 @@ use agentd_surface::host::{
     GroupRecord as SurfaceGroupRecord, InboxMessage as SurfaceInboxMessage, LiveEvent,
     MatrixBridgeRoomInput as SurfaceMatrixBridgeRoomInput,
     MatrixBridgeRoomRecord as SurfaceMatrixBridgeRoomRecord,
+    EnterpriseMutation as SurfaceEnterpriseMutation,
     MatrixInboundMessageInput as SurfaceMatrixInboundMessageInput,
     MatrixInboundMessageResult as SurfaceMatrixInboundMessageResult,
     RelayServerHeartbeat as SurfaceRelayServerHeartbeat,
@@ -78,6 +80,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 
 use crate::runtime::NativeRuntimeService;
+use crate::enterprise::EnterpriseLeadershipGate;
 
 /// Capacity of the live-event broadcast: a subscriber more than this many events
 /// behind lags and is realigned with a snapshot (P1).
@@ -256,6 +259,10 @@ fn meaningful_json(value: &Value) -> bool {
     }
 }
 
+fn scale_error(error: agentd_core::ports::EnterpriseScaleError) -> CoreError {
+    CoreError::Backend(error.to_string())
+}
+
 fn allocation_from_release(
     mut result: agent_scheduler_repo::ReleaseResult,
 ) -> Option<AgentAllocation> {
@@ -356,6 +363,9 @@ pub struct ProductionRunHost {
     agent_allocator: Box<dyn AgentAllocator>,
     worktree_allocator: Option<Box<dyn WorktreeAllocator>>,
     native_runtime: Option<Arc<NativeRuntimeService>>,
+    enterprise_scale: Option<Arc<dyn EnterpriseScalePort>>,
+    fleet_scheduler: Option<Arc<dyn FleetSchedulerPort>>,
+    enterprise_leadership: Option<EnterpriseLeadershipGate>,
     registry: HandlerRegistry,
     workflows_dir: PathBuf,
     /// The live-event broadcast (P1): the emit point publishes here for the SSE
@@ -441,6 +451,9 @@ impl ProductionRunHost {
             agent_allocator: Box::new(DirectAgentAllocator),
             worktree_allocator: None,
             native_runtime: None,
+            enterprise_scale: None,
+            fleet_scheduler: None,
+            enterprise_leadership: None,
             registry: HandlerRegistry::with_builtins(),
             workflows_dir: workflows_dir.into(),
             live_tx: broadcast::channel(LIVE_BROADCAST_CAPACITY).0,
@@ -502,6 +515,19 @@ impl ProductionRunHost {
     #[must_use]
     pub fn native_runtime_service(&self) -> Option<Arc<NativeRuntimeService>> {
         self.native_runtime.as_ref().map(Arc::clone)
+    }
+
+    #[must_use]
+    pub fn with_enterprise_control_plane(
+        mut self,
+        scale: Arc<dyn EnterpriseScalePort>,
+        fleet_scheduler: Arc<dyn FleetSchedulerPort>,
+        leadership: EnterpriseLeadershipGate,
+    ) -> Self {
+        self.enterprise_scale = Some(scale);
+        self.fleet_scheduler = Some(fleet_scheduler);
+        self.enterprise_leadership = Some(leadership);
+        self
     }
 
     /// Re-read + build the run's graph from `runs.workflow_path`, returning it
@@ -1391,6 +1417,99 @@ impl RunHost for ProductionRunHost {
                 payload: r.payload,
             })
             .collect())
+    }
+
+    async fn enterprise_status(
+        &self,
+        observed_at: i64,
+    ) -> Result<EnterpriseOperationalSnapshot, CoreError> {
+        let scale = self.enterprise_scale.as_ref().ok_or_else(|| {
+            CoreError::Backend("enterprise scale control plane is not configured".to_string())
+        })?;
+        scale
+            .operational_snapshot(observed_at)
+            .await
+            .map_err(|error| CoreError::Backend(error.to_string()))
+    }
+
+    async fn enterprise_explain(
+        &self,
+        execution_task_id: &TaskRunId,
+    ) -> Result<Option<FleetExplain>, CoreError> {
+        let scheduler = self.fleet_scheduler.as_ref().ok_or_else(|| {
+            CoreError::Backend("enterprise fleet scheduler is not configured".to_string())
+        })?;
+        scheduler
+            .explain(execution_task_id)
+            .await
+            .map_err(|error| CoreError::Backend(error.to_string()))
+    }
+
+    async fn enterprise_mutate(
+        &self,
+        mutation: SurfaceEnterpriseMutation,
+    ) -> Result<Value, CoreError> {
+        let scale = self.enterprise_scale.as_ref().ok_or_else(|| {
+            CoreError::Backend("enterprise scale control plane is not configured".to_string())
+        })?;
+        let leadership = self.enterprise_leadership.as_ref().ok_or_else(|| {
+            CoreError::Backend("enterprise mutation authority is not configured".to_string())
+        })?;
+        leadership
+            .authorize_mutation(self.clock.now_unix())
+            .await
+            .map_err(|error| CoreError::Backend(error.to_string()))?;
+        let value = match mutation {
+            SurfaceEnterpriseMutation::DeclareRollout(value) => serde_json::to_value(
+                scale.declare_worker_image_rollout(&value).await.map_err(scale_error)?,
+            ),
+            SurfaceEnterpriseMutation::ObserveRollout(value) => serde_json::to_value(
+                scale.observe_worker_image_zone(&value).await.map_err(scale_error)?,
+            ),
+            SurfaceEnterpriseMutation::UpsertZonePool(value) => serde_json::to_value(
+                scale.upsert_zone_pool(&value).await.map_err(scale_error)?,
+            ),
+            SurfaceEnterpriseMutation::RecommendCapacity(value) => serde_json::to_value(
+                scale.recommend_capacity(&value).await.map_err(scale_error)?,
+            ),
+            SurfaceEnterpriseMutation::CreateReplicationPlan(value) => serde_json::to_value(
+                scale.create_replication_plan(&value).await.map_err(scale_error)?,
+            ),
+            SurfaceEnterpriseMutation::AcknowledgeReplica(value) => serde_json::to_value(
+                scale.acknowledge_artifact_replica(&value).await.map_err(scale_error)?,
+            ),
+            SurfaceEnterpriseMutation::RegisterTenantKey(value) => serde_json::to_value(
+                scale.register_tenant_key(&value).await.map_err(scale_error)?,
+            ),
+            SurfaceEnterpriseMutation::SetRetentionPolicy(value) => serde_json::to_value(
+                scale.set_retention_policy(&value).await.map_err(scale_error)?,
+            ),
+            SurfaceEnterpriseMutation::PlaceLegalHold(value) => serde_json::to_value(
+                scale.place_legal_hold(&value).await.map_err(scale_error)?,
+            ),
+            SurfaceEnterpriseMutation::ReleaseLegalHold {
+                legal_hold_id,
+                released_at,
+            } => serde_json::to_value(
+                scale
+                    .release_legal_hold(&legal_hold_id, released_at)
+                    .await
+                    .map_err(scale_error)?,
+            ),
+            SurfaceEnterpriseMutation::RecordDrCheckpoint(value) => serde_json::to_value(
+                scale.record_dr_checkpoint(&value).await.map_err(scale_error)?,
+            ),
+            SurfaceEnterpriseMutation::RecordDrDrill(value) => serde_json::to_value(
+                scale.record_dr_drill(&value).await.map_err(scale_error)?,
+            ),
+            SurfaceEnterpriseMutation::RegisterLoadModel(value) => serde_json::to_value(
+                scale.register_load_model(&value).await.map_err(scale_error)?,
+            ),
+            SurfaceEnterpriseMutation::RecordServiceLevel(value) => serde_json::to_value(
+                scale.record_service_level(&value).await.map_err(scale_error)?,
+            ),
+        };
+        value.map_err(|error| CoreError::Backend(error.to_string()))
     }
 
     async fn register_agent(

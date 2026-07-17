@@ -28,6 +28,8 @@ serde_json = { workspace = true }
 sha2 = "0.10"
 hex = { workspace = true }
 sqlx = { workspace = true }
+reqwest = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 async-trait = "0.1"
