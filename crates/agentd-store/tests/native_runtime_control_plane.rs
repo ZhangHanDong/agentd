@@ -13,9 +13,11 @@ use agentd_store::worker_repo::{self, WorkerCreate, WorkerRegistration};
 use agentd_store::{SqliteNativeRuntimeControlPlane, SqliteStore, run_repo, task_repo};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use sqlx::SqlitePool;
 
 struct Fixture {
     _directory: tempfile::TempDir,
+    pool: SqlitePool,
     control_plane: SqliteNativeRuntimeControlPlane,
     task_id: TaskRunId,
     profile_id: AgentProfileId,
@@ -75,6 +77,7 @@ async fn fixture() -> Fixture {
     .expect("incarnation");
     Fixture {
         _directory: directory,
+        pool: store.pool().clone(),
         control_plane: SqliteNativeRuntimeControlPlane::new(store.pool().clone()),
         task_id,
         profile_id,
@@ -109,6 +112,7 @@ fn registration(fixture: &Fixture, session_id: RuntimeSessionId) -> RuntimeSessi
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn native_runtime_ledger_keeps_session_identity_global_events_and_transcript() {
     let fixture = fixture().await;
     let session_id = RuntimeSessionId::new();
@@ -142,6 +146,18 @@ async fn native_runtime_ledger_keeps_session_identity_global_events_and_transcri
         })
         .await
         .expect("running");
+    sqlx::query(
+        "INSERT INTO native_agent_runtime_bindings \
+         (runtime_session_id, runtime_attempt_id, agent_id, execution_task_id, synthetic_task, \
+          capability_json, worktree, status, created_at, finished_at) \
+         VALUES (?, ?, 'codex-worker', ?, 0, '{}', '/workspace', 'active', 11, NULL)",
+    )
+    .bind(session_id.as_str())
+    .bind(attempt_id.as_str())
+    .bind(fixture.task_id.as_str())
+    .execute(&fixture.pool)
+    .await
+    .expect("native binding");
 
     let input_payload = RuntimeEventPayload::Input {
         idempotency_key: "prompt-1".to_string(),
@@ -199,6 +215,15 @@ async fn native_runtime_ledger_keeps_session_identity_global_events_and_transcri
         .expect("finish");
     assert_eq!(terminal.status, RuntimeSessionStatus::Completed);
     assert_eq!(terminal.transcript, Some(transcript));
+    let binding: (String, Option<i64>) = sqlx::query_as(
+        "SELECT status, finished_at FROM native_agent_runtime_bindings \
+         WHERE runtime_session_id = ?",
+    )
+    .bind(session_id.as_str())
+    .fetch_one(&fixture.pool)
+    .await
+    .expect("finished native binding");
+    assert_eq!(binding, ("finished".to_string(), Some(14)));
     assert_eq!(
         fixture
             .control_plane

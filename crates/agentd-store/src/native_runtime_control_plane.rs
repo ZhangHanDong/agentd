@@ -583,6 +583,48 @@ impl RuntimeLedgerPort for SqliteNativeRuntimeControlPlane {
                 "runtime attempt changed while finishing".to_string(),
             ));
         }
+        let native_binding = sqlx::query(
+            "SELECT execution_task_id, synthetic_task FROM native_agent_runtime_bindings \
+             WHERE runtime_session_id = ? AND runtime_attempt_id = ? AND status = 'active'",
+        )
+        .bind(report.session_id.as_str())
+        .bind(report.attempt_id.as_str())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        if let Some(binding) = native_binding {
+            let binding_update = sqlx::query(
+                "UPDATE native_agent_runtime_bindings SET status = 'finished', finished_at = ? \
+                 WHERE runtime_session_id = ? AND runtime_attempt_id = ? AND status = 'active'",
+            )
+            .bind(report.finished_at)
+            .bind(report.session_id.as_str())
+            .bind(report.attempt_id.as_str())
+            .execute(&mut *transaction)
+            .await
+            .map_err(storage_error)?;
+            if binding_update.rows_affected() != 1 {
+                return Err(NativeRuntimeError::Conflict(
+                    "native agent binding changed while finishing runtime".to_string(),
+                ));
+            }
+            if binding.get::<bool, _>("synthetic_task") {
+                let task_update = sqlx::query(
+                    "UPDATE task_runs SET finished_at = ?, status = 'finished' WHERE id = ?",
+                )
+                .bind(report.finished_at)
+                .bind(binding.get::<String, _>("execution_task_id"))
+                .execute(&mut *transaction)
+                .await
+                .map_err(storage_error)?;
+                if task_update.rows_affected() != 1 {
+                    return Err(NativeRuntimeError::Unavailable(
+                        "synthetic native agent task disappeared while finishing runtime"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
         transaction.commit().await.map_err(storage_error)?;
         load_session(&self.pool, &report.session_id)
             .await?

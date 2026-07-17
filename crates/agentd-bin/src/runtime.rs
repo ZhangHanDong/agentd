@@ -106,6 +106,7 @@ impl NativeRuntimeService {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     pub async fn start(
         &self,
         request: NativeRuntimeStartRequest,
@@ -207,6 +208,11 @@ impl NativeRuntimeService {
                 .await;
             return Err(error);
         }
+        tokio::spawn(reconcile_runtime_attempt(
+            Arc::clone(&self.backend),
+            Arc::clone(&self.ledger),
+            request.attempt_id,
+        ));
         self.view(&request.registration.session_id, None).await
     }
 
@@ -533,47 +539,7 @@ impl NativeRuntimeService {
         &self,
         snapshot: &RuntimeSnapshot,
     ) -> Result<(), NativeRuntimeError> {
-        if let Some(reference) = snapshot.native_session_ref.as_deref() {
-            let attempt = self
-                .ledger
-                .load_runtime_attempt(&snapshot.attempt_id)
-                .await?
-                .ok_or_else(|| {
-                    NativeRuntimeError::NotFound(format!("runtime attempt {}", snapshot.attempt_id))
-                })?;
-            if attempt.native_session_ref.is_none() {
-                self.ledger
-                    .update_runtime_native_ref(
-                        &snapshot.session_id,
-                        &snapshot.attempt_id,
-                        reference,
-                        self.trusted_now()?,
-                    )
-                    .await?;
-            }
-        }
-        if snapshot.status.is_terminal() {
-            if let (Some(transcript), Some(finished_at)) =
-                (snapshot.transcript.clone(), snapshot.finished_at)
-            {
-                self.ledger
-                    .finish_runtime_attempt(&RuntimeShutdownReport {
-                        session_id: snapshot.session_id.clone(),
-                        attempt_id: snapshot.attempt_id.clone(),
-                        method: RuntimeShutdownMethod::AlreadyExited,
-                        terminal_reason: if snapshot.exit_code == Some(0) {
-                            RuntimeTerminalReason::Completed
-                        } else {
-                            RuntimeTerminalReason::Failed
-                        },
-                        exit_code: snapshot.exit_code,
-                        transcript,
-                        finished_at,
-                    })
-                    .await?;
-            }
-        }
-        Ok(())
+        synchronize_runtime_snapshot(self.ledger.as_ref(), snapshot).await
     }
 
     async fn view(
@@ -662,6 +628,99 @@ impl NativeRuntimeService {
     }
 }
 
+async fn reconcile_runtime_attempt(
+    backend: Arc<dyn RuntimeBackend>,
+    ledger: Arc<dyn RuntimeLedgerPort>,
+    attempt_id: RuntimeAttemptId,
+) {
+    let mut after_event_index = 0;
+    loop {
+        let snapshot = match backend
+            .wait(RuntimeWaitRequest {
+                attempt_id: attempt_id.clone(),
+                after_event_index,
+                timeout_ms: 300_000,
+            })
+            .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                tracing::warn!(
+                    runtime_attempt_id = %attempt_id,
+                    %error,
+                    "native runtime terminal reconciler stopped"
+                );
+                return;
+            }
+        };
+        after_event_index = after_event_index.max(snapshot.event_index);
+        let terminal = snapshot.status.is_terminal();
+        if let Err(error) = synchronize_runtime_snapshot(ledger.as_ref(), &snapshot).await {
+            tracing::warn!(
+                runtime_attempt_id = %attempt_id,
+                %error,
+                "native runtime terminal snapshot could not be persisted"
+            );
+            return;
+        }
+        if terminal {
+            return;
+        }
+    }
+}
+
+async fn synchronize_runtime_snapshot(
+    ledger: &dyn RuntimeLedgerPort,
+    snapshot: &RuntimeSnapshot,
+) -> Result<(), NativeRuntimeError> {
+    if let Some(reference) = snapshot.native_session_ref.as_deref() {
+        let attempt = ledger
+            .load_runtime_attempt(&snapshot.attempt_id)
+            .await?
+            .ok_or_else(|| {
+                NativeRuntimeError::NotFound(format!("runtime attempt {}", snapshot.attempt_id))
+            })?;
+        if attempt.native_session_ref.is_none() {
+            ledger
+                .update_runtime_native_ref(
+                    &snapshot.session_id,
+                    &snapshot.attempt_id,
+                    reference,
+                    snapshot.last_output_at,
+                )
+                .await?;
+        }
+    }
+    if snapshot.status.is_terminal() {
+        let transcript = snapshot.transcript.clone().ok_or_else(|| {
+            NativeRuntimeError::Unavailable(
+                "terminal runtime snapshot has no archived transcript".to_string(),
+            )
+        })?;
+        let finished_at = snapshot.finished_at.ok_or_else(|| {
+            NativeRuntimeError::Unavailable(
+                "terminal runtime snapshot has no completion timestamp".to_string(),
+            )
+        })?;
+        ledger
+            .finish_runtime_attempt(&RuntimeShutdownReport {
+                session_id: snapshot.session_id.clone(),
+                attempt_id: snapshot.attempt_id.clone(),
+                method: RuntimeShutdownMethod::AlreadyExited,
+                terminal_reason: if snapshot.exit_code == Some(0) {
+                    RuntimeTerminalReason::Completed
+                } else {
+                    RuntimeTerminalReason::Failed
+                },
+                exit_code: snapshot.exit_code,
+                transcript,
+                finished_at,
+            })
+            .await?;
+    }
+    Ok(())
+}
+
 /// Stable digest used by registration without persisting environment values.
 #[must_use]
 pub fn provider_command_sha256(command: &ProviderCommand) -> String {
@@ -705,5 +764,337 @@ fn native_security_error(error: agentd_core::ports::SecurityError) -> NativeRunt
         agentd_core::ports::SecurityError::Unavailable(message) => {
             NativeRuntimeError::Unavailable(message)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    use agentd_core::ports::{
+        DurableRuntimeAttempt, DurableRuntimeSession, RuntimeHandle, RuntimeInputAck,
+        RuntimeProvider, RuntimeRecoveryRequest, RuntimeSandboxRef, RuntimeTranscriptRef,
+    };
+    use agentd_core::types::{
+        AgentProfileId, AuthorityKey, ProjectExecutionSnapshotRef, RuntimeAttemptStatus,
+        RuntimeSessionStatus, RuntimeTranscriptId, TaskRunId,
+    };
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct ReconcileBackend {
+        snapshots: Mutex<VecDeque<RuntimeSnapshot>>,
+        cursors: Mutex<Vec<u64>>,
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeBackend for ReconcileBackend {
+        async fn launch(
+            &self,
+            _request: RuntimeLaunchRequest,
+        ) -> Result<RuntimeHandle, NativeRuntimeError> {
+            unreachable!("launch is not used by the reconciler test")
+        }
+
+        async fn send_text(
+            &self,
+            _request: RuntimeTextInput,
+        ) -> Result<RuntimeInputAck, NativeRuntimeError> {
+            unreachable!("send_text is not used by the reconciler test")
+        }
+
+        async fn send_key(
+            &self,
+            _request: RuntimeKeyInput,
+        ) -> Result<RuntimeInputAck, NativeRuntimeError> {
+            unreachable!("send_key is not used by the reconciler test")
+        }
+
+        async fn resize(
+            &self,
+            _request: RuntimeResizeRequest,
+        ) -> Result<RuntimeSnapshot, NativeRuntimeError> {
+            unreachable!("resize is not used by the reconciler test")
+        }
+
+        async fn interrupt(
+            &self,
+            _request: RuntimeKeyInput,
+        ) -> Result<RuntimeInputAck, NativeRuntimeError> {
+            unreachable!("interrupt is not used by the reconciler test")
+        }
+
+        async fn shutdown(
+            &self,
+            _request: RuntimeShutdownRequest,
+        ) -> Result<RuntimeShutdownReport, NativeRuntimeError> {
+            unreachable!("shutdown is not used by the reconciler test")
+        }
+
+        async fn snapshot(
+            &self,
+            _attempt_id: &RuntimeAttemptId,
+        ) -> Result<Option<RuntimeSnapshot>, NativeRuntimeError> {
+            unreachable!("snapshot is not used by the reconciler test")
+        }
+
+        async fn events_after(
+            &self,
+            _attempt_id: &RuntimeAttemptId,
+            _after_event_index: u64,
+            _limit: u32,
+        ) -> Result<Vec<RuntimeEvent>, NativeRuntimeError> {
+            unreachable!("events_after is not used by the reconciler test")
+        }
+
+        async fn wait(
+            &self,
+            request: RuntimeWaitRequest,
+        ) -> Result<RuntimeSnapshot, NativeRuntimeError> {
+            self.cursors
+                .lock()
+                .expect("cursor lock")
+                .push(request.after_event_index);
+            self.snapshots
+                .lock()
+                .expect("snapshot lock")
+                .pop_front()
+                .ok_or_else(|| NativeRuntimeError::Unavailable("no test snapshot".to_string()))
+        }
+
+        async fn recover(
+            &self,
+            _request: &RuntimeRecoveryRequest,
+        ) -> Result<RuntimeRecoveryDisposition, NativeRuntimeError> {
+            unreachable!("recover is not used by the reconciler test")
+        }
+
+        async fn reap_idle(
+            &self,
+            _observed_at: i64,
+        ) -> Result<Vec<RuntimeShutdownReport>, NativeRuntimeError> {
+            unreachable!("reap_idle is not used by the reconciler test")
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordingLedger {
+        reports: Mutex<Vec<RuntimeShutdownReport>>,
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeEventPort for RecordingLedger {
+        async fn append_runtime_event(
+            &self,
+            _event: &RuntimeEvent,
+        ) -> Result<RuntimeEvent, NativeRuntimeError> {
+            unreachable!("append_runtime_event is not used by the reconciler test")
+        }
+
+        async fn runtime_events_after(
+            &self,
+            _session_id: &RuntimeSessionId,
+            _after_event_index: u64,
+            _limit: u32,
+        ) -> Result<Vec<RuntimeEvent>, NativeRuntimeError> {
+            unreachable!("runtime_events_after is not used by the reconciler test")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeLedgerPort for RecordingLedger {
+        async fn register_runtime_session(
+            &self,
+            _registration: &RuntimeSessionRegistration,
+        ) -> Result<DurableRuntimeSession, NativeRuntimeError> {
+            unreachable!("register_runtime_session is not used by the reconciler test")
+        }
+
+        async fn begin_runtime_attempt(
+            &self,
+            _session_id: &RuntimeSessionId,
+            _attempt_id: &RuntimeAttemptId,
+            _worker_incarnation_id: &WorkerIncarnationId,
+            _host_instance_id: &str,
+            _started_at: i64,
+        ) -> Result<DurableRuntimeAttempt, NativeRuntimeError> {
+            unreachable!("begin_runtime_attempt is not used by the reconciler test")
+        }
+
+        async fn mark_runtime_attempt_running(
+            &self,
+            _handle: &RuntimeHandle,
+        ) -> Result<DurableRuntimeAttempt, NativeRuntimeError> {
+            unreachable!("mark_runtime_attempt_running is not used by the reconciler test")
+        }
+
+        async fn update_runtime_native_ref(
+            &self,
+            _session_id: &RuntimeSessionId,
+            _attempt_id: &RuntimeAttemptId,
+            _native_session_ref: &str,
+            _observed_at: i64,
+        ) -> Result<DurableRuntimeAttempt, NativeRuntimeError> {
+            unreachable!("update_runtime_native_ref is not used by the reconciler test")
+        }
+
+        async fn mark_runtime_attempt_gone(
+            &self,
+            _session_id: &RuntimeSessionId,
+            _attempt_id: &RuntimeAttemptId,
+            _native_session_ref: Option<&str>,
+            _observed_at: i64,
+        ) -> Result<DurableRuntimeSession, NativeRuntimeError> {
+            unreachable!("mark_runtime_attempt_gone is not used by the reconciler test")
+        }
+
+        async fn finish_runtime_attempt(
+            &self,
+            report: &RuntimeShutdownReport,
+        ) -> Result<DurableRuntimeSession, NativeRuntimeError> {
+            self.reports
+                .lock()
+                .expect("report lock")
+                .push(report.clone());
+            Ok(DurableRuntimeSession {
+                registration: RuntimeSessionRegistration {
+                    session_id: report.session_id.clone(),
+                    execution_task_id: TaskRunId::new(),
+                    agent_profile_id: AgentProfileId::new(),
+                    snapshot_ref: ProjectExecutionSnapshotRef::new(
+                        AuthorityKey::new("test-authority").expect("authority key"),
+                        "snapshot",
+                        "version-1",
+                    )
+                    .expect("snapshot ref"),
+                    snapshot_content_sha256: "b".repeat(64),
+                    provider: RuntimeProvider::Codex,
+                    command_sha256: "c".repeat(64),
+                    sandbox: RuntimeSandboxRef {
+                        sandbox_id: "sb_test".to_string(),
+                        profile_sha256: "d".repeat(64),
+                        expires_at: 100,
+                    },
+                    max_capture_bytes: 1024,
+                    max_transcript_bytes: 4096,
+                    idle_timeout_ms: 1000,
+                    created_at: 10,
+                },
+                status: if report.terminal_reason == RuntimeTerminalReason::Completed {
+                    RuntimeSessionStatus::Completed
+                } else {
+                    RuntimeSessionStatus::Failed
+                },
+                current_attempt_id: Some(report.attempt_id.clone()),
+                native_session_ref: None,
+                transcript: Some(report.transcript.clone()),
+                terminal_reason: Some(report.terminal_reason),
+                record_version: 3,
+                updated_at: report.finished_at,
+            })
+        }
+
+        async fn record_runtime_recovery(
+            &self,
+            _record: &RuntimeRecoveryRecord,
+        ) -> Result<(), NativeRuntimeError> {
+            unreachable!("record_runtime_recovery is not used by the reconciler test")
+        }
+
+        async fn load_runtime_session(
+            &self,
+            _session_id: &RuntimeSessionId,
+        ) -> Result<Option<DurableRuntimeSession>, NativeRuntimeError> {
+            unreachable!("load_runtime_session is not used by the reconciler test")
+        }
+
+        async fn load_runtime_attempt(
+            &self,
+            _attempt_id: &RuntimeAttemptId,
+        ) -> Result<Option<DurableRuntimeAttempt>, NativeRuntimeError> {
+            unreachable!("terminal snapshots without provider refs do not load attempts")
+        }
+
+        async fn recoverable_runtime_sessions(
+            &self,
+            _limit: u32,
+        ) -> Result<Vec<DurableRuntimeSession>, NativeRuntimeError> {
+            unreachable!("recoverable_runtime_sessions is not used by the reconciler test")
+        }
+    }
+
+    fn snapshot(
+        session_id: &RuntimeSessionId,
+        attempt_id: &RuntimeAttemptId,
+        status: RuntimeAttemptStatus,
+        event_index: u64,
+        terminal: bool,
+    ) -> RuntimeSnapshot {
+        RuntimeSnapshot {
+            session_id: session_id.clone(),
+            attempt_id: attempt_id.clone(),
+            provider: RuntimeProvider::Codex,
+            status,
+            pid: Some(42),
+            dimensions: RuntimeDimensions {
+                rows: 24,
+                columns: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            event_index,
+            output_tail: String::new(),
+            output_truncated: false,
+            native_session_ref: None,
+            transcript: terminal.then(|| RuntimeTranscriptRef {
+                id: RuntimeTranscriptId::new(),
+                content_sha256: "a".repeat(64),
+                storage_ref: "sha256/aa/archive".to_string(),
+                size_bytes: 17,
+                truncated: false,
+                archived_at: 12,
+            }),
+            exit_code: terminal.then_some(0),
+            started_at: 10,
+            last_output_at: 11,
+            finished_at: terminal.then_some(12),
+        }
+    }
+
+    #[tokio::test]
+    async fn background_reconciler_waits_for_terminal_snapshot_and_persists_it() {
+        let session_id = RuntimeSessionId::new();
+        let attempt_id = RuntimeAttemptId::new();
+        let backend = Arc::new(ReconcileBackend {
+            snapshots: Mutex::new(VecDeque::from([
+                snapshot(
+                    &session_id,
+                    &attempt_id,
+                    RuntimeAttemptStatus::Running,
+                    4,
+                    false,
+                ),
+                snapshot(
+                    &session_id,
+                    &attempt_id,
+                    RuntimeAttemptStatus::Exited,
+                    7,
+                    true,
+                ),
+            ])),
+            cursors: Mutex::new(Vec::new()),
+        });
+        let ledger = Arc::new(RecordingLedger::default());
+
+        reconcile_runtime_attempt(backend.clone(), ledger.clone(), attempt_id.clone()).await;
+
+        assert_eq!(*backend.cursors.lock().expect("cursor lock"), [0, 4]);
+        let reports = ledger.reports.lock().expect("report lock");
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].attempt_id, attempt_id);
+        assert_eq!(reports[0].terminal_reason, RuntimeTerminalReason::Completed);
+        assert_eq!(reports[0].exit_code, Some(0));
     }
 }

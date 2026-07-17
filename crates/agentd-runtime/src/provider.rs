@@ -36,8 +36,12 @@ impl RuntimeProviderAdapter {
             validate_native_ref(reference)?;
             match configuration.provider {
                 RuntimeProvider::Codex => {
-                    arguments.push("resume".to_string());
-                    arguments.push(reference.to_string());
+                    if arguments.first().is_some_and(|argument| argument == "exec") {
+                        arguments = codex_exec_resume_arguments(&arguments, reference)?;
+                    } else {
+                        arguments.push("resume".to_string());
+                        arguments.push(reference.to_string());
+                    }
                 }
                 RuntimeProvider::ClaudeCode => {
                     arguments.push("--resume".to_string());
@@ -82,6 +86,35 @@ impl RuntimeProviderAdapter {
         let text = std::str::from_utf8(redacted_output).ok()?;
         json_native_ref(text, provider).or_else(|| text_native_ref(text, provider))
     }
+}
+
+fn codex_exec_resume_arguments(
+    initial_arguments: &[String],
+    reference: &str,
+) -> Result<Vec<String>, NativeRuntimeError> {
+    if initial_arguments.len() < 2 {
+        return Err(NativeRuntimeError::Invalid(
+            "Codex exec resume requires an initial prompt argument".to_string(),
+        ));
+    }
+    let mut arguments = vec!["exec".to_string(), "resume".to_string()];
+    let automation_arguments = &initial_arguments[1..initial_arguments.len() - 1];
+    let mut index = 0;
+    while index < automation_arguments.len() {
+        if automation_arguments[index] == "--color" {
+            if index + 1 >= automation_arguments.len() {
+                return Err(NativeRuntimeError::Invalid(
+                    "Codex exec color option has no value".to_string(),
+                ));
+            }
+            index += 2;
+            continue;
+        }
+        arguments.push(automation_arguments[index].clone());
+        index += 1;
+    }
+    arguments.push(reference.to_string());
+    Ok(arguments)
 }
 
 fn validate_configuration(configuration: &ProviderCommand) -> Result<(), NativeRuntimeError> {

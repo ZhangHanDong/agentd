@@ -591,8 +591,25 @@ fn provider_command(
     request: &agentd_core::types::SpawnRequest,
     worktree: &Path,
 ) -> ProviderCommand {
-    let (program, mut arguments) = match provider {
-        RuntimeProvider::Codex => (
+    let initial_prompt = request
+        .initial_prompt
+        .as_ref()
+        .filter(|prompt| !prompt.is_empty());
+    let (program, arguments) = match (provider, initial_prompt) {
+        (RuntimeProvider::Codex, Some(prompt)) => (
+            "codex".to_string(),
+            vec![
+                "exec".to_string(),
+                "--json".to_string(),
+                "--ignore-user-config".to_string(),
+                "--color".to_string(),
+                "never".to_string(),
+                "--dangerously-bypass-approvals-and-sandbox".to_string(),
+                "--skip-git-repo-check".to_string(),
+                prompt.clone(),
+            ],
+        ),
+        (RuntimeProvider::Codex, None) => (
             "codex".to_string(),
             vec![
                 "--ask-for-approval".to_string(),
@@ -602,21 +619,12 @@ fn provider_command(
                 "--no-alt-screen".to_string(),
             ],
         ),
-        RuntimeProvider::ClaudeCode => (
+        (RuntimeProvider::ClaudeCode, _) => (
             "claude".to_string(),
             vec!["--dangerously-skip-permissions".to_string()],
         ),
-        RuntimeProvider::Custom => unreachable!("spawn request has no custom CLI variant"),
+        (RuntimeProvider::Custom, _) => unreachable!("spawn request has no custom CLI variant"),
     };
-    // Codex can discard PTY input written before its TUI finishes initializing.
-    if provider == RuntimeProvider::Codex
-        && let Some(prompt) = request
-            .initial_prompt
-            .as_ref()
-            .filter(|prompt| !prompt.is_empty())
-    {
-        arguments.push(prompt.clone());
-    }
     ProviderCommand {
         provider,
         program,
@@ -762,14 +770,41 @@ mod tests {
     }
 
     #[test]
-    fn codex_provider_starts_with_initial_prompt_as_an_argument() {
+    fn codex_provider_uses_one_shot_json_exec_for_assigned_work() {
         let request = spawn_request(Some("implement the assigned task"));
 
         let command = provider_command(RuntimeProvider::Codex, &request, &request.worktree);
 
         assert_eq!(
-            command.arguments.last().map(String::as_str),
-            Some("implement the assigned task")
+            command.arguments,
+            [
+                "exec",
+                "--json",
+                "--ignore-user-config",
+                "--color",
+                "never",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--skip-git-repo-check",
+                "implement the assigned task",
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_provider_preserves_interactive_mode_without_assigned_work() {
+        let request = spawn_request(None);
+
+        let command = provider_command(RuntimeProvider::Codex, &request, &request.worktree);
+
+        assert_eq!(
+            command.arguments,
+            [
+                "--ask-for-approval",
+                "never",
+                "--sandbox",
+                "danger-full-access",
+                "--no-alt-screen",
+            ]
         );
     }
 }
