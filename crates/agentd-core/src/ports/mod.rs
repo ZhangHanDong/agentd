@@ -8,6 +8,7 @@ pub mod backend;
 pub mod certification;
 pub mod clock;
 pub mod command_runner;
+pub mod cutover;
 pub mod execution_evidence;
 pub mod fleet_scheduler;
 pub mod matrix_gateway;
@@ -41,6 +42,11 @@ pub use certification::{
 };
 pub use clock::Clock;
 pub use command_runner::{CommandError, CommandOutput, CommandRunner, RunOpts};
+pub use cutover::{
+    BackupManifest, CursorHandoff, CutoverError, CutoverLedgerPort, CutoverPlan, CutoverRun,
+    CutoverSourceManifest, CutoverState, CutoverStepReceipt, CutoverSurface, CutoverTransition,
+    LegacyIdMapping, ServiceInstallation, ServiceModel, ShadowDecision,
+};
 pub use execution_evidence::{
     ArtifactCursor, ArtifactIndexPort, ArtifactListRequest, ArtifactPage, AuditActorKind,
     AuditPage, AuditReadRequest, CertificationReferenceAppend, CertificationReferenceKind,

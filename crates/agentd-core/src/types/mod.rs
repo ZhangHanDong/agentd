@@ -15,11 +15,12 @@ pub use enterprise::{
 };
 pub use handle::{AgentHandle, AgentStatus, BackendKind, CliKind, LaunchStrategy, SpawnRequest};
 pub use ids::{
-    AgentId, AgentProfileId, ArtifactUploadId, AuditEventId, CertificationRequestId,
-    CertificationResultId, EvidenceEnvelopeId, ExecutionArtifactId, FleetOutboxId,
-    ForgeAdmissionId, LeaseId, MatrixCommandId, MatrixGatewayOutboxId, NodeId, ReviewRunId, RunId,
-    RuntimeAttemptId, RuntimeEventId, RuntimeSessionId, RuntimeTranscriptId, SkillInstallationId,
-    TaskRunId, WorkerId, WorkerIncarnationId,
+    AgentId, AgentProfileId, ArtifactUploadId, AuditEventId, BackupManifestId,
+    CertificationRequestId, CertificationResultId, CutoverId, CutoverReceiptId, CutoverSourceId,
+    EvidenceEnvelopeId, ExecutionArtifactId, FleetOutboxId, ForgeAdmissionId, LeaseId,
+    MatrixCommandId, MatrixGatewayOutboxId, NodeId, ReviewRunId, RunId, RuntimeAttemptId,
+    RuntimeEventId, RuntimeSessionId, RuntimeTranscriptId, ServiceInstallationId,
+    SkillInstallationId, TaskRunId, WorkerId, WorkerIncarnationId,
 };
 pub use outcome::{Artifact, ArtifactKind, MempalWrite, Outcome, Status};
 pub use principal::{

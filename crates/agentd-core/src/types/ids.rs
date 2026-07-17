@@ -65,6 +65,11 @@ id_newtype!(SkillInstallationId, "si");
 id_newtype!(ForgeAdmissionId, "fr");
 id_newtype!(RuntimeEventId, "re");
 id_newtype!(RuntimeTranscriptId, "rx");
+id_newtype!(CutoverId, "co");
+id_newtype!(CutoverReceiptId, "ct");
+id_newtype!(CutoverSourceId, "sx");
+id_newtype!(BackupManifestId, "bm");
+id_newtype!(ServiceInstallationId, "sv");
 
 impl NodeId {
     /// `NodeId`s in DOT files are operator-authored; preserve as-is.
