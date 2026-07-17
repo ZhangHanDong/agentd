@@ -16,6 +16,7 @@ pub mod matrix_gateway;
 pub mod mempal;
 pub mod openfab;
 pub mod openfab_http;
+pub mod runtime;
 pub mod security;
 pub mod stdio_mcp;
 
@@ -26,4 +27,8 @@ pub use cli::{
 pub use clock::SystemClock;
 pub use host::ProductionRunHost;
 pub use mempal::OfflineMempal;
+pub use runtime::{
+    NativeRuntimeCompositionConfig, NativeRuntimeService, NativeRuntimeStartRequest,
+    NativeRuntimeView, compose_native_runtime, provider_command_sha256,
+};
 pub use security::SecurityRuntimeMode;

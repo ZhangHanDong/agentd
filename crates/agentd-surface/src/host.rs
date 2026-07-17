@@ -5,7 +5,13 @@
 //! tools must not hold it directly — they hold `Arc<dyn RunHost>`.
 
 use agentd_core::CoreError;
-use agentd_core::types::{NodeId, ReviewRunId, RunId, TaskRunId};
+use agentd_core::ports::{
+    RuntimeEvent, RuntimeInputAck, RuntimeKeyInput, RuntimeResizeRequest, RuntimeShutdownReport,
+    RuntimeShutdownRequest, RuntimeSnapshot, RuntimeTextInput, RuntimeView, RuntimeWaitRequest,
+};
+use agentd_core::types::{
+    CapabilityAdmission, NodeId, ReviewRunId, RunId, RuntimeSessionId, TaskRunId,
+};
 use agentd_core::{EngineEvent, RunProgress};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1339,4 +1345,83 @@ pub trait RunHost: Send + Sync {
         &self,
         input: GroupReadRequest,
     ) -> Result<GroupReadResult, CoreError>;
+
+    async fn native_runtime_snapshot(
+        &self,
+        _session_id: &RuntimeSessionId,
+    ) -> Result<Option<RuntimeView>, CoreError> {
+        Err(CoreError::Backend(
+            "native runtime is not configured".to_string(),
+        ))
+    }
+
+    async fn native_runtime_events(
+        &self,
+        _session_id: &RuntimeSessionId,
+        _after_event_index: u64,
+        _limit: u32,
+    ) -> Result<Vec<RuntimeEvent>, CoreError> {
+        Err(CoreError::Backend(
+            "native runtime is not configured".to_string(),
+        ))
+    }
+
+    async fn native_runtime_wait(
+        &self,
+        _request: RuntimeWaitRequest,
+    ) -> Result<RuntimeView, CoreError> {
+        Err(CoreError::Backend(
+            "native runtime is not configured".to_string(),
+        ))
+    }
+
+    async fn native_runtime_send_text(
+        &self,
+        _admission: CapabilityAdmission,
+        _request: RuntimeTextInput,
+    ) -> Result<RuntimeInputAck, CoreError> {
+        Err(CoreError::Backend(
+            "native runtime is not configured".to_string(),
+        ))
+    }
+
+    async fn native_runtime_send_key(
+        &self,
+        _admission: CapabilityAdmission,
+        _request: RuntimeKeyInput,
+    ) -> Result<RuntimeInputAck, CoreError> {
+        Err(CoreError::Backend(
+            "native runtime is not configured".to_string(),
+        ))
+    }
+
+    async fn native_runtime_resize(
+        &self,
+        _admission: CapabilityAdmission,
+        _request: RuntimeResizeRequest,
+    ) -> Result<RuntimeSnapshot, CoreError> {
+        Err(CoreError::Backend(
+            "native runtime is not configured".to_string(),
+        ))
+    }
+
+    async fn native_runtime_interrupt(
+        &self,
+        _admission: CapabilityAdmission,
+        _request: RuntimeKeyInput,
+    ) -> Result<RuntimeInputAck, CoreError> {
+        Err(CoreError::Backend(
+            "native runtime is not configured".to_string(),
+        ))
+    }
+
+    async fn native_runtime_shutdown(
+        &self,
+        _admission: CapabilityAdmission,
+        _request: RuntimeShutdownRequest,
+    ) -> Result<RuntimeShutdownReport, CoreError> {
+        Err(CoreError::Backend(
+            "native runtime is not configured".to_string(),
+        ))
+    }
 }

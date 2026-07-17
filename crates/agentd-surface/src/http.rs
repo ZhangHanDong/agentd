@@ -27,7 +27,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
-use agentd_core::types::RunId;
+use agentd_core::ports::{
+    RuntimeDimensions, RuntimeEvent, RuntimeKey, RuntimeKeyInput, RuntimeResizeRequest,
+    RuntimeShutdownRequest, RuntimeTerminalReason, RuntimeTextInput, RuntimeWaitRequest,
+};
+use agentd_core::types::{CapabilityAdmission, RunId, RuntimeAttemptId, RuntimeSessionId};
 use agentd_core::{CoreError, RunProgress};
 
 use crate::error::SurfaceError;
@@ -137,6 +141,23 @@ pub fn router(state: AppState) -> Router {
         .route("/runs", post(start_run).get(get_runs))
         .route("/runs/:id", get(get_run))
         .route("/runs/:id/events", get(run_events))
+        .route("/api/runtime/sessions/:id", get(runtime_snapshot))
+        .route("/api/runtime/sessions/:id/events", get(runtime_events))
+        .route("/api/runtime/sessions/:id/wait", get(runtime_wait))
+        .route(
+            "/api/runtime/sessions/:id/input/text",
+            post(runtime_send_text),
+        )
+        .route(
+            "/api/runtime/sessions/:id/input/key",
+            post(runtime_send_key),
+        )
+        .route("/api/runtime/sessions/:id/resize", post(runtime_resize))
+        .route(
+            "/api/runtime/sessions/:id/interrupt",
+            post(runtime_interrupt),
+        )
+        .route("/api/runtime/sessions/:id/shutdown", post(runtime_shutdown))
         .route("/api/media/stage", post(stage_media))
         .route("/api/media/fetch", get(fetch_media))
         .route("/api/stream", get(relay_stream))
@@ -1672,6 +1693,24 @@ fn agent_error_response(e: CoreError) -> Response {
     }
 }
 
+fn runtime_error_response(error: CoreError) -> Response {
+    let message = error.to_string();
+    let status = if message.contains("not found") {
+        StatusCode::NOT_FOUND
+    } else if message.contains("denied") || message.contains("outside the current admitted") {
+        StatusCode::FORBIDDEN
+    } else if message.contains("conflict") || message.contains("cannot start") {
+        StatusCode::CONFLICT
+    } else if message.contains("invalid") || message.contains("exceeds") {
+        StatusCode::BAD_REQUEST
+    } else if message.contains("not configured") || message.contains("unavailable") {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    (status, Json(json!({ "error": message }))).into_response()
+}
+
 fn surface_error_response(e: SurfaceError) -> Response {
     match e {
         SurfaceError::BadRequest(message) => {
@@ -1715,6 +1754,369 @@ fn progress_kind(progress: &RunProgress) -> &'static str {
 #[allow(clippy::unused_async)] // axum handlers are async; this one has nothing to await
 async fn healthz() -> &'static str {
     "ok"
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeEventsQuery {
+    #[serde(default)]
+    after_event_index: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeWaitQuery {
+    attempt_id: String,
+    #[serde(default)]
+    after_event_index: u64,
+    #[serde(default = "default_runtime_wait_ms")]
+    timeout_ms: u64,
+}
+
+const fn default_runtime_wait_ms() -> u64 {
+    25_000
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeTextRequest {
+    admission: CapabilityAdmission,
+    attempt_id: String,
+    idempotency_key: String,
+    text: String,
+    #[serde(default)]
+    submit: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeKeyRequest {
+    admission: CapabilityAdmission,
+    attempt_id: String,
+    idempotency_key: String,
+    key: RuntimeKey,
+    #[serde(default = "default_key_repeat")]
+    repeat: u16,
+}
+
+const fn default_key_repeat() -> u16 {
+    1
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeResizeBody {
+    admission: CapabilityAdmission,
+    attempt_id: String,
+    idempotency_key: String,
+    dimensions: RuntimeDimensions,
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeShutdownBody {
+    admission: CapabilityAdmission,
+    attempt_id: String,
+    idempotency_key: String,
+    #[serde(default = "default_graceful_timeout_ms")]
+    graceful_timeout_ms: u64,
+    #[serde(default = "default_interrupt_timeout_ms")]
+    interrupt_timeout_ms: u64,
+    reason: RuntimeTerminalReason,
+}
+
+const fn default_graceful_timeout_ms() -> u64 {
+    5_000
+}
+
+const fn default_interrupt_timeout_ms() -> u64 {
+    2_000
+}
+
+async fn runtime_snapshot(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    match state
+        .host
+        .native_runtime_snapshot(&RuntimeSessionId::from_string(id))
+        .await
+    {
+        Ok(Some(view)) => Json(view).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "runtime_not_found" })),
+        )
+            .into_response(),
+        Err(error) => runtime_error_response(error),
+    }
+}
+
+async fn runtime_wait(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<RuntimeWaitQuery>,
+) -> Response {
+    let attempt_id = match runtime_attempt_for_session(&state.host, &id, query.attempt_id).await {
+        Ok(attempt_id) => attempt_id,
+        Err(response) => return response,
+    };
+    match state
+        .host
+        .native_runtime_wait(RuntimeWaitRequest {
+            attempt_id,
+            after_event_index: query.after_event_index,
+            timeout_ms: query.timeout_ms,
+        })
+        .await
+    {
+        Ok(view) => Json(view).into_response(),
+        Err(error) => runtime_error_response(error),
+    }
+}
+
+async fn runtime_events(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<RuntimeEventsQuery>,
+) -> Response {
+    let session_id = RuntimeSessionId::from_string(id);
+    match state.host.native_runtime_snapshot(&session_id).await {
+        Ok(Some(_)) => Sse::new(native_runtime_event_stream(
+            state.host,
+            session_id,
+            query.after_event_index,
+        ))
+        .keep_alive(KeepAlive::default())
+        .into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "runtime_not_found" })),
+        )
+            .into_response(),
+        Err(error) => runtime_error_response(error),
+    }
+}
+
+fn native_runtime_event_stream(
+    host: Arc<dyn RunHost>,
+    session_id: RuntimeSessionId,
+    mut cursor: u64,
+) -> impl Stream<Item = Result<Event, Infallible>> {
+    stream! {
+        loop {
+            let events = match host.native_runtime_events(&session_id, cursor, 1_000).await {
+                Ok(events) => events,
+                Err(error) => {
+                    yield Ok(Event::default().event("runtime_stream_error").data(
+                        json!({ "error": error.to_string() }).to_string(),
+                    ));
+                    break;
+                }
+            };
+            for event in events {
+                cursor = cursor.max(event.event_index);
+                let terminal = matches!(
+                    event.kind,
+                    agentd_core::ports::RuntimeEventKind::Shutdown
+                        | agentd_core::ports::RuntimeEventKind::RuntimeGone
+                );
+                yield Ok(runtime_event_frame(&event));
+                if terminal {
+                    return;
+                }
+            }
+            let view = match host.native_runtime_snapshot(&session_id).await {
+                Ok(Some(view)) => view,
+                _ => break,
+            };
+            if view.session.status.is_terminal() {
+                break;
+            }
+            let Some(attempt) = view.attempt else {
+                break;
+            };
+            if host
+                .native_runtime_wait(RuntimeWaitRequest {
+                    attempt_id: attempt.attempt_id,
+                    after_event_index: cursor,
+                    timeout_ms: 25_000,
+                })
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    }
+}
+
+fn runtime_event_frame(event: &RuntimeEvent) -> Event {
+    let data = serde_json::to_string(event)
+        .unwrap_or_else(|_| json!({ "error": "runtime_event_serialization" }).to_string());
+    Event::default()
+        .id(event.event_index.to_string())
+        .event(event.kind.as_str())
+        .data(data)
+}
+
+async fn runtime_send_text(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<RuntimeTextRequest>,
+) -> Response {
+    let attempt_id = match runtime_attempt_for_session(&state.host, &id, body.attempt_id).await {
+        Ok(attempt_id) => attempt_id,
+        Err(response) => return response,
+    };
+    match state
+        .host
+        .native_runtime_send_text(
+            body.admission,
+            RuntimeTextInput {
+                attempt_id,
+                idempotency_key: body.idempotency_key,
+                text: body.text,
+                submit: body.submit,
+                observed_at: 0,
+            },
+        )
+        .await
+    {
+        Ok(ack) => Json(ack).into_response(),
+        Err(error) => runtime_error_response(error),
+    }
+}
+
+async fn runtime_send_key(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<RuntimeKeyRequest>,
+) -> Response {
+    let attempt_id = match runtime_attempt_for_session(&state.host, &id, body.attempt_id).await {
+        Ok(attempt_id) => attempt_id,
+        Err(response) => return response,
+    };
+    match state
+        .host
+        .native_runtime_send_key(
+            body.admission,
+            RuntimeKeyInput {
+                attempt_id,
+                idempotency_key: body.idempotency_key,
+                key: body.key,
+                repeat: body.repeat,
+                observed_at: 0,
+            },
+        )
+        .await
+    {
+        Ok(ack) => Json(ack).into_response(),
+        Err(error) => runtime_error_response(error),
+    }
+}
+
+async fn runtime_resize(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<RuntimeResizeBody>,
+) -> Response {
+    let attempt_id = match runtime_attempt_for_session(&state.host, &id, body.attempt_id).await {
+        Ok(attempt_id) => attempt_id,
+        Err(response) => return response,
+    };
+    match state
+        .host
+        .native_runtime_resize(
+            body.admission,
+            RuntimeResizeRequest {
+                attempt_id,
+                idempotency_key: body.idempotency_key,
+                dimensions: body.dimensions,
+                observed_at: 0,
+            },
+        )
+        .await
+    {
+        Ok(snapshot) => Json(snapshot).into_response(),
+        Err(error) => runtime_error_response(error),
+    }
+}
+
+async fn runtime_interrupt(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<RuntimeKeyRequest>,
+) -> Response {
+    let attempt_id = match runtime_attempt_for_session(&state.host, &id, body.attempt_id).await {
+        Ok(attempt_id) => attempt_id,
+        Err(response) => return response,
+    };
+    match state
+        .host
+        .native_runtime_interrupt(
+            body.admission,
+            RuntimeKeyInput {
+                attempt_id,
+                idempotency_key: body.idempotency_key,
+                key: RuntimeKey::CtrlC,
+                repeat: body.repeat,
+                observed_at: 0,
+            },
+        )
+        .await
+    {
+        Ok(ack) => Json(ack).into_response(),
+        Err(error) => runtime_error_response(error),
+    }
+}
+
+async fn runtime_shutdown(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<RuntimeShutdownBody>,
+) -> Response {
+    let attempt_id = match runtime_attempt_for_session(&state.host, &id, body.attempt_id).await {
+        Ok(attempt_id) => attempt_id,
+        Err(response) => return response,
+    };
+    match state
+        .host
+        .native_runtime_shutdown(
+            body.admission,
+            RuntimeShutdownRequest {
+                attempt_id,
+                idempotency_key: body.idempotency_key,
+                graceful_timeout_ms: body.graceful_timeout_ms,
+                interrupt_timeout_ms: body.interrupt_timeout_ms,
+                reason: body.reason,
+                observed_at: 0,
+            },
+        )
+        .await
+    {
+        Ok(report) => Json(report).into_response(),
+        Err(error) => runtime_error_response(error),
+    }
+}
+
+async fn runtime_attempt_for_session(
+    host: &Arc<dyn RunHost>,
+    session_id: &str,
+    attempt_id: String,
+) -> Result<RuntimeAttemptId, Response> {
+    let session_id = RuntimeSessionId::from_string(session_id.to_string());
+    let attempt_id = RuntimeAttemptId::from_string(attempt_id);
+    match host.native_runtime_snapshot(&session_id).await {
+        Ok(Some(view)) if view.session.current_attempt_id.as_ref() == Some(&attempt_id) => {
+            Ok(attempt_id)
+        }
+        Ok(Some(_)) => Err((
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "runtime_attempt_session_mismatch" })),
+        )
+            .into_response()),
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "runtime_not_found" })),
+        )
+            .into_response()),
+        Err(error) => Err(runtime_error_response(error)),
+    }
 }
 
 /// `GET /runs/:id` — the `query_run` snapshot as JSON; `not_found` → 404.

@@ -27,6 +27,126 @@ pub enum Cmd {
     /// Agent-chat replacement parity operations.
     #[command(subcommand)]
     Parity(ParityCmd),
+    /// Native runtime inspection and control.
+    #[command(subcommand)]
+    Runtime(RuntimeCmd),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RuntimeCmd {
+    /// Inspect one logical runtime session.
+    Inspect(RuntimeInspectArgs),
+    /// Wait for semantic runtime progress.
+    Wait(RuntimeWaitArgs),
+    /// Send text to the current native attempt.
+    SendText(RuntimeSendTextArgs),
+    /// Interrupt the current native attempt with Ctrl-C.
+    Interrupt(RuntimeInterruptArgs),
+    /// Gracefully stop the current native attempt.
+    Shutdown(RuntimeShutdownArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct RuntimeDaemonArgs {
+    /// The agentd daemon base URL.
+    #[arg(long, default_value = "http://127.0.0.1:8787")]
+    pub daemon_url: String,
+    /// Operator bearer token. Falls back to `AGENTD_API_TOKEN`.
+    #[arg(long)]
+    pub api_token: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct RuntimeInspectArgs {
+    pub session_id: String,
+    #[command(flatten)]
+    pub daemon: RuntimeDaemonArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct RuntimeWaitArgs {
+    pub session_id: String,
+    #[arg(long)]
+    pub attempt_id: String,
+    #[arg(long, default_value_t = 0)]
+    pub after_event_index: u64,
+    #[arg(long, default_value_t = 25_000)]
+    pub timeout_ms: u64,
+    #[command(flatten)]
+    pub daemon: RuntimeDaemonArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct RuntimeSendTextArgs {
+    pub session_id: String,
+    #[arg(long)]
+    pub attempt_id: String,
+    #[arg(long)]
+    pub admission_file: PathBuf,
+    #[arg(long)]
+    pub idempotency_key: String,
+    #[arg(long)]
+    pub text: String,
+    #[arg(long)]
+    pub submit: bool,
+    #[command(flatten)]
+    pub daemon: RuntimeDaemonArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct RuntimeInterruptArgs {
+    pub session_id: String,
+    #[arg(long)]
+    pub attempt_id: String,
+    #[arg(long)]
+    pub admission_file: PathBuf,
+    #[arg(long)]
+    pub idempotency_key: String,
+    #[command(flatten)]
+    pub daemon: RuntimeDaemonArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct RuntimeShutdownArgs {
+    pub session_id: String,
+    #[arg(long)]
+    pub attempt_id: String,
+    #[arg(long)]
+    pub admission_file: PathBuf,
+    #[arg(long)]
+    pub idempotency_key: String,
+    #[arg(long, value_enum, default_value_t = RuntimeShutdownReason::Cancelled)]
+    pub reason: RuntimeShutdownReason,
+    #[arg(long, default_value_t = 5_000)]
+    pub graceful_timeout_ms: u64,
+    #[arg(long, default_value_t = 2_000)]
+    pub interrupt_timeout_ms: u64,
+    #[command(flatten)]
+    pub daemon: RuntimeDaemonArgs,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum RuntimeShutdownReason {
+    Completed,
+    Failed,
+    Cancelled,
+    IdleTimeout,
+    RuntimeGone,
+    WorkerLost,
+}
+
+impl RuntimeShutdownReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::IdleTimeout => "idle_timeout",
+            Self::RuntimeGone => "runtime_gone",
+            Self::WorkerLost => "worker_lost",
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]

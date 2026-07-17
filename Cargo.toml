@@ -9,6 +9,7 @@ members = [
     "crates/agentd-matrix",
     "crates/agentd-project-authority",
     "crates/agentd-security",
+    "crates/agentd-runtime",
     "crates/agentd-surface",
     "crates/agentd-bin",
     "crates/agentctl",
@@ -70,6 +71,7 @@ sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "macros", "migr
 axum = "0.7"
 matrix-sdk = { version = "0.9", default-features = false, features = ["e2e-encryption", "sqlite"] }
 octocrab = "0.42"
+portable-pty = "0.9.0"
 rmcp = { version = "2.1", default-features = false, features = ["server"] }
 
 # Dev-only

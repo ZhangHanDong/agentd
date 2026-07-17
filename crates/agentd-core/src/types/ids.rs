@@ -63,6 +63,8 @@ id_newtype!(CertificationRequestId, "cr");
 id_newtype!(CertificationResultId, "ce");
 id_newtype!(SkillInstallationId, "si");
 id_newtype!(ForgeAdmissionId, "fr");
+id_newtype!(RuntimeEventId, "re");
+id_newtype!(RuntimeTranscriptId, "rx");
 
 impl NodeId {
     /// `NodeId`s in DOT files are operator-authored; preserve as-is.

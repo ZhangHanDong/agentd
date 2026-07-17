@@ -11,13 +11,14 @@ use agentd_core::ports::{
     MatrixGatewayOutboxRecord, MatrixGatewayPort, MatrixGatewayProjectConfig,
     MatrixGatewayRollbackManifest, MatrixGatewayStateMapping, MatrixGatewayStateMappingRequest,
     MatrixGatewaySummaryPublish, PolicyRevocationPort, RobrixApprovalView, RobrixArtifactView,
-    RobrixCommandView, RobrixEvidenceView, RobrixProjectView, RobrixRunView, RobrixTaskView,
-    SecurityError,
+    RobrixCommandView, RobrixEvidenceView, RobrixProjectView, RobrixRunView, RobrixRuntimeView,
+    RobrixTaskView, SecurityError,
 };
 use agentd_core::types::{
     AuditEventId, AuthorityKey, EnterpriseAuthentication, ExecutionArtifactId, MatrixCommandId,
     MatrixGatewayOutboxId, NodeId, OrganizationRef, ProjectExecutionSnapshotRef, ProjectRef,
-    ProjectRoomBindingRef, RunId, SecurityCheckpoint, SecurityEpochRequest, TaskRunId,
+    ProjectRoomBindingRef, RunId, RuntimeAttemptId, RuntimeSessionId, SecurityCheckpoint,
+    SecurityEpochRequest, TaskRunId,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -1299,23 +1300,63 @@ async fn load_robrix_run(
     run_row: &sqlx::sqlite::SqliteRow,
 ) -> Result<RobrixRunView, MatrixGatewayError> {
     let run_id = RunId::from_string(run_row.get::<String, _>("id"));
-    let tasks = sqlx::query(
-        "SELECT id, node_id, status, started_at, finished_at FROM task_runs \
-         WHERE run_id = ? ORDER BY started_at, id LIMIT 100",
+    let task_rows = sqlx::query(
+        "SELECT task.id, task.node_id, task.status, task.started_at, task.finished_at, \
+         runtime.id AS runtime_session_id, runtime.current_attempt_id, runtime.provider, \
+         runtime.status AS runtime_status, runtime.native_session_ref, \
+         transcript.storage_ref AS transcript_storage_ref, \
+         COALESCE((SELECT MAX(event.event_index) FROM native_runtime_events event \
+                   WHERE event.runtime_session_id = runtime.id), 0) AS runtime_event_index \
+         FROM task_runs task \
+         LEFT JOIN runtime_sessions runtime ON runtime.id = ( \
+             SELECT candidate.id FROM runtime_sessions candidate \
+             WHERE candidate.execution_task_id = task.id AND candidate.provider IS NOT NULL \
+             ORDER BY candidate.created_at DESC, candidate.id DESC LIMIT 1 \
+         ) \
+         LEFT JOIN runtime_transcript_objects transcript ON transcript.id = runtime.transcript_id \
+         WHERE task.run_id = ? ORDER BY task.started_at, task.id LIMIT 100",
     )
     .bind(run_id.as_str())
     .fetch_all(pool)
     .await
-    .map_err(storage_error)?
-    .iter()
-    .map(|row| RobrixTaskView {
-        task_id: TaskRunId::from_string(row.get::<String, _>("id")),
-        node_id: NodeId::parsed(row.get::<String, _>("node_id")),
-        status: row.get("status"),
-        started_at: row.get("started_at"),
-        finished_at: row.get("finished_at"),
-    })
-    .collect();
+    .map_err(storage_error)?;
+    let tasks = task_rows
+        .iter()
+        .map(|row| {
+            let runtime = row
+                .get::<Option<String>, _>("runtime_session_id")
+                .map(|session_id| {
+                    let event_index = u64::try_from(row.get::<i64, _>("runtime_event_index"))
+                        .map_err(|_| {
+                            MatrixGatewayError::Unavailable(
+                                "durable runtime event cursor is invalid".to_string(),
+                            )
+                        })?;
+                    Ok(RobrixRuntimeView {
+                        session_id: RuntimeSessionId::from_string(session_id),
+                        attempt_id: row
+                            .get::<Option<String>, _>("current_attempt_id")
+                            .map(RuntimeAttemptId::from_string),
+                        provider: row.get("provider"),
+                        status: row.get("runtime_status"),
+                        event_index,
+                        native_resumable: row
+                            .get::<Option<String>, _>("native_session_ref")
+                            .is_some(),
+                        transcript_ref: row.get("transcript_storage_ref"),
+                    })
+                })
+                .transpose()?;
+            Ok(RobrixTaskView {
+                task_id: TaskRunId::from_string(row.get::<String, _>("id")),
+                node_id: NodeId::parsed(row.get::<String, _>("node_id")),
+                status: row.get("status"),
+                started_at: row.get("started_at"),
+                finished_at: row.get("finished_at"),
+                runtime,
+            })
+        })
+        .collect::<Result<Vec<_>, MatrixGatewayError>>()?;
     let artifact_rows = sqlx::query(
         "SELECT id, kind, content_sha256, size_bytes, media_type, storage_ref, created_at \
          FROM execution_artifacts WHERE execution_run_id = ? \

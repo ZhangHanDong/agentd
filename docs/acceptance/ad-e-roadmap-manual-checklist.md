@@ -59,10 +59,14 @@
 
 ## AD-E5
 
-- [ ] Run `AGENTD_REAL_EXECUTE_SMOKE=1 bash scripts/agentd_real_execute_smoke.sh --execute` with Codex and no Claude environment variables.
+- [ ] Run `cargo test -p agentd-runtime --test provider_archive`, `cargo test -p agentd-runtime --test native_runtime`, and `cargo test -p agentd-store --test native_runtime_control_plane`; retain complete output and binary/source revisions.
+- [ ] Run `AGENTD_REAL_NATIVE_RUNTIME_SMOKE=1 bash scripts/agentd_native_runtime_smoke.sh`; retain Codex PTY output, captured native thread id, terminal status, and content-addressed transcript evidence.
+- [ ] Run `AGENTD_REAL_EXECUTE_RUNTIMES=codex,codex,codex,codex AGENTD_REAL_EXECUTE_SMOKE=1 bash scripts/agentd_real_execute_smoke.sh --execute` with `ANTHROPIC_API_KEY` and `CLAUDE_API_KEY` unset.
 - [ ] Exercise native PTY spawn, text/keys, resize, interrupt, bounded capture, shutdown, idle reap, and explicit outcome submission.
+- [ ] Inject secrets across PTY read boundaries and prove no unredacted bytes enter semantic events, snapshot tails, Matrix/Robrix summaries, SQLite, or transcript objects.
 - [ ] Restart the daemon with live/resumable/gone sessions; prove stable session ids, new attempt ids, provider-native resume refs, and explicit `runtime_gone` termination.
 - [ ] Compare SSE events, snapshot, wait API, dashboard, Robrix, Matrix summary, and agentctl views for the same runtime.
+- [ ] Replay text/key/resize/interrupt/shutdown idempotency keys before and after daemon restart; prove text is never stored and digest/key conflicts fail closed.
 - [ ] Prove production runtime control has no tmux dependency.
 - [ ] FSF-6 native-runtime sign-off recorded.
 

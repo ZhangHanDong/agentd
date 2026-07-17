@@ -40,6 +40,22 @@
         font: inherit;
       }
 
+      input {
+        min-width: 0;
+        height: 34px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 0 9px;
+        background: var(--panel);
+        color: var(--ink);
+      }
+
+      input:focus-visible,
+      button:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 1px;
+      }
+
       .shell {
         min-height: 100vh;
         display: grid;
@@ -137,6 +153,13 @@
         justify-content: space-between;
         gap: 12px;
         border-bottom: 1px solid var(--line);
+      }
+
+      .runtime-lookup {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 34px;
+        gap: 6px;
+        width: min(250px, 62%);
       }
 
       h2 {
@@ -242,6 +265,20 @@
         overflow-wrap: anywhere;
       }
 
+      .runtime-detail {
+        margin-top: 18px;
+        border-top: 2px solid var(--line);
+      }
+
+      .runtime-title {
+        margin: 0;
+        padding: 14px 0 4px;
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 680;
+        text-transform: uppercase;
+      }
+
       pre {
         margin: 14px 0 0;
         padding: 12px;
@@ -321,6 +358,10 @@
         <section class="pane" aria-labelledby="detail-heading">
           <div class="pane-head">
             <h2 id="detail-heading">Detail</h2>
+            <form class="runtime-lookup" id="runtime-lookup">
+              <input id="runtime-session" type="text" autocomplete="off" spellcheck="false" placeholder="rs_..." aria-label="Runtime session ID" />
+              <button class="icon-button" type="submit" aria-label="Inspect runtime" title="Inspect runtime">&#8629;</button>
+            </form>
           </div>
           <div class="detail" data-region="run-detail" id="run-detail"></div>
         </section>
@@ -338,8 +379,12 @@
       const eventLog = document.getElementById("event-log");
       const statusEl = document.getElementById("status");
       const refreshButton = document.getElementById("refresh");
+      const runtimeLookup = document.getElementById("runtime-lookup");
+      const runtimeSessionInput = document.getElementById("runtime-session");
       let selectedRunId = null;
       let eventSource = null;
+      let runtimeEventSource = null;
+      let runtimeSessionId = null;
 
       const setStatus = (value) => {
         statusEl.textContent = value;
@@ -414,10 +459,68 @@
             <div class="field"><dt>Current</dt><dd>${escapeText(detail.current_node || "terminal")}</dd></div>
             <div class="field"><dt>Completed</dt><dd>${escapeText((detail.completed_nodes || []).join(", "))}</dd></div>
           </dl>
-          <pre>${escapeText(JSON.stringify(detail.context || {}, null, 2))}</pre>`;
+          <pre>${escapeText(JSON.stringify(detail.context || {}, null, 2))}</pre>
+          <section class="runtime-detail" id="runtime-detail" aria-labelledby="runtime-title">
+            <h3 class="runtime-title" id="runtime-title">Runtime</h3>
+            <div class="empty">Not linked</div>
+          </section>`;
+          const linkedSession = findRuntimeSessionId(detail);
+          if (linkedSession) {
+            runtimeSessionInput.value = linkedSession;
+            await loadRuntime(linkedSession);
+          } else if (runtimeSessionId) {
+            await loadRuntime(runtimeSessionId);
+          }
         } catch (error) {
           renderEmpty(runDetail, error.message);
         }
+      }
+
+      function findRuntimeSessionId(detail) {
+        const context = detail && typeof detail.context === "object" ? detail.context : {};
+        return detail.runtime_session_id || context.runtime_session_id || context.native_runtime_session_id || null;
+      }
+
+      async function loadRuntime(sessionId) {
+        const target = document.getElementById("runtime-detail");
+        if (!target || !sessionId) {
+          return;
+        }
+        runtimeSessionId = sessionId;
+        try {
+          const response = await fetch(`/api/runtime/sessions/${encodeURIComponent(sessionId)}`);
+          if (!response.ok) {
+            throw new Error(`GET runtime ${response.status}`);
+          }
+          const view = await response.json();
+          const session = view.session || {};
+          const attempt = view.attempt || {};
+          const live = view.live || {};
+          target.innerHTML = `<h3 class="runtime-title" id="runtime-title">Runtime</h3><dl>
+            <div class="field"><dt>Session</dt><dd>${escapeText(session.registration?.session_id || sessionId)}</dd></div>
+            <div class="field"><dt>Status</dt><dd>${escapeText(session.status || attempt.status || "unknown")}</dd></div>
+            <div class="field"><dt>Attempt</dt><dd>${escapeText(attempt.attempt_id || "-")}</dd></div>
+            <div class="field"><dt>Provider</dt><dd>${escapeText(session.registration?.provider || "-")}</dd></div>
+            <div class="field"><dt>Event cursor</dt><dd>${escapeText(live.event_index ?? "-")}</dd></div>
+            <div class="field"><dt>Native ref</dt><dd>${escapeText(session.native_session_ref || "-")}</dd></div>
+            <div class="field"><dt>Transcript</dt><dd>${escapeText(session.transcript?.storage_ref || "-")}</dd></div>
+          </dl>`;
+          tailRuntimeEvents(sessionId, 0);
+        } catch (error) {
+          target.innerHTML = `<h3 class="runtime-title" id="runtime-title">Runtime</h3><div class="empty">${escapeText(error.message)}</div>`;
+        }
+      }
+
+      function tailRuntimeEvents(sessionId, cursor) {
+        if (runtimeEventSource) {
+          runtimeEventSource.close();
+        }
+        runtimeEventSource = new EventSource(`/api/runtime/sessions/${encodeURIComponent(sessionId)}/events?after_event_index=${cursor}`);
+        const kinds = ["starting", "started", "output", "input_accepted", "resized", "interrupted", "native_session_ref", "exited", "runtime_gone", "recovered", "transcript_archived", "shutdown"];
+        kinds.forEach((kind) => {
+          runtimeEventSource.addEventListener(kind, (event) => appendEvent(`runtime.${kind}`, event.lastEventId, event.data));
+        });
+        runtimeEventSource.onerror = () => runtimeEventSource.close();
       }
 
       function tailEvents(runId) {
@@ -483,6 +586,13 @@
       });
 
       refreshButton.addEventListener("click", () => refreshDashboard());
+      runtimeLookup.addEventListener("submit", (event) => {
+        event.preventDefault();
+        const sessionId = runtimeSessionInput.value.trim();
+        if (sessionId) {
+          void loadRuntime(sessionId);
+        }
+      });
       loadRuns();
     </script>
   </body>

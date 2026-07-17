@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use agentd_core::ports::{
     AuditActorKind, CommandRunner, ExecutionAuditAppend, ExecutionAuditPort,
-    ExecutionEvidenceLinks, ExecutionSandboxPort, ExecutionSnapshotLink, RunOpts, SecurityError,
+    ExecutionEvidenceLinks, ExecutionSandboxPort, ExecutionSnapshotLink, InteractiveSandboxPort,
+    NativeRuntimeError, RunOpts, RuntimeCommand, RuntimeSandboxCommandRequest, SecurityError,
 };
 use agentd_core::types::{
     CapabilityAdmission, EgressPolicy, OciSandboxRuntime, PreparedSandbox, ProtectedAction,
@@ -208,7 +209,7 @@ impl ExecutionSandboxPort for OciSandboxAdapter {
                 SecurityDenialReason::SandboxProfileDenied,
             ))?;
         validate_execute(request, &state)?;
-        let args = build_oci_args(request, &state, &self.config)?;
+        let args = build_oci_args(request, &state, &self.config, false, None)?;
         let output = match self
             .runner
             .run(
@@ -298,6 +299,56 @@ impl ExecutionSandboxPort for OciSandboxAdapter {
                 ))
             }
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl InteractiveSandboxPort for OciSandboxAdapter {
+    async fn interactive_command(
+        &self,
+        request: &RuntimeSandboxCommandRequest,
+    ) -> Result<RuntimeCommand, NativeRuntimeError> {
+        let state = self
+            .state(&request.sandbox.sandbox_id)
+            .map_err(native_security_error)?
+            .ok_or_else(|| {
+                NativeRuntimeError::Denied("interactive sandbox is not prepared".to_string())
+            })?;
+        let execute = SandboxExecuteRequest {
+            admission: request.admission.clone(),
+            sandbox: request.sandbox.clone(),
+            argv: request.argv.clone(),
+            env: request.environment.clone(),
+            observed_at: request.observed_at,
+        };
+        validate_execute(&execute, &state).map_err(native_security_error)?;
+        let container_workdir = request.working_directory.to_string_lossy();
+        if !request.working_directory.is_absolute()
+            || !request.working_directory.starts_with("/workspace")
+            || request
+                .working_directory
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+            || container_workdir.contains('\0')
+        {
+            return Err(NativeRuntimeError::Denied(
+                "interactive sandbox working directory is outside /workspace".to_string(),
+            ));
+        }
+        let arguments = build_oci_args(
+            &execute,
+            &state,
+            &self.config,
+            true,
+            Some(container_workdir.as_ref()),
+        )
+        .map_err(native_security_error)?;
+        Ok(RuntimeCommand {
+            program: self.config.runtime_bin.clone(),
+            arguments,
+            environment: std::collections::BTreeMap::new(),
+            working_directory: state.workspace_path,
+        })
     }
 }
 
@@ -430,6 +481,8 @@ fn build_oci_args(
     request: &SandboxExecuteRequest,
     state: &SandboxState,
     config: &OciSandboxConfig,
+    interactive: bool,
+    working_directory: Option<&str>,
 ) -> Result<Vec<String>, SecurityError> {
     let profile = &request.sandbox.profile;
     let cpu = f64::from(profile.limits.cpu_millis) / 1_000.0;
@@ -463,6 +516,14 @@ fn build_oci_args(
             profile.tenant_cache_namespace
         ),
     ];
+    if interactive {
+        args.push("--interactive".to_string());
+        args.push("--tty".to_string());
+    }
+    if let Some(working_directory) = working_directory {
+        args.push("--workdir".to_string());
+        args.push(working_directory.to_string());
+    }
     for mount in &profile.mounts {
         let source = config
             .input_sources
@@ -562,4 +623,12 @@ fn sha256_json(value: &Value) -> Result<String, SecurityError> {
 
 fn filesystem_unavailable(error: impl std::fmt::Display) -> SecurityError {
     SecurityError::Unavailable(format!("sandbox filesystem unavailable: {error}"))
+}
+
+fn native_security_error(error: SecurityError) -> NativeRuntimeError {
+    match error {
+        SecurityError::Denied(reason) => NativeRuntimeError::Denied(reason.to_string()),
+        SecurityError::Invalid(message) => NativeRuntimeError::Invalid(message),
+        SecurityError::Unavailable(message) => NativeRuntimeError::Unavailable(message),
+    }
 }

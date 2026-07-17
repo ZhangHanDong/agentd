@@ -29,6 +29,7 @@ pub mod human_wait_repo;
 pub mod matrix_bridge_repo;
 pub mod matrix_gateway;
 pub mod message_repo;
+pub mod native_runtime_control_plane;
 pub mod outbox_repo;
 pub mod outcome_repo;
 pub mod paths;
@@ -49,5 +50,6 @@ pub mod worker_repo;
 pub mod worktree_cleanup_repo;
 
 pub use error::StoreError;
+pub use native_runtime_control_plane::SqliteNativeRuntimeControlPlane;
 pub use store::SqliteStore;
 pub use worktree_cleanup_repo::{FailedWorktreeCleanupCandidate, FailedWorktreeKind};

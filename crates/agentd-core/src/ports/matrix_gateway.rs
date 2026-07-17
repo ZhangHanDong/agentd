@@ -6,7 +6,7 @@ use thiserror::Error;
 use crate::types::{
     AuditEventId, EnterpriseRequestIdentity, ExecutionArtifactId, MatrixCommandId,
     MatrixGatewayOutboxId, NodeId, ProjectExecutionSnapshot, ProjectExecutionSnapshotRef,
-    ProjectRef, ProjectRoomBindingRef, RunId, TaskRunId,
+    ProjectRef, ProjectRoomBindingRef, RunId, RuntimeAttemptId, RuntimeSessionId, TaskRunId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,6 +279,18 @@ pub struct RobrixTaskView {
     pub status: String,
     pub started_at: i64,
     pub finished_at: Option<i64>,
+    pub runtime: Option<RobrixRuntimeView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RobrixRuntimeView {
+    pub session_id: RuntimeSessionId,
+    pub attempt_id: Option<RuntimeAttemptId>,
+    pub provider: String,
+    pub status: String,
+    pub event_index: u64,
+    pub native_resumable: bool,
+    pub transcript_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

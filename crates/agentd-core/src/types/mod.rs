@@ -18,8 +18,8 @@ pub use ids::{
     AgentId, AgentProfileId, ArtifactUploadId, AuditEventId, CertificationRequestId,
     CertificationResultId, EvidenceEnvelopeId, ExecutionArtifactId, FleetOutboxId,
     ForgeAdmissionId, LeaseId, MatrixCommandId, MatrixGatewayOutboxId, NodeId, ReviewRunId, RunId,
-    RuntimeAttemptId, RuntimeSessionId, SkillInstallationId, TaskRunId, WorkerId,
-    WorkerIncarnationId,
+    RuntimeAttemptId, RuntimeEventId, RuntimeSessionId, RuntimeTranscriptId, SkillInstallationId,
+    TaskRunId, WorkerId, WorkerIncarnationId,
 };
 pub use outcome::{Artifact, ArtifactKind, MempalWrite, Outcome, Status};
 pub use principal::{

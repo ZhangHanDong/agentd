@@ -28,6 +28,7 @@ path = "src/main.rs"
 [dependencies]
 agentd-core = { path = "../agentd-core" }
 agentd-matrix = { path = "../agentd-matrix" }
+agentd-runtime = { path = "../agentd-runtime" }
 agentd-store = { path = "../agentd-store" }
 agentd-surface = { path = "../agentd-surface" }
 agentd-tmux = { path = "../agentd-tmux" }
@@ -43,6 +44,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 rmcp = { workspace = true }
 reqwest = { workspace = true }
+serde = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]

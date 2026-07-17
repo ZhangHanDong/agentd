@@ -12,6 +12,7 @@ pub mod execution_evidence;
 pub mod fleet_scheduler;
 pub mod matrix_gateway;
 pub mod mempal;
+pub mod native_runtime;
 pub mod principal;
 pub mod project_authority;
 pub mod revocation;
@@ -67,9 +68,20 @@ pub use matrix_gateway::{
     MatrixGatewayRollbackManifest, MatrixGatewayStateMapping, MatrixGatewayStateMappingRequest,
     MatrixGatewaySummaryPublish, MatrixTransportProvenance, NormalizedMatrixCommand,
     RobrixApprovalView, RobrixArtifactView, RobrixCommandView, RobrixEvidenceView,
-    RobrixProjectView, RobrixRunView, RobrixTaskView,
+    RobrixProjectView, RobrixRunView, RobrixRuntimeView, RobrixTaskView,
 };
 pub use mempal::{DrawerHit, MempalClient};
+pub use native_runtime::{
+    DurableRuntimeAttempt, DurableRuntimeSession, InteractiveSandboxPort, NativeRuntimeError,
+    RuntimeArchivePort, RuntimeBackend, RuntimeCommand, RuntimeDimensions, RuntimeEvent,
+    RuntimeEventKind, RuntimeEventPayload, RuntimeEventPort, RuntimeHandle, RuntimeInputAck,
+    RuntimeKey, RuntimeKeyInput, RuntimeLaunchRequest, RuntimeLedgerPort, RuntimeProvider,
+    RuntimeRecoveryDisposition, RuntimeRecoveryRecord, RuntimeRecoveryRequest,
+    RuntimeResizeRequest, RuntimeSandboxCommandRequest, RuntimeSandboxRef,
+    RuntimeSessionRegistration, RuntimeShutdownMethod, RuntimeShutdownReport,
+    RuntimeShutdownRequest, RuntimeSnapshot, RuntimeTerminalReason, RuntimeTextInput,
+    RuntimeTranscriptRef, RuntimeView, RuntimeWaitRequest,
+};
 pub use principal::EnterprisePrincipalPort;
 pub use project_authority::{
     ProjectAuthorityAvailability, ProjectAuthorityError, ProjectAuthorityHealth,

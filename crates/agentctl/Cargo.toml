@@ -23,6 +23,7 @@ clap = { workspace = true }
 agentd-core = { path = "../agentd-core" }
 agentd-store = { path = "../agentd-store" }
 tokio = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 async-trait = "0.1"

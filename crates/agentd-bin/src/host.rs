@@ -17,11 +17,14 @@ use agentd_core::handler::{HandlerRegistry, Ports};
 use agentd_core::handler::{agent_allocation_json, append_agent_allocation_prompt_context};
 use agentd_core::ports::{
     AgentAllocation, AgentAllocationRequest, AgentAllocationStatus, AgentAllocator, AgentBackend,
-    Clock, CommandRunner, DirectAgentAllocator, MempalClient, RunStatus, Store, WorktreeAllocator,
+    Clock, CommandRunner, DirectAgentAllocator, MempalClient, NativeRuntimeError, RunStatus,
+    RuntimeEvent, RuntimeInputAck, RuntimeKeyInput, RuntimeResizeRequest, RuntimeShutdownReport,
+    RuntimeShutdownRequest, RuntimeSnapshot, RuntimeTextInput, RuntimeView, RuntimeWaitRequest,
+    Store, WorktreeAllocator,
 };
 use agentd_core::types::{
-    AgentHandle, AgentId, BackendKind, CliKind, LaunchStrategy, NodeId, ReviewRunId, RunContext,
-    RunId, SpawnRequest, TaskRunId,
+    AgentHandle, AgentId, BackendKind, CapabilityAdmission, CliKind, LaunchStrategy, NodeId,
+    ReviewRunId, RunContext, RunId, RuntimeSessionId, SpawnRequest, TaskRunId,
 };
 use agentd_store::{
     SqliteStore, StoreError, agent_chat_task_graph_repo, agent_chat_task_repo, agent_repo,
@@ -73,6 +76,8 @@ use agentd_surface::host::{
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
+
+use crate::runtime::NativeRuntimeService;
 
 /// Capacity of the live-event broadcast: a subscriber more than this many events
 /// behind lags and is realigned with a snapshot (P1).
@@ -350,6 +355,7 @@ pub struct ProductionRunHost {
     clock: Box<dyn Clock>,
     agent_allocator: Box<dyn AgentAllocator>,
     worktree_allocator: Option<Box<dyn WorktreeAllocator>>,
+    native_runtime: Option<Arc<NativeRuntimeService>>,
     registry: HandlerRegistry,
     workflows_dir: PathBuf,
     /// The live-event broadcast (P1): the emit point publishes here for the SSE
@@ -434,6 +440,7 @@ impl ProductionRunHost {
             clock,
             agent_allocator: Box::new(DirectAgentAllocator),
             worktree_allocator: None,
+            native_runtime: None,
             registry: HandlerRegistry::with_builtins(),
             workflows_dir: workflows_dir.into(),
             live_tx: broadcast::channel(LIVE_BROADCAST_CAPACITY).0,
@@ -483,6 +490,12 @@ impl ProductionRunHost {
     pub fn with_tool_cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
         let runner = std::mem::replace(&mut self.runner, Box::new(NoopCommandRunner));
         self.runner = Box::new(StableCwdCommandRunner::new(runner, cwd));
+        self
+    }
+
+    #[must_use]
+    pub fn with_native_runtime(mut self, service: Arc<NativeRuntimeService>) -> Self {
+        self.native_runtime = Some(service);
         self
     }
 
@@ -2478,6 +2491,120 @@ impl RunHost for ProductionRunHost {
             advance: result.advance.as_str().to_string(),
         })
     }
+
+    async fn native_runtime_snapshot(
+        &self,
+        session_id: &RuntimeSessionId,
+    ) -> Result<Option<RuntimeView>, CoreError> {
+        let service = self
+            .native_runtime
+            .as_ref()
+            .ok_or_else(runtime_unconfigured)?;
+        match service.snapshot(session_id).await {
+            Ok(view) => Ok(Some(view)),
+            Err(NativeRuntimeError::NotFound(_)) => Ok(None),
+            Err(error) => Err(core_from_native_runtime(error)),
+        }
+    }
+
+    async fn native_runtime_events(
+        &self,
+        session_id: &RuntimeSessionId,
+        after_event_index: u64,
+        limit: u32,
+    ) -> Result<Vec<RuntimeEvent>, CoreError> {
+        self.native_runtime
+            .as_ref()
+            .ok_or_else(runtime_unconfigured)?
+            .events_after(session_id, after_event_index, limit)
+            .await
+            .map_err(core_from_native_runtime)
+    }
+
+    async fn native_runtime_wait(
+        &self,
+        request: RuntimeWaitRequest,
+    ) -> Result<RuntimeView, CoreError> {
+        self.native_runtime
+            .as_ref()
+            .ok_or_else(runtime_unconfigured)?
+            .wait(request)
+            .await
+            .map_err(core_from_native_runtime)
+    }
+
+    async fn native_runtime_send_text(
+        &self,
+        admission: CapabilityAdmission,
+        request: RuntimeTextInput,
+    ) -> Result<RuntimeInputAck, CoreError> {
+        self.native_runtime
+            .as_ref()
+            .ok_or_else(runtime_unconfigured)?
+            .send_text(&admission, request)
+            .await
+            .map_err(core_from_native_runtime)
+    }
+
+    async fn native_runtime_send_key(
+        &self,
+        admission: CapabilityAdmission,
+        request: RuntimeKeyInput,
+    ) -> Result<RuntimeInputAck, CoreError> {
+        self.native_runtime
+            .as_ref()
+            .ok_or_else(runtime_unconfigured)?
+            .send_key(&admission, request)
+            .await
+            .map_err(core_from_native_runtime)
+    }
+
+    async fn native_runtime_resize(
+        &self,
+        admission: CapabilityAdmission,
+        request: RuntimeResizeRequest,
+    ) -> Result<RuntimeSnapshot, CoreError> {
+        self.native_runtime
+            .as_ref()
+            .ok_or_else(runtime_unconfigured)?
+            .resize(&admission, request)
+            .await
+            .map_err(core_from_native_runtime)
+    }
+
+    async fn native_runtime_interrupt(
+        &self,
+        admission: CapabilityAdmission,
+        request: RuntimeKeyInput,
+    ) -> Result<RuntimeInputAck, CoreError> {
+        self.native_runtime
+            .as_ref()
+            .ok_or_else(runtime_unconfigured)?
+            .interrupt(&admission, request)
+            .await
+            .map_err(core_from_native_runtime)
+    }
+
+    async fn native_runtime_shutdown(
+        &self,
+        admission: CapabilityAdmission,
+        request: RuntimeShutdownRequest,
+    ) -> Result<RuntimeShutdownReport, CoreError> {
+        self.native_runtime
+            .as_ref()
+            .ok_or_else(runtime_unconfigured)?
+            .shutdown(&admission, request)
+            .await
+            .map_err(core_from_native_runtime)
+    }
+}
+
+fn runtime_unconfigured() -> CoreError {
+    CoreError::Backend("native runtime is not configured".to_string())
+}
+
+fn core_from_native_runtime(error: NativeRuntimeError) -> CoreError {
+    CoreError::Backend(error.to_string())
 }
 
 fn surface_agent_record(record: agent_repo::AgentRecord) -> SurfaceAgentRecord {

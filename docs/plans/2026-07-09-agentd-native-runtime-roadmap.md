@@ -628,6 +628,27 @@ remain in the final manual checklist.
 
 Depends on: AD-E2.
 
+Implementation status (2026-07-17): AD-E5 code-complete candidate. Core now
+separates `RuntimeBackend` from legacy spawn backends and defines stable logical
+sessions, replaceable process attempts, semantic events, snapshot/wait,
+recovery, transcript, and interactive-sandbox contracts. The new
+`agentd-runtime` crate owns `portable-pty` processes, bounded redacted capture,
+digest-only input accounting, provider-native Codex/Claude/custom resume refs,
+idle reaping, and immutable content-addressed transcript objects. Migration
+`0021` and `SqliteNativeRuntimeControlPlane` persist native metadata,
+session-global event cursors, recovery history, transcript refs, and explicit
+`resume_pending` versus `lost/runtime_gone` transitions. The daemon service
+rechecks trusted time, capability scope, sandbox expiry, and Specify epoch at
+launch and mutation boundaries; HTTP/SSE, `RunHost`, Robrix/Matrix projections,
+and `agentctl runtime` share the same contracts. Production native composition
+contains no tmux dependency. The dashboard runtime inspector, fake
+lifecycle/store/provider/archive tests, PTY read-boundary redaction case, and a
+Codex-only opt-in native smoke harness are present but intentionally not
+executed yet under the code-first instruction.
+This is not an AD-E5 or FSF-6 exit: unified test execution, real OCI/Codex/MCP
+smoke, restart drills, cross-surface comparison, and operator sign-off remain in
+the final manual checklist. AD-E6 must still remove legacy tmux production paths.
+
 Purpose: remove tmux from process/session ownership after durable enterprise
 semantics exist.
 
