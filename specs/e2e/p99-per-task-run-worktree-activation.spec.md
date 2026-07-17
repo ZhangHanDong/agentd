@@ -86,7 +86,7 @@ P103, and independent reviewer snapshots are covered by P104.
 
 ## Completion Criteria
 
-Scenario: the tmux pool implements task-keyed allocation
+Scenario: the worktree pool implements task-keyed allocation
   Test: pool_allocates_task_keyed_worktree_via_allocator_port
   Level: adapter unit
   Test Double: in-memory WorktreeProvider

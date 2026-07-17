@@ -27,6 +27,7 @@ struct ParityRow {
     status: String,
     source: String,
     decision: String,
+    phase: String,
 }
 
 fn repo_root() -> PathBuf {
@@ -325,6 +326,7 @@ fn parse_rows(markdown: &str) -> Vec<ParityRow> {
                 source: cells[3].to_string(),
                 status: cells[4].to_string(),
                 decision: cells[5].to_string(),
+                phase: cells[6].to_string(),
             }
         })
         .collect()
@@ -372,13 +374,25 @@ fn parity_capability_map_has_required_rows_without_unknowns() {
             row.status
         );
         assert_ne!(row.status, "unknown", "unknown status is forbidden");
+        let enterprise_only = row.source == "no agent-chat equivalent"
+            && row.category.starts_with("enterprise_")
+            && row.phase.starts_with("AD-E");
         assert!(
-            row.source
-                .starts_with("/Users/zhangalex/Work/Projects/consult/agent-chat/"),
+            enterprise_only
+                || row
+                    .source
+                    .starts_with("/Users/zhangalex/Work/Projects/consult/agent-chat/"),
             "row {} must cite an agent-chat source path: {}",
             row.capability,
             row.source
         );
+        if row.source == "no agent-chat equivalent" {
+            assert!(
+                enterprise_only,
+                "only AD-E enterprise rows may omit an agent-chat source: {}",
+                row.capability
+            );
+        }
         assert!(
             !row.decision.is_empty(),
             "row {} needs a replacement decision",

@@ -1,4 +1,4 @@
-//! Authenticated HTTP transport for the versioned OpenFab certification API.
+//! Authenticated HTTP transport for the versioned `OpenFab` certification API.
 
 use std::time::Duration;
 
@@ -22,6 +22,7 @@ impl std::fmt::Debug for HttpOpenFabCertificationTransport {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("HttpOpenFabCertificationTransport")
+            .field("client", &self.client)
             .field("base_url", &self.base_url)
             .field("bearer_token", &"[REDACTED]")
             .finish()

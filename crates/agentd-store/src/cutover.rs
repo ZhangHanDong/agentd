@@ -1,4 +1,4 @@
-//! SQLite implementation of the durable AD-E6 final-cutover ledger.
+//! `SQLite` implementation of the durable AD-E6 final-cutover ledger.
 
 use agentd_core::ports::{
     BackupManifest, CursorHandoff, CutoverError, CutoverLedgerPort, CutoverPlan, CutoverRun,
@@ -780,16 +780,26 @@ fn validate_state_edge(from: CutoverState, to: CutoverState) -> Result<(), Cutov
     let valid = matches!(
         (from, to),
         (CutoverState::Planned, CutoverState::Importing)
-            | (CutoverState::Importing, CutoverState::Shadowing)
-            | (CutoverState::Shadowing, CutoverState::Draining)
-            | (CutoverState::Draining, CutoverState::HandoffReady)
-            | (CutoverState::HandoffReady, CutoverState::Active)
-            | (CutoverState::Active, CutoverState::Retired)
-            | (CutoverState::Importing, CutoverState::RolledBack)
-            | (CutoverState::Shadowing, CutoverState::RolledBack)
-            | (CutoverState::Draining, CutoverState::RolledBack)
-            | (CutoverState::HandoffReady, CutoverState::RolledBack)
-            | (CutoverState::Active, CutoverState::RolledBack)
+            | (
+                CutoverState::Importing,
+                CutoverState::Shadowing | CutoverState::RolledBack,
+            )
+            | (
+                CutoverState::Shadowing,
+                CutoverState::Draining | CutoverState::RolledBack,
+            )
+            | (
+                CutoverState::Draining,
+                CutoverState::HandoffReady | CutoverState::RolledBack,
+            )
+            | (
+                CutoverState::HandoffReady,
+                CutoverState::Active | CutoverState::RolledBack,
+            )
+            | (
+                CutoverState::Active,
+                CutoverState::Retired | CutoverState::RolledBack,
+            )
     );
     if valid {
         Ok(())
@@ -894,6 +904,7 @@ fn to_u32(value: i64, field: &str) -> Result<u32, CutoverError> {
         .map_err(|_| CutoverError::Unavailable(format!("database {field} is invalid")))
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn db_error(error: sqlx::Error) -> CutoverError {
     CutoverError::Unavailable(format!("cutover database operation failed: {error}"))
 }

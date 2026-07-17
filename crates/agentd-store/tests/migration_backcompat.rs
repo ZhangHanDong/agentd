@@ -484,6 +484,7 @@ async fn task_lease_migration_preserves_enterprise_and_compatibility_rows() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn enterprise_audit_history_preserves_legacy_retention_and_flags_it() {
     let pool = raw_pool().await;
     for migration in [

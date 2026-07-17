@@ -42,39 +42,38 @@ pub async fn ensure_native_runtime_authority(
         ));
     }
     let mut transaction = pool.begin().await?;
-    let worker_id = match sqlx::query_scalar::<_, String>(
+    let worker_id = if let Some(id) = sqlx::query_scalar::<_, String>(
         "SELECT worker_id FROM native_runtime_authority WHERE singleton = 1",
     )
     .fetch_optional(&mut *transaction)
     .await?
     {
-        Some(id) => WorkerId::from_string(id),
-        None => {
-            let id = WorkerId::new();
-            let now = now_unix();
-            sqlx::query(
-                "INSERT INTO workers \
+        WorkerId::from_string(id)
+    } else {
+        let id = WorkerId::new();
+        let now = now_unix();
+        sqlx::query(
+            "INSERT INTO workers \
                  (id, status, trust_domain, labels_json, record_version, created_at, updated_at) \
                  VALUES (?, 'online', 'local.agentd', ?, 1, ?, ?)",
-            )
-            .bind(id.as_str())
-            .bind(serde_json::to_string(
-                &json!({"authority": "native_local"}),
-            )?)
-            .bind(now)
-            .bind(now)
-            .execute(&mut *transaction)
-            .await?;
-            sqlx::query(
-                "INSERT INTO native_runtime_authority (singleton, worker_id, created_at) \
+        )
+        .bind(id.as_str())
+        .bind(serde_json::to_string(
+            &json!({"authority": "native_local"}),
+        )?)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO native_runtime_authority (singleton, worker_id, created_at) \
                  VALUES (1, ?, ?)",
-            )
-            .bind(id.as_str())
-            .bind(now)
-            .execute(&mut *transaction)
-            .await?;
-            id
-        }
+        )
+        .bind(id.as_str())
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        id
     };
     let current = sqlx::query_scalar::<_, String>(
         "SELECT id FROM worker_incarnations WHERE worker_id = ? AND is_current = 1",

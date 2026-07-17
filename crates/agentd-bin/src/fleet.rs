@@ -346,6 +346,7 @@ impl EnterpriseFleetService {
     }
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn map_identity_error(error: SecurityError) -> FleetServiceError {
     let code = match error {
         SecurityError::Denied(_) => "worker_identity_denied",
@@ -355,6 +356,7 @@ fn map_identity_error(error: SecurityError) -> FleetServiceError {
     FleetServiceError { code }
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn map_scheduler_error(error: FleetSchedulerError) -> FleetServiceError {
     let code = match error {
         FleetSchedulerError::Denied(reason) => denial_code(reason),

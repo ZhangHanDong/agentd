@@ -1916,6 +1916,7 @@ fn agent_error_response(e: CoreError) -> Response {
     }
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn runtime_error_response(error: CoreError) -> Response {
     let message = error.to_string();
     let status = if message.contains("not found") {
@@ -1934,6 +1935,7 @@ fn runtime_error_response(error: CoreError) -> Response {
     (status, Json(json!({ "error": message }))).into_response()
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn enterprise_error_response(error: CoreError) -> Response {
     let message = error.to_string();
     let status = if message.contains("not found") {
@@ -2165,9 +2167,8 @@ fn native_runtime_event_stream(
                     return;
                 }
             }
-            let view = match host.native_runtime_snapshot(&session_id).await {
-                Ok(Some(view)) => view,
-                _ => break,
+            let Ok(Some(view)) = host.native_runtime_snapshot(&session_id).await else {
+                break;
             };
             if view.session.status.is_terminal() {
                 break;

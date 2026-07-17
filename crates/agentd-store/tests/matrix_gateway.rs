@@ -355,6 +355,7 @@ async fn observe_shadow_canary_handoff_and_replay_are_atomic_and_idempotent() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn cursor_conflict_denial_and_rollback_never_create_execution_side_effects() {
     let fixture = fixture().await;
     configure(&fixture).await;
@@ -469,7 +470,8 @@ async fn cursor_conflict_denial_and_rollback_never_create_execution_side_effects
         .await
         .expect("rollback manifest");
     assert_eq!(manifest.mode, MatrixGatewayMode::RolledBack);
-    assert_eq!(manifest.current_cursor, "s1");
+    assert_eq!(manifest.current_cursor, "s2");
+    assert_eq!(manifest.previous_cursor.as_deref(), Some("s1"));
     assert_eq!(manifest.mappings.len(), 7);
     assert_eq!(
         manifest

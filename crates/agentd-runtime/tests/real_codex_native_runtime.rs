@@ -92,11 +92,12 @@ async fn real_codex_runs_through_native_pty_and_archives_transcript() {
     let observed_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system time")
-        .as_secs() as i64;
+        .as_secs()
+        .try_into()
+        .unwrap_or(i64::MAX);
     let command = std::env::var("AGENTD_CODEX_BIN").unwrap_or_else(|_| "codex".to_string());
     let working_directory = std::env::var_os("AGENTD_NATIVE_RUNTIME_SMOKE_CWD")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+        .map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")), PathBuf::from);
 
     runtime
         .launch(RuntimeLaunchRequest {

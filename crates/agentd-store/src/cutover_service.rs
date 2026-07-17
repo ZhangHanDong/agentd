@@ -855,14 +855,17 @@ fn sha256(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn store_error(error: StoreError) -> CutoverError {
     CutoverError::Unavailable(format!("offline import operation failed: {error}"))
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn db_error(error: sqlx::Error) -> CutoverError {
     CutoverError::Unavailable(format!("cutover database read failed: {error}"))
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn invalid_json(error: serde_json::Error) -> CutoverError {
     CutoverError::Unavailable(format!("stored compatibility JSON is invalid: {error}"))
 }

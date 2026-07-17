@@ -237,6 +237,7 @@ impl RuntimePtyControl for NativePtyControl {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 #[async_trait::async_trait]
 impl RuntimeBackend for NativePtyRuntime {
     async fn launch(
@@ -594,7 +595,7 @@ impl RuntimeBackend for NativePtyRuntime {
                 ));
             }
             return Ok(RuntimeRecoveryDisposition::Live {
-                snapshot: snapshot_for(&state).await?,
+                snapshot: Box::new(snapshot_for(&state).await?),
             });
         }
         match request.native_session_ref.as_deref() {
@@ -631,9 +632,10 @@ impl RuntimeBackend for NativePtyRuntime {
         let mut reports = Vec::new();
         for state in states {
             let mutable = state.mutable.read().await;
-            let idle_ms = observed_at
-                .saturating_sub(mutable.last_activity_at)
-                .saturating_mul(1_000) as u64;
+            let idle_seconds = observed_at.saturating_sub(mutable.last_activity_at).max(0);
+            let idle_ms = u64::try_from(idle_seconds)
+                .unwrap_or(0)
+                .saturating_mul(1_000);
             let should_reap =
                 mutable.status == RuntimeAttemptStatus::Running && idle_ms >= state.idle_timeout_ms;
             drop(mutable);
@@ -793,20 +795,17 @@ fn spawn_exit_monitor(inner: Arc<RuntimeInner>, state: Arc<AttemptState>) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            let exit_code = match poll_exit_code(&state).await {
-                Ok(exit_code) => exit_code,
-                Err(_) => {
-                    let _ = finish_state(
-                        &inner,
-                        &state,
-                        RuntimeShutdownMethod::AlreadyExited,
-                        RuntimeTerminalReason::Failed,
-                        None,
-                        now_unix(),
-                    )
-                    .await;
-                    return;
-                }
+            let Ok(exit_code) = poll_exit_code(&state).await else {
+                let _ = finish_state(
+                    &inner,
+                    &state,
+                    RuntimeShutdownMethod::AlreadyExited,
+                    RuntimeTerminalReason::Failed,
+                    None,
+                    now_unix(),
+                )
+                .await;
+                return;
             };
             if let Some(exit_code) = exit_code {
                 let reason = if exit_code == 0 {
@@ -1201,7 +1200,9 @@ fn hash_bytes(bytes: &[u8]) -> String {
 fn now_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs() as i64)
+        .map_or(0, |duration| {
+            i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
+        })
 }
 
 fn pty_unavailable(error: impl std::fmt::Display) -> NativeRuntimeError {

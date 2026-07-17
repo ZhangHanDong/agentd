@@ -11,7 +11,7 @@ and is mergeable, but CI fails before test jobs because newer stable clippy
 denies warning patterns in `agentd-core`; this slice removes those warning
 patterns without changing workflow behavior. After fixing the first
 `agentd-core` batch, local workspace clippy revealed additional denied warning
-batches in `agentd-bin`, `agentd-tmux`, `agentd-surface`, `agentd-store`, and
+batches in `agentd-bin`, `agentd-worktree`, `agentd-surface`, `agentd-store`, and
 `agentd-core` tests; GitHub also exposed a cargo-deny action argument bug in
 the same lint job. This slice covers the full observed lint batch and the
 non-relaxing CI invocation fix needed for the lint job to pass.
@@ -25,7 +25,7 @@ non-relaxing CI invocation fix needed for the lint job to pass.
 - Replace the 9-argument `review_prompt` function signature with a small input
   struct rather than suppressing `too_many_arguments`.
 - Backtick `task_run` in doc comments flagged by `doc_markdown`.
-- Remove strict clippy warning patterns from tmux worktree pool code without
+- Remove strict clippy warning patterns from native worktree pool code without
   changing allocation, snapshot, or launch behavior.
 - Keep HTTP/store tests behaviorally identical while refactoring clippy-only
   test-shape warnings.
@@ -56,9 +56,8 @@ non-relaxing CI invocation fix needed for the lint job to pass.
 - crates/agentd-bin/tests/contract.rs
 - crates/agentd-store/tests/store_trait.rs
 - crates/agentd-surface/tests/http.rs
-- crates/agentd-tmux/src/backend.rs
-- crates/agentd-tmux/src/pool.rs
-- crates/agentd-tmux/tests/pool.rs
+- crates/agentd-worktree/src/lib.rs
+- crates/agentd-worktree/tests/pool.rs
 
 ### Forbidden
 
@@ -94,7 +93,7 @@ Scenario: known clippy regression markers are absent
   Then it finds no `map(...).unwrap_or_else(...)` current-dir or worktree fallback snippets
   And it finds no direct `usize as f64` normalized diff snippet
   And it finds no unbackticked `task_run` doc-comment snippets
-  And it finds no observed tmux pool, surface-test, or handler-test clippy marker snippets
+  And it finds no observed worktree pool, surface-test, or handler-test clippy marker snippets
 
 Scenario: workspace clippy command passes
   Test:

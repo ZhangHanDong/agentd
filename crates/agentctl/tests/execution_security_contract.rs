@@ -55,11 +55,20 @@ fn assert_security_parity(parity: &str) {
             "{capability} must not claim an agent-chat authority equivalent"
         );
     }
-    assert_eq!(rows["native_runtime_process"][4], "missing");
-    assert_eq!(rows["native_runtime_session_restore"][4], "missing");
+    for capability in ["native_runtime_process", "native_runtime_session_restore"] {
+        let row = &rows[capability];
+        assert_eq!(row[4], "partial", "{capability} remains acceptance-gated");
+        assert_eq!(row[6], "AD-E5", "{capability} belongs to AD-E5");
+        assert!(
+            row[5].contains("code candidate"),
+            "{capability} must distinguish code from accepted evidence"
+        );
+    }
     assert_eq!(rows["matrix_bridge"][4], "partial");
     assert_eq!(rows["worker_fleet_protocol"][4], "partial");
-    assert!(parity.contains("agentd cannot fully replace agent-chat yet"));
+    let normalized = parity.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(normalized.contains("agentd cannot be declared a complete replacement"));
+    assert!(normalized.contains("deferred acceptance pass and human retirement sign-off"));
 }
 
 fn assert_candidate_documents(roadmap: &str, design: &str, spec: &str, composition: &str) {
@@ -80,13 +89,9 @@ fn assert_candidate_documents(roadmap: &str, design: &str, spec: &str, compositi
             "revalidates the current lease and action capability immediately before each external side effect",
             "protected-operation composition API",
             "enterprise daemon transport remains incomplete",
-            "P272-P275 remain paused",
-            "AD-E0, AD-E1, FSF-0, and FSF-2 remain incomplete",
-            "AD-E2 worker fleet remains incomplete",
-            "AD-E3 Matrix cutover remains incomplete",
-            "AD-E4 OpenFab transport remains incomplete",
-            "AD-E5 native runtime remains incomplete",
-            "AD-E7 scale remains incomplete",
+            "AD-E0 through AD-E6 now have isolated code candidates",
+            "their FSF gates remain open",
+            "single deferred verification and operator-sign-off pass",
         ],
     );
     assert_contains_all(

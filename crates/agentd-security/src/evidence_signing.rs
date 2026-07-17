@@ -1,4 +1,4 @@
-//! Ed25519 execution-evidence signing and OpenFab signature verification.
+//! `Ed25519` execution-evidence signing and `OpenFab` signature verification.
 
 use std::sync::Arc;
 
@@ -104,6 +104,17 @@ pub struct Ed25519EvidenceVerifier {
     trust: Arc<dyn SigningKeyTrustPort>,
 }
 
+struct TrustedSignatureRequest<'a, T> {
+    payload: &'a T,
+    expected_sha256: &'a str,
+    key_id: &'a str,
+    signer_did: &'a str,
+    signature_b64: &'a str,
+    role: EvidenceSignerRole,
+    signed_at: i64,
+    observed_at: i64,
+}
+
 impl std::fmt::Debug for Ed25519EvidenceVerifier {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -121,15 +132,18 @@ impl Ed25519EvidenceVerifier {
 
     async fn verify_trusted_signature<T: serde::Serialize + Sync>(
         &self,
-        payload: &T,
-        expected_sha256: &str,
-        key_id: &str,
-        signer_did: &str,
-        signature_b64: &str,
-        role: EvidenceSignerRole,
-        signed_at: i64,
-        observed_at: i64,
+        request: TrustedSignatureRequest<'_, T>,
     ) -> Result<(), CertificationError> {
+        let TrustedSignatureRequest {
+            payload,
+            expected_sha256,
+            key_id,
+            signer_did,
+            signature_b64,
+            role,
+            signed_at,
+            observed_at,
+        } = request;
         if signed_at < 0 || signed_at > observed_at {
             return Err(CertificationError::Denied(
                 "signature timestamp is outside the trusted observation window".to_string(),
@@ -184,16 +198,16 @@ impl EvidenceVerificationPort for Ed25519EvidenceVerifier {
             ));
         }
         validate_evidence_payload(&envelope.payload, envelope.signed_at)?;
-        self.verify_trusted_signature(
-            &envelope.payload,
-            &envelope.payload_sha256,
-            &envelope.signer_key_id,
-            &envelope.signer_did,
-            &envelope.signature_b64,
-            envelope.signer_role,
-            envelope.signed_at,
+        self.verify_trusted_signature(TrustedSignatureRequest {
+            payload: &envelope.payload,
+            expected_sha256: &envelope.payload_sha256,
+            key_id: &envelope.signer_key_id,
+            signer_did: &envelope.signer_did,
+            signature_b64: &envelope.signature_b64,
+            role: envelope.signer_role,
+            signed_at: envelope.signed_at,
             observed_at,
-        )
+        })
         .await
     }
 
@@ -211,16 +225,16 @@ impl EvidenceVerificationPort for Ed25519EvidenceVerifier {
             ));
         }
         validate_certification_result(result, observed_at)?;
-        self.verify_trusted_signature(
-            &result.payload,
-            &result.payload_sha256,
-            &result.signer_key_id,
-            &result.signer_did,
-            &result.signature_b64,
-            EvidenceSignerRole::OpenFab,
-            result.payload.published_at,
+        self.verify_trusted_signature(TrustedSignatureRequest {
+            payload: &result.payload,
+            expected_sha256: &result.payload_sha256,
+            key_id: &result.signer_key_id,
+            signer_did: &result.signer_did,
+            signature_b64: &result.signature_b64,
+            role: EvidenceSignerRole::OpenFab,
+            signed_at: result.payload.published_at,
             observed_at,
-        )
+        })
         .await
     }
 
@@ -239,16 +253,16 @@ impl EvidenceVerificationPort for Ed25519EvidenceVerifier {
                 "invalid or expired Skill Hub trust timestamps".to_string(),
             ));
         }
-        self.verify_trusted_signature(
-            &record.payload,
-            &record.trust_payload_sha256,
-            &record.signer_key_id,
-            &record.signer_did,
-            &record.signature_b64,
-            EvidenceSignerRole::OpenFab,
-            record.payload.status_changed_at,
+        self.verify_trusted_signature(TrustedSignatureRequest {
+            payload: &record.payload,
+            expected_sha256: &record.trust_payload_sha256,
+            key_id: &record.signer_key_id,
+            signer_did: &record.signer_did,
+            signature_b64: &record.signature_b64,
+            role: EvidenceSignerRole::OpenFab,
+            signed_at: record.payload.status_changed_at,
             observed_at,
-        )
+        })
         .await
     }
 }

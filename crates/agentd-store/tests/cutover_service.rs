@@ -61,7 +61,7 @@ fn fixture() -> tempfile::TempDir {
 async fn final_cutover_reaches_active_only_after_shadow_and_drain() {
     let source = fixture();
     let database = tempfile::tempdir().expect("database directory");
-    let store = SqliteStore::connect(database.path().join("agentd.db"))
+    let store = SqliteStore::connect(&database.path().join("agentd.db"))
         .await
         .expect("store");
     let service = CutoverService::new(store);
@@ -82,7 +82,11 @@ async fn final_cutover_reaches_active_only_after_shadow_and_drain() {
         .shadow(&planned.plan.id, source.path(), "shadow-1", 3)
         .await
         .expect("shadow");
-    assert_eq!(shadow.run.state, CutoverState::Draining);
+    assert_eq!(
+        shadow.run.state,
+        CutoverState::Draining,
+        "shadow report: {shadow:?}"
+    );
     assert!(shadow.mismatches.is_empty());
     assert_eq!(shadow.decisions, shadow.matched);
 
@@ -114,7 +118,7 @@ async fn final_cutover_reaches_active_only_after_shadow_and_drain() {
 async fn final_cutover_rejects_source_drift_after_plan() {
     let source = fixture();
     let database = tempfile::tempdir().expect("database directory");
-    let store = SqliteStore::connect(database.path().join("agentd.db"))
+    let store = SqliteStore::connect(&database.path().join("agentd.db"))
         .await
         .expect("store");
     let service = CutoverService::new(store);

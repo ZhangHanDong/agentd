@@ -57,8 +57,8 @@ pub use enterprise_scale::{
     EnterpriseScaleError, EnterpriseScalePort, EnterpriseZoneStatus, LegalHold,
     LoadModelRegistration, ReplicaStatus, RetentionDecision, RetentionDisposition, RetentionPolicy,
     ServiceLevelMeasurement, ServiceLevelStatus, TenantKeyStatus, TenantKeyTransition,
-    TenantKeyVersion, WorkerImageRollout, WorkerImageRolloutStatus, WorkerImageZoneObservation,
-    ZonePoolPolicy,
+    TenantKeyVersion, WorkerImageRollback, WorkerImageRollout, WorkerImageRolloutStatus,
+    WorkerImageZoneObservation, ZonePoolPolicy,
 };
 pub use execution_evidence::{
     ArtifactCursor, ArtifactIndexPort, ArtifactListRequest, ArtifactPage, AuditActorKind,

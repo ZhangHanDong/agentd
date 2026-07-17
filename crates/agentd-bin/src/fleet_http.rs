@@ -320,7 +320,7 @@ async fn enroll_worker(
     };
     let observed_at = match now_unix() {
         Ok(observed_at) => observed_at,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let verified =
         match state
@@ -330,7 +330,7 @@ async fn enroll_worker(
                 observed_at,
             }) {
             Ok(verified) => verified,
-            Err(error) => return security_response(error),
+            Err(error) => return security_response(&error),
         };
     let worker_id = WorkerId::from_string(body.worker_id);
     let incarnation_id = WorkerIncarnationId::from_string(body.worker_incarnation_id);
@@ -377,7 +377,7 @@ async fn enroll_worker(
             "certificate_not_after": record.identity.binding.not_after,
         }))
         .into_response(),
-        Err(error) => security_response(error),
+        Err(error) => security_response(&error),
     }
 }
 
@@ -401,7 +401,7 @@ async fn revoke_worker_identity(
     }
     let revoked_at = match now_unix() {
         Ok(revoked_at) => revoked_at,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match revoke_workload_identity(
         state.store.pool(),
@@ -419,7 +419,7 @@ async fn revoke_worker_identity(
             "revocation_reason": record.revocation_reason,
         }))
         .into_response(),
-        Err(error) => security_response(error),
+        Err(error) => security_response(&error),
     }
 }
 
@@ -436,7 +436,7 @@ async fn heartbeat(
 ) -> Response {
     let identity = match worker_identity(&state, &headers) {
         Ok(identity) => identity,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     fleet_response(
         state
@@ -468,7 +468,7 @@ async fn pull(
 ) -> Response {
     let identity = match worker_identity(&state, &headers) {
         Ok(identity) => identity,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     fleet_response(
         state
@@ -503,7 +503,7 @@ async fn renew(
 ) -> Response {
     let identity = match worker_identity(&state, &headers) {
         Ok(identity) => identity,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     fleet_response(
         state
@@ -538,7 +538,7 @@ async fn complete(
 ) -> Response {
     let identity = match worker_identity(&state, &headers) {
         Ok(identity) => identity,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     fleet_response(
         state
@@ -573,7 +573,7 @@ async fn fail(
 ) -> Response {
     let identity = match worker_identity(&state, &headers) {
         Ok(identity) => identity,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     fleet_response(
         state
@@ -608,7 +608,7 @@ async fn cancel(
 ) -> Response {
     let identity = match worker_identity(&state, &headers) {
         Ok(identity) => identity,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     fleet_response(
         state
@@ -646,7 +646,7 @@ async fn acknowledge_artifact(
 ) -> Response {
     let identity = match worker_identity(&state, &headers) {
         Ok(identity) => identity,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     fleet_response(
         state
@@ -685,7 +685,7 @@ async fn admit_side_effect(
 ) -> Response {
     let identity = match worker_identity(&state, &headers) {
         Ok(identity) => identity,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     fleet_response(
         state
@@ -708,7 +708,7 @@ async fn admit_side_effect(
 fn worker_identity(
     state: &FleetHttpState,
     headers: &HeaderMap,
-) -> Result<WorkloadIdentityRequest, Response> {
+) -> Result<WorkloadIdentityRequest, Box<Response>> {
     let provided = headers
         .get("x-agentd-workload-proxy-authorization")
         .and_then(|value| value.to_str().ok())
@@ -721,7 +721,7 @@ fn worker_identity(
                 .ct_eq(state.proxy_authorization.as_bytes()),
         )
     {
-        return Err(unauthorized());
+        return Err(Box::new(unauthorized()));
     }
     let certificates = if let Some(encoded) = headers
         .get("x-agentd-peer-certificate-chain")
@@ -730,13 +730,13 @@ fn worker_identity(
         .filter(|value| !value.is_empty() && value.len() <= MAX_CERTIFICATE_CHAIN_HEADER_BYTES)
     {
         let encoded = encoded.split(',').map(str::to_string).collect::<Vec<_>>();
-        decode_certificate_chain(&encoded).map_err(|_| unauthorized())?
+        decode_certificate_chain(&encoded).map_err(|_| Box::new(unauthorized()))?
     } else {
         let xfcc = headers
             .get("x-forwarded-client-cert")
             .and_then(|value| value.to_str().ok())
-            .ok_or_else(unauthorized)?;
-        decode_xfcc_chain(xfcc).map_err(|_| unauthorized())?
+            .ok_or_else(|| Box::new(unauthorized()))?;
+        decode_xfcc_chain(xfcc).map_err(|_| Box::new(unauthorized()))?
     };
     Ok(WorkloadIdentityRequest {
         peer_certificates_der: certificates,
@@ -937,12 +937,13 @@ fn bounded_text(value: &str, maximum_bytes: usize) -> bool {
         && !value.chars().any(char::is_control)
 }
 
-fn now_unix() -> Result<i64, Response> {
+fn now_unix() -> Result<i64, Box<Response>> {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|_| service_unavailable("system clock is before Unix epoch"))?
+        .map_err(|_| Box::new(service_unavailable("system clock is before Unix epoch")))?
         .as_secs();
-    i64::try_from(seconds).map_err(|_| service_unavailable("system clock exceeds i64 range"))
+    i64::try_from(seconds)
+        .map_err(|_| Box::new(service_unavailable("system clock exceeds i64 range")))
 }
 
 fn operator_authorized(state: &FleetHttpState, headers: &HeaderMap) -> bool {
@@ -996,7 +997,7 @@ fn fleet_response<T: serde::Serialize>(result: Result<T, FleetServiceError>) -> 
     }
 }
 
-fn security_response(error: SecurityError) -> Response {
+fn security_response(error: &SecurityError) -> Response {
     let (status, code) = match error {
         SecurityError::Denied(_) => (StatusCode::FORBIDDEN, "workload_identity_denied"),
         SecurityError::Invalid(_) => (StatusCode::CONFLICT, "workload_identity_conflict"),

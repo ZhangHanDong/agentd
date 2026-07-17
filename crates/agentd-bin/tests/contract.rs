@@ -90,7 +90,7 @@ impl AgentBackend for RecordingAllocationBackend {
             .push((req.clone(), allocation.clone()));
         let address = allocation
             .runtime
-            .get("tmuxTarget")
+            .get("runtimeSessionRef")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("fake://dispatch")
             .to_string();
@@ -465,7 +465,7 @@ async fn production_workflow_scheduler_release_on_agent_completion() {
 }
 
 #[tokio::test]
-async fn production_workflow_scheduler_reuses_registered_pane_without_spawn() {
+async fn production_workflow_scheduler_reuses_registered_native_session_without_spawn() {
     let (host, backend, dir) = production_host_with_recording_allocation_backend(0).await;
     agent_repo::register_agent(
         host.store().pool(),
@@ -510,12 +510,12 @@ async fn production_workflow_scheduler_reuses_registered_pane_without_spawn() {
     assert_eq!(dispatches.len(), 1, "one allocation-aware dispatch");
     assert_eq!(dispatches[0].0.agent_id.as_str(), "codex-coding-1");
     assert_eq!(
-        dispatches[0].1.runtime["tmuxTarget"],
-        "agentd-codex-coding-1:0.0"
+        dispatches[0].1.runtime["runtimeSessionRef"],
+        "native://rs_coding/ra_coding"
     );
     assert_eq!(
-        dispatches[0].1.runtime["tmux_target"],
-        "agentd-codex-coding-1:0.0"
+        dispatches[0].1.runtime["runtime_session_ref"],
+        "native://rs_coding/ra_coding"
     );
     assert_eq!(dispatches[0].1.runtime["runtime"], "codex");
     assert_eq!(dispatches[0].1.runtime["model"], "codex-test");
@@ -531,12 +531,12 @@ async fn production_workflow_scheduler_reuses_registered_pane_without_spawn() {
         serde_json::from_str(&parked.payload).expect("event payload json");
     let allocation = &payload["scheduler"]["implement"][0];
     assert_eq!(
-        allocation["runtime"]["tmuxTarget"],
-        "agentd-codex-coding-1:0.0"
+        allocation["runtime"]["runtimeSessionRef"],
+        "native://rs_coding/ra_coding"
     );
     assert_eq!(
-        allocation["runtime"]["tmux_target"],
-        "agentd-codex-coding-1:0.0"
+        allocation["runtime"]["runtime_session_ref"],
+        "native://rs_coding/ra_coding"
     );
 }
 

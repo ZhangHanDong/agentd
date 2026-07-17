@@ -155,6 +155,15 @@ validate_role_name() {
     fi
 }
 
+validate_codex_role() {
+    local role="$1"
+    validate_role_name "$role"
+    if [[ "$role" != codex-* ]]; then
+        echo "invalid runtime role '$role': only codex-* roles are allowed" >&2
+        return 1
+    fi
+}
+
 reviewer_roles() {
     local reviewers=()
     IFS=',' read -r -a reviewers <<<"$REVIEWERS"
@@ -222,13 +231,13 @@ apply_runtime_matrix() {
 }
 
 validate_runtime_roles() {
-    validate_role_name "$IMPLEMENTER_ROLE"
+    validate_codex_role "$IMPLEMENTER_ROLE"
 
     local reviewer_count=0
     local reviewer
     while IFS= read -r reviewer; do
         reviewer_count=$((reviewer_count + 1))
-        validate_role_name "$reviewer"
+        validate_codex_role "$reviewer"
     done < <(reviewer_roles)
 
     if [[ "$reviewer_count" -eq 0 ]]; then

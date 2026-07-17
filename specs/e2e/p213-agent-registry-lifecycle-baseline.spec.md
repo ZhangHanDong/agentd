@@ -106,12 +106,12 @@ Scenario: store heartbeat and offline update liveness
   Level: store integration
   Test Double: tempfile SQLite database
   Given an empty migrated agentd store
-  When "codex-worker" sends a heartbeat with server, tmux target, and workspace
+  When "codex-worker" sends a heartbeat with server, native runtime ref, and workspace
   path
   Then the store creates the agent with status "online"
   And a later offline request with reason "manual-offline" changes status to
   "offline"
-  And the offline transition clears the tmux target by default
+  And the offline transition clears the native runtime ref by default
 
 Scenario: store rejects empty agent names
   Test:
@@ -139,14 +139,14 @@ Scenario: daemon registers lists and inspects agents
 Scenario: daemon heartbeat creates and offline clears liveness
   Test:
     Package: agentd-bin
-    Filter: daemon_router_agent_heartbeat_creates_and_offline_clears_tmux
+    Filter: daemon_router_agent_heartbeat_creates_and_offline_clears_native_runtime_ref
   Level: HTTP integration
   Test Double: ProductionRunHost over tempfile SQLite and fake ports
   Given an agentd daemon router over an empty store
   When a client posts `/api/agents/codex-worker/heartbeat`
   Then the response reports `created` as true and the agent status as "online"
   When the client posts `/api/agents/codex-worker/offline`
-  Then the response reports status "offline" and `tmux_target` is null
+  Then the response reports status "offline" and `native_runtime_ref` is null
 
 Scenario: daemon returns 404 for unknown inspect and offline
   Test:

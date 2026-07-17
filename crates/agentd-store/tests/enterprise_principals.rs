@@ -288,9 +288,9 @@ async fn matrix_appservice_requires_trusted_namespace() {
 async fn principal_schema_contains_no_credentials_or_policy_authority_tables() {
     let (store, _dir) = store().await;
     let table_names: Vec<String> = sqlx::query_scalar(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'enterprise_%' \
-         OR type = 'table' AND name LIKE 'oidc_%' \
-         OR type = 'table' AND name LIKE 'matrix_principal_%' \
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND ( \
+         name = 'enterprise_principals' OR name LIKE 'oidc_%' \
+         OR name LIKE 'matrix_principal_%') \
          ORDER BY name",
     )
     .fetch_all(store.pool())

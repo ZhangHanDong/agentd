@@ -247,18 +247,16 @@ pub enum OfflineRecoveryPolicy {
     AllowPinnedUntilExpiry,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum CertificationGate {
+    #[default]
     None,
     Machine,
-    Human { required: u16, eligible: u16 },
-}
-
-impl Default for CertificationGate {
-    fn default() -> Self {
-        Self::None
-    }
+    Human {
+        required: u16,
+        eligible: u16,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

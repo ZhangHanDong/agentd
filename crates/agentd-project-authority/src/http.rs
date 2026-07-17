@@ -25,6 +25,7 @@ impl std::fmt::Debug for HttpSpecifyAuthorityTransport {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("HttpSpecifyAuthorityTransport")
+            .field("client", &self.client)
             .field("base_url", &self.base_url)
             .field("authorization", &"[REDACTED]")
             .finish()
@@ -227,6 +228,7 @@ async fn decode_authority_response<T: DeserializeOwned>(
         .map_err(|error| ProjectAuthorityError::Unverifiable(error.to_string()))
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn transport_error(error: reqwest::Error) -> ProjectAuthorityError {
     ProjectAuthorityError::Unavailable(error.to_string())
 }

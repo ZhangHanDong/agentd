@@ -560,7 +560,7 @@ fn absolute_new_path(path: &Path) -> Result<PathBuf, CommandFailure> {
 fn file_sha256(path: &Path) -> CommandResult<(String, u64)> {
     let mut file = fs::File::open(path)?;
     let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; 64 * 1024];
     let mut size = 0_u64;
     loop {
         let read = file.read(&mut buffer)?;

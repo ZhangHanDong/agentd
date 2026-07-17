@@ -28,7 +28,7 @@
 - [ ] Run duplicate acquisition/release/upload and network-partition failure injection; retain idempotency and operator explain evidence.
 - [ ] Inspect queue/lease/outbox transaction boundaries during forced process termination; prove each accepted acquisition has exactly one current lease, increasing fencing token, and durable outbox event.
 - [ ] Exercise protocol-version mismatch, stale heartbeat sequence/time, placement mismatch, expired snapshot, advanced revocation epoch, quota exhaustion, and zero-capacity pulls; retain stable structured denial/block codes.
-- [ ] Interrupt multipart artifact upload before and after acknowledgement; prove publication requires the exact upload id, artifact digest, task, incarnation, lease, fencing token, and artifact-acceptance epoch.
+- [ ] Interrupt a partial-upload/multipart artifact transfer before and after acknowledgement; prove publication requires the exact upload id, artifact digest, task, incarnation, lease, fencing token, and artifact-acceptance epoch.
 - [ ] FSF-3 operator sign-off recorded.
 
 ## AD-E3

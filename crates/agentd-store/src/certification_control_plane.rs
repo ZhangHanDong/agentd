@@ -1,4 +1,4 @@
-//! Durable AD-E4 execution-evidence and OpenFab certification control plane.
+//! Durable AD-E4 execution-evidence and `OpenFab` certification control plane.
 
 use agentd_core::ports::{
     CertificationError, CertificationRequest, CertificationStatePort, CertificationStateTransition,
@@ -268,7 +268,13 @@ impl EvidenceEnvelopeStorePort for SqliteCertificationControlPlane {
         .bind(envelope_sha256)
         .bind(envelope_json)
         .bind(envelope.payload.execution_run_id.as_str())
-        .bind(envelope.payload.execution_task_id.as_ref().map(|id| id.as_str()))
+        .bind(
+            envelope
+                .payload
+                .execution_task_id
+                .as_ref()
+                .map(agentd_core::types::TaskRunId::as_str),
+        )
         .bind(snapshot.authority_key().as_str())
         .bind(snapshot.resource_id())
         .bind(snapshot.resource_version())
@@ -292,6 +298,7 @@ impl EvidenceEnvelopeStorePort for SqliteCertificationControlPlane {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 #[async_trait::async_trait]
 impl CertificationStatePort for SqliteCertificationControlPlane {
     async fn record_certification_request(
@@ -629,8 +636,8 @@ impl CertificationStatePort for SqliteCertificationControlPlane {
         .bind(&request.source_commit)
         .bind(&request.subject_sha256)
         .bind(policy.map(|value| value.authority_key().as_str()))
-        .bind(policy.map(|value| value.resource_id()))
-        .bind(policy.map(|value| value.resource_version()))
+        .bind(policy.map(agentd_core::types::AuthorityResourceRef::resource_id))
+        .bind(policy.map(agentd_core::types::AuthorityResourceRef::resource_version))
         .bind(request.certification_policy_sha256.as_deref())
         .bind(
             request
@@ -1337,6 +1344,7 @@ fn json<T: Serialize>(value: &T) -> Result<String, CertificationError> {
     serde_json::to_string(value).map_err(|error| CertificationError::Invalid(error.to_string()))
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn from_json<T: for<'de> Deserialize<'de>>(value: String) -> Result<T, CertificationError> {
     serde_json::from_str(&value).map_err(|error| CertificationError::Unavailable(error.to_string()))
 }
@@ -1345,6 +1353,7 @@ fn sha256(value: &[u8]) -> String {
     hex::encode(Sha256::digest(value))
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn storage_error(error: sqlx::Error) -> CertificationError {
     CertificationError::Unavailable(error.to_string())
 }

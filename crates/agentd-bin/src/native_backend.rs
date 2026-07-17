@@ -67,6 +67,7 @@ impl NativeAgentBackend {
         Arc::clone(&self.service)
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn start_native(
         &self,
         request: agentd_core::types::SpawnRequest,
@@ -105,7 +106,6 @@ impl NativeAgentBackend {
         let provider_command = provider_command(provider, &request, &worktree);
         let command_sha256 = provider_command_sha256(&provider_command);
         let security = local_security_context(
-            &request.agent_id,
             &execution_task_id,
             &authority.worker_id,
             &authority.worker_incarnation_id,
@@ -167,7 +167,9 @@ impl NativeAgentBackend {
             },
         )
         .await?;
-        if let Some(prompt) = request.initial_prompt.filter(|prompt| !prompt.is_empty()) {
+        if provider != RuntimeProvider::Codex
+            && let Some(prompt) = request.initial_prompt.filter(|prompt| !prompt.is_empty())
+        {
             if let Err(error) = self
                 .service
                 .send_text(
@@ -453,9 +455,8 @@ struct LocalSecurityContext {
     sandbox_profile_sha256: String,
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn local_security_context(
-    agent_id: &AgentId,
     execution_task_id: &agentd_core::types::TaskRunId,
     worker_id: &agentd_core::types::WorkerId,
     worker_incarnation_id: &WorkerIncarnationId,
@@ -590,7 +591,7 @@ fn provider_command(
     request: &agentd_core::types::SpawnRequest,
     worktree: &Path,
 ) -> ProviderCommand {
-    let (program, arguments) = match provider {
+    let (program, mut arguments) = match provider {
         RuntimeProvider::Codex => (
             "codex".to_string(),
             vec![
@@ -598,6 +599,7 @@ fn provider_command(
                 "never".to_string(),
                 "--sandbox".to_string(),
                 "danger-full-access".to_string(),
+                "--no-alt-screen".to_string(),
             ],
         ),
         RuntimeProvider::ClaudeCode => (
@@ -606,6 +608,15 @@ fn provider_command(
         ),
         RuntimeProvider::Custom => unreachable!("spawn request has no custom CLI variant"),
     };
+    // Codex can discard PTY input written before its TUI finishes initializing.
+    if provider == RuntimeProvider::Codex
+        && let Some(prompt) = request
+            .initial_prompt
+            .as_ref()
+            .filter(|prompt| !prompt.is_empty())
+    {
+        arguments.push(prompt.clone());
+    }
     ProviderCommand {
         provider,
         program,
@@ -705,6 +716,7 @@ fn project_ref_error(error: impl std::fmt::Display) -> CoreError {
     CoreError::Invariant(format!("native authority reference is invalid: {error}"))
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn native_error(error: NativeRuntimeError) -> CoreError {
     CoreError::Backend(error.to_string())
 }
@@ -726,4 +738,38 @@ fn unix_system_time(seconds: i64) -> SystemTime {
 
 fn sha256(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use agentd_core::types::{LaunchStrategy, SpawnRequest};
+
+    use super::*;
+
+    fn spawn_request(initial_prompt: Option<&str>) -> SpawnRequest {
+        SpawnRequest {
+            agent_id: AgentId::parsed("codex-impl"),
+            execution_task_id: None,
+            mxid: None,
+            cli: CliKind::Codex,
+            worktree: PathBuf::from("/tmp/agentd-worktree"),
+            initial_prompt: initial_prompt.map(str::to_string),
+            env_overrides: HashMap::new(),
+            launch_strategy: LaunchStrategy::Direct,
+        }
+    }
+
+    #[test]
+    fn codex_provider_starts_with_initial_prompt_as_an_argument() {
+        let request = spawn_request(Some("implement the assigned task"));
+
+        let command = provider_command(RuntimeProvider::Codex, &request, &request.worktree);
+
+        assert_eq!(
+            command.arguments.last().map(String::as_str),
+            Some("implement the assigned task")
+        );
+    }
 }

@@ -29,6 +29,7 @@ pub struct DoctorReport {
     pub checks: Vec<DoctorCheck>,
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn run_doctor(pool: &SqlitePool, observed_at: i64) -> Result<DoctorReport, StoreError> {
     let schema_text =
         sqlx::query_scalar::<_, String>("SELECT value FROM schema_meta WHERE key = 'version'")

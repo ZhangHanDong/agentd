@@ -110,6 +110,7 @@ impl std::fmt::Debug for RuntimeSandboxCommandRequest {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("RuntimeSandboxCommandRequest")
+            .field("admission", &self.admission)
             .field("sandbox_id", &self.sandbox.sandbox_id)
             .field("argument_count", &self.argv.len())
             .field(
@@ -359,7 +360,7 @@ pub struct RuntimeRecoveryRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "disposition", rename_all = "snake_case")]
 pub enum RuntimeRecoveryDisposition {
-    Live { snapshot: RuntimeSnapshot },
+    Live { snapshot: Box<RuntimeSnapshot> },
     Resumable { native_session_ref: String },
     RuntimeGone,
 }

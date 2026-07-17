@@ -15,17 +15,14 @@ request an all-Codex implementer plus reviewer set without requiring Claude.
 - `AGENTD_REAL_EXECUTE_RUNTIMES` is a comma-separated matrix with exactly four
   entries: implementer, security reviewer, performance reviewer, readability
   reviewer.
-- Supported runtime values are `codex` and `claude`; `gemini` remains out of
-  scope because agentd's runtime launcher currently supports Claude Code and
-  Codex only.
+- The only supported runtime value is `codex`; any other value is rejected
+  before preflight.
 - A `codex,codex,codex,codex` matrix maps to role names
   `codex-impl`, `codex-sec`, `codex-perf`, and `codex-readability`.
-- A `claude` matrix position maps to the corresponding `claude-*` role name so
-  runtime selection stays explicit and role-prefix based.
 - The runtime matrix conflicts with explicit `--implementer-role` or
   `--reviewers` flags; ambiguous precedence is rejected before preflight.
 - Dry-run and preflight-only must apply the same matrix parsing as execute mode
-  without creating daemon, tmux, Claude, Codex, or GitHub side effects.
+  without creating daemon, Claude, Codex, or GitHub side effects.
 - p203 keeps `real_codex_execution` partial until a real
   `AGENTD_REAL_EXECUTE_SMOKE=1 --execute` Codex run succeeds.
 
@@ -41,10 +38,9 @@ request an all-Codex implementer plus reviewer set without requiring Claude.
 
 ### Forbidden
 
-- Do not start real Claude, Codex, tmux, Matrix, or remote relay processes in
-  tests.
+- Do not start real Claude, Codex, Matrix, or remote relay processes in tests.
 - Do not run `scripts/agentd_real_execute_smoke.sh --execute`.
-- Do not change Codex or Claude launcher internals.
+- Do not add a non-Codex launcher path to this smoke.
 - Do not change p201 role-prefix runtime selection semantics.
 - Do not add a Gemini runtime path in this slice.
 
@@ -81,7 +77,7 @@ Scenario: all-Codex runtime matrix dry-run prints derived roles
 Scenario: all-Codex runtime matrix preflight does not require Claude
   Test:
     Package: agentd-bin
-    Filter: real_execute_smoke_runtime_matrix_codex_only_preflight_does_not_require_claude
+    Filter: real_execute_smoke_runtime_matrix_codex_only_preflight_succeeds
   Level: shell smoke preflight
   Test Double: fake tools with Codex present and Claude absent
   Given `AGENTD_REAL_EXECUTE_RUNTIMES=codex,codex,codex,codex`
@@ -90,16 +86,16 @@ Scenario: all-Codex runtime matrix preflight does not require Claude
   And stderr does not mention a missing Claude prerequisite
   And the daemon log is not created
 
-Scenario: mixed runtime matrix requires Claude when any slot is Claude
+Scenario: non-Codex runtime matrix values are rejected
   Test:
     Package: agentd-bin
-    Filter: real_execute_smoke_runtime_matrix_mixed_preflight_requires_claude
-  Level: shell smoke preflight
-  Test Double: fake tools with Codex present and Claude absent
+    Filter: real_execute_smoke_runtime_matrix_rejects_non_codex_runtime
+  Level: shell smoke validation
+  Test Double: no real agents
   Given `AGENTD_REAL_EXECUTE_RUNTIMES=codex,claude,codex,codex`
-  When the execute smoke script runs in preflight-only mode
-  Then preflight fails before starting the daemon
-  And stderr names the missing `claude` prerequisite
+  When the execute smoke script validates options
+  Then validation fails before starting the daemon
+  And stderr states that only `codex` is supported
 
 Scenario: invalid runtime matrix shape is rejected before preflight
   Test:

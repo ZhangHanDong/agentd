@@ -1104,12 +1104,12 @@ async fn http_agent_chat_pool_scheduler_routes_queue_and_release() {
             "role": "coding",
             "capability": "medium",
             "runtime": "codex",
-            "tmux_target": "cod1:0.0"
+            "native_runtime_ref": "native://rs_cod1/ra_active"
         }),
         json!({
             "name": "wf_implementer",
             "runtime": "codex",
-            "tmux_target": "wf_implementer:0.0"
+            "native_runtime_ref": "native://rs_wf_implementer/ra_active"
         }),
     ] {
         let registered = post(app.clone(), "/api/agents", &body.to_string()).await;
@@ -1367,10 +1367,7 @@ async fn dashboard_shell_uses_an_http_only_operator_session_without_browser_toke
     assert!(body.contains(r#"id="operator-login" hidden"#), "{body}");
     assert!(body.contains(r#"type="password""#), "{body}");
     assert!(body.contains(r#"fetch("/api/operator/session""#), "{body}");
-    assert!(
-        body.contains(r#"Authorization: `Bearer ${token}`"#),
-        "{body}"
-    );
+    assert!(body.contains(r"Authorization: `Bearer ${token}`"), "{body}");
     assert!(body.contains(r#"credentials: "same-origin""#), "{body}");
     assert_eq!(body.matches(r#"method: "POST""#).count(), 1, "{body}");
     assert!(!body.contains("localStorage"), "{body}");

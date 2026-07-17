@@ -6,22 +6,23 @@ tags: [agent-chat-replacement, registry, lifecycle, runtime, phase-c, p234]
 ## Intent
 
 Advance the agent-chat replacement path by wiring the next local agent lifecycle
-operations above the existing tmux primitives: stop an online agent session,
-record the stopped state durably, and recover a surviving tmux session after a
+operations above the native runtime boundary: stop an online agent session,
+record the stopped state durably, and recover a surviving native session after a
 daemon restart through explicit rebind. This slice keeps the work local and
-Codex/fake-testable; it does not start or stop real Claude in automated tests.
+Codex/fake-testable; it does not invoke non-Codex providers in automated tests.
 
 ## Decisions
 
 - Add an operator-local `POST /api/agents/:name/down` endpoint compatible with
   the agent-chat dashboard action. It stops the registered runtime through an
   injectable lifecycle port, archives before shutdown, marks the agent offline,
-  clears the tmux target, and records lifecycle metadata in `runtime_state`.
+  clears the native runtime reference, and records lifecycle metadata in
+  `runtime_state`.
 - Keep `POST /api/agents/:name/offline` as the agent/server-reported state
   endpoint. `down` is an operator action that performs runtime shutdown first.
 - Add an operator-local `POST /api/agents/:name/rebind` endpoint. It reads the
-  stored tmux target, probes/reconstructs a handle through the lifecycle port,
-  and marks the agent online when the target is live.
+  stored native runtime reference, probes/reconstructs a handle through the
+  lifecycle port, and marks the agent online when the target is live.
 - Rebind returns HTTP 200 with `rebound=false` when the stored target no longer
   exists; in that case agentd marks the agent offline with reason
   `rebind-missing-session` and preserves the recovery observation in
@@ -31,9 +32,9 @@ Codex/fake-testable; it does not start or stop real Claude in automated tests.
 - Add `agentctl agent down` and `agentctl agent rebind` as dependency-free HTTP
   clients for the new daemon endpoints. These are operator commands and use the
   bearer token path, not the per-agent token path.
-- Real daemon assembly adapts the existing `TmuxBackend::shutdown` and
-  `TmuxBackend::rebind` methods behind the lifecycle port. Tests use Codex
-  records, fake backends, and recording fake lifecycle ports only.
+- Real daemon assembly uses `NativeAgentLifecycle` behind the lifecycle port.
+  Tests use Codex records, fake backends, and recording fake lifecycle ports
+  only.
 - Keep replacement parity partial after this slice. Dashboard panels,
   Matrix/remote relay state, service cutover, rollback automation, token
   provisioning/rotation, and full agent home/profile management remain open.
@@ -101,11 +102,11 @@ Scenario: daemon down stops runtime and marks the agent offline
     Filter: daemon_router_agent_down_stops_runtime_and_marks_offline
   Level: HTTP integration
   Test Double: ProductionRunHost over tempfile SQLite, fake backend, recording lifecycle port
-  Given an online registered Codex agent with a stored tmux target and state dir
+  Given an online registered Codex agent with a stored native runtime reference and state dir
   When a client posts `/api/agents/codex-worker/down`
   Then the recording lifecycle port sees one shutdown request for that target
   And the response reports `action="agent-down-kill"`
-  And the agent status becomes "offline", `tmux_target` is null, and
+  And the agent status becomes "offline", `native_runtime_ref` is null, and
   `runtime_state.lifecycle.state` is "down"
 
 Scenario: daemon rebind recovers live sessions and marks missing targets offline
@@ -131,7 +132,7 @@ Scenario: daemon rebuild can recover a stored session through rebind
   Given an online registered Codex agent persisted by one daemon host
   When a second daemon host opens the same database and posts
   `/api/agents/codex-worker/rebind`
-  Then the session is recovered from the stored tmux target
+  Then the session is recovered from the stored native runtime reference
   And no backend spawn is required
 
 Scenario: agentctl calls down and rebind endpoints

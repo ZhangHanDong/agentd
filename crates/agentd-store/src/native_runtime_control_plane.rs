@@ -15,7 +15,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 
-/// SQLite implementation of the native runtime durable contract.
+/// `SQLite` implementation of the native runtime durable contract.
 #[derive(Debug, Clone)]
 pub struct SqliteNativeRuntimeControlPlane {
     pool: SqlitePool,
@@ -139,6 +139,7 @@ impl RuntimeEventPort for SqliteNativeRuntimeControlPlane {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 #[async_trait::async_trait]
 impl RuntimeLedgerPort for SqliteNativeRuntimeControlPlane {
     async fn register_runtime_session(
@@ -632,7 +633,12 @@ impl RuntimeLedgerPort for SqliteNativeRuntimeControlPlane {
         )
         .bind(record.session_id.as_str())
         .bind(record.previous_attempt_id.as_str())
-        .bind(record.next_attempt_id.as_ref().map(|id| id.as_str()))
+        .bind(
+            record
+                .next_attempt_id
+                .as_ref()
+                .map(agentd_core::types::RuntimeAttemptId::as_str),
+        )
         .bind(disposition)
         .bind(record_sha256)
         .bind(record_json)
@@ -1017,7 +1023,7 @@ fn validate_native_ref(reference: &str) -> Result<(), NativeRuntimeError> {
     if reference.is_empty()
         || reference.len() > 512
         || reference != reference.trim()
-        || reference.chars().any(|character| character.is_control())
+        || reference.chars().any(char::is_control)
     {
         Err(NativeRuntimeError::Invalid(
             "provider native session reference is invalid".to_string(),

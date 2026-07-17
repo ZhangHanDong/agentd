@@ -83,6 +83,7 @@ impl SqliteMatrixGateway {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 #[async_trait::async_trait]
 impl MatrixGatewayPort for SqliteMatrixGateway {
     async fn configure_project(
@@ -1295,6 +1296,7 @@ fn row_to_state_mapping(
     })
 }
 
+#[allow(clippy::too_many_lines)]
 async fn load_robrix_run(
     pool: &SqlitePool,
     run_row: &sqlx::sqlite::SqliteRow,
@@ -1543,6 +1545,7 @@ fn validate_sha256(value: &str) -> Result<(), MatrixGatewayError> {
     Ok(())
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn storage_error(error: sqlx::Error) -> MatrixGatewayError {
     MatrixGatewayError::Unavailable(format!("Matrix gateway storage: {error}"))
 }

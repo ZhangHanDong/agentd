@@ -52,3 +52,25 @@ fn deployment_checklist_keeps_spec_and_plan_path_gaps() {
         "TaskAssignment gap line should keep spec_path and plan_path as remaining gaps: {line}"
     );
 }
+
+#[test]
+fn enterprise_preflight_can_render_repository_policy_inputs() {
+    let script = read_repo_file("scripts/agentd_enterprise_deploy_preflight.sh");
+
+    assert!(
+        script.contains("kubectl kustomize --load-restrictor=LoadRestrictionsNone"),
+        "enterprise preflight must permit the checked-in profile to read config/enterprise"
+    );
+    assert!(
+        !script.contains("startswith("),
+        "enterprise preflight must use expressions supported by mikefarah/yq"
+    );
+    assert!(
+        script.contains("test(\"^agentd-worker-\")"),
+        "enterprise preflight must retain anchored worker resource matching"
+    );
+    assert!(
+        script.contains("yq ea -N -r"),
+        "enterprise preflight must suppress document separators in multi-match queries"
+    );
+}

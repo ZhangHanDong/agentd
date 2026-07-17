@@ -398,7 +398,12 @@ fn matrix_bot_command_executor_replies_to_help_status_agents_and_groups() {
     assert!(status.reply.body.contains("=== System Status ==="));
     assert!(status.reply.body.contains("Agents: 2"));
     assert!(status.reply.body.contains("Groups: 1"));
-    assert!(status.reply.body.contains("Tmux sessions: unavailable"));
+    assert!(
+        status
+            .reply
+            .body
+            .contains("Native runtime sessions: unavailable")
+    );
     assert!(status.reply.body.contains("Bridge: running"));
     assert!(online_agents.reply.body.contains("=== Online Agents ==="));
     assert!(online_agents.reply.body.contains("codex-worker"));

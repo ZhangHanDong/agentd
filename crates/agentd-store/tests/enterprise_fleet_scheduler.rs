@@ -65,7 +65,7 @@ async fn heartbeat_must_match_operator_enrolled_image_attestation() {
     sqlx::query("UPDATE workers SET labels_json = ? WHERE id = ?")
         .bind(serde_json::to_string(&labels).expect("labels"))
         .bind(fixture.worker_id.as_str())
-        .execute(fixture._store.pool())
+        .execute(fixture.store.pool())
         .await
         .expect("attestation labels");
 
@@ -84,7 +84,7 @@ async fn heartbeat_must_match_operator_enrolled_image_attestation() {
     );
     sqlx::query("UPDATE workers SET labels_json = '{}' WHERE id = ?")
         .bind(fixture.worker_id.as_str())
-        .execute(fixture._store.pool())
+        .execute(fixture.store.pool())
         .await
         .expect("remove attestation labels");
     assert_eq!(
@@ -99,7 +99,7 @@ async fn heartbeat_must_match_operator_enrolled_image_attestation() {
     sqlx::query("UPDATE workers SET labels_json = ? WHERE id = ?")
         .bind(serde_json::to_string(&labels).expect("labels"))
         .bind(fixture.worker_id.as_str())
-        .execute(fixture._store.pool())
+        .execute(fixture.store.pool())
         .await
         .expect("restore attestation labels");
     sqlx::query(
@@ -107,7 +107,7 @@ async fn heartbeat_must_match_operator_enrolled_image_attestation() {
          WHERE rollout_id = ?",
     )
     .bind(ROLLOUT_ID)
-    .execute(fixture._store.pool())
+    .execute(fixture.store.pool())
     .await
     .expect("roll back rollout");
     assert_eq!(
@@ -137,7 +137,7 @@ async fn pull_rejects_an_overlong_worker_selected_lease() {
 }
 
 struct Fixture {
-    _store: SqliteStore,
+    store: SqliteStore,
     _dir: tempfile::TempDir,
     scheduler: SqliteFleetScheduler,
     task_id: TaskRunId,
@@ -145,6 +145,7 @@ struct Fixture {
     incarnation_id: WorkerIncarnationId,
 }
 
+#[allow(clippy::too_many_lines)]
 async fn fixture() -> Fixture {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = SqliteStore::connect(&dir.path().join("agentd.db"))
@@ -239,7 +240,7 @@ async fn fixture() -> Fixture {
     .expect("identity binding");
     let scheduler = SqliteFleetScheduler::new(store.pool().clone(), Arc::new(CurrentEpoch));
     Fixture {
-        _store: store,
+        store,
         _dir: dir,
         scheduler,
         task_id,
@@ -258,7 +259,7 @@ async fn revoked_identity_is_offlined_and_cannot_commit_with_cached_authenticati
         .expect("initial heartbeat");
 
     revoke_workload_identity(
-        fixture._store.pool(),
+        fixture.store.pool(),
         &"c".repeat(64),
         165,
         "operator_revocation",
@@ -271,7 +272,7 @@ async fn revoked_identity_is_offlined_and_cannot_commit_with_cached_authenticati
          WHERE worker_incarnation_id = ?",
     )
     .bind(fixture.incarnation_id.as_str())
-    .fetch_one(fixture._store.pool())
+    .fetch_one(fixture.store.pool())
     .await
     .expect("availability");
     assert_eq!(availability.get::<String, _>("worker_status"), "offline");

@@ -31,11 +31,19 @@ fn ad_e2_candidate_assigns_scheduler_capabilities_to_canonical_code() {
             "crates/agentd-store/src/fleet_scheduler.rs",
             &[
                 "SqliteFleetScheduler",
-                "BEGIN IMMEDIATE",
+                "SqliteImmediateTransaction",
                 "dispatch_in_transaction",
                 "check_epoch",
                 "record_fencing_rejection",
                 "task.dead_letter",
+            ][..],
+        ),
+        (
+            "crates/agentd-store/src/util.rs",
+            &[
+                "SqliteImmediateTransaction",
+                "BEGIN IMMEDIATE",
+                "close_on_drop",
             ][..],
         ),
         (

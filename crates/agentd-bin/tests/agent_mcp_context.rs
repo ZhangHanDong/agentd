@@ -114,7 +114,7 @@ fn config_with_relative_paths() -> DaemonConfig {
         api_token: None,
         agent_tokens: Vec::new(),
         agent_token_mode: "audit".to_string(),
-        enterprise: Default::default(),
+        enterprise: agentd_bin::EnterpriseDaemonConfig::default(),
     }
 }
 

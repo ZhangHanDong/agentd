@@ -12,7 +12,7 @@ fn read(path: &str) -> String {
 #[test]
 fn ci_clippy_known_warning_patterns_are_absent() {
     assert_core_markers_absent();
-    assert_tmux_markers_absent();
+    assert_worktree_markers_absent();
     assert_surface_markers_absent();
     assert_agentd_bin_markers_absent();
     assert_ci_workflow_markers_absent();
@@ -57,20 +57,6 @@ fn assert_core_markers_absent() {
         "task_run should be backticked in in-memory store docs"
     );
 
-    let tmux_pool = read("crates/agentd-tmux/src/pool.rs");
-    assert!(
-        !tmux_pool.contains(".filter_map(|path| path.file_name().map(|name| name.to_os_string()))"),
-        "pool preserve-name collection should avoid redundant closure"
-    );
-    assert!(
-        !tmux_pool.contains("let dst = dest.join(&name);"),
-        "sync_dir_contents should avoid dest/dst similar names"
-    );
-    assert!(
-        !tmux_pool.contains("panic!(\"git {}: {err}\", args.join(\" \"))"),
-        "tmux pool test git helpers should avoid clippy::panic"
-    );
-
     let handlers_park = read("crates/agentd-core/tests/handlers_park.rs");
     assert!(
         !handlers_park.contains("req.worktree == PathBuf::from(\"/tmp/agentd-task-wt\")"),
@@ -82,25 +68,26 @@ fn assert_core_markers_absent() {
     );
 }
 
-fn assert_tmux_markers_absent() {
-    let tmux_pool = read("crates/agentd-tmux/src/pool.rs");
+fn assert_worktree_markers_absent() {
+    let worktree_pool = read("crates/agentd-worktree/src/lib.rs");
     assert!(
-        !tmux_pool.contains(".filter_map(|path| path.file_name().map(|name| name.to_os_string()))"),
+        !worktree_pool
+            .contains(".filter_map(|path| path.file_name().map(|name| name.to_os_string()))"),
         "pool preserve-name collection should avoid redundant closure"
     );
     assert!(
-        !tmux_pool.contains("let dst = dest.join(&name);"),
+        !worktree_pool.contains("let dst = dest.join(&name);"),
         "sync_dir_contents should avoid dest/dst similar names"
     );
     assert!(
-        !tmux_pool.contains("panic!(\"git {}: {err}\", args.join(\" \"))"),
-        "tmux pool test git helpers should avoid clippy::panic"
+        !worktree_pool.contains("panic!(\"git {}: {err}\", args.join(\" \"))"),
+        "worktree pool test git helpers should avoid clippy::panic"
     );
 
-    let tmux_pool_test = read("crates/agentd-tmux/tests/pool.rs");
+    let worktree_pool_test = read("crates/agentd-worktree/tests/pool.rs");
     assert!(
-        !tmux_pool_test.contains("create fake worktree {p:?}: {e}"),
-        "tmux pool tests should avoid unnecessary debug formatting"
+        !worktree_pool_test.contains("create fake worktree {p:?}: {e}"),
+        "worktree pool tests should avoid unnecessary debug formatting"
     );
 }
 

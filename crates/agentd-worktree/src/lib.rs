@@ -383,3 +383,96 @@ fn replace_with_symlink(_source: &Path, _destination: &Path) -> io::Result<()> {
         "snapshotting symlinks is unsupported on this platform",
     ))
 }
+
+#[cfg(test)]
+mod git_provider_tests {
+    use std::process::Command;
+
+    use super::*;
+
+    fn git(repo: &Path, arguments: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(arguments)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {arguments:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn initialized_repository(root: &Path) -> PathBuf {
+        let repository = root.join("repository");
+        fs::create_dir_all(&repository).expect("create repository");
+        git(&repository, &["init"]);
+        fs::write(repository.join("README.md"), "# worktree fixture\n")
+            .expect("write initial file");
+        git(&repository, &["add", "README.md"]);
+        git(
+            &repository,
+            &[
+                "-c",
+                "user.name=agentd-test",
+                "-c",
+                "user.email=agentd-test@example.invalid",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+        repository
+    }
+
+    #[tokio::test]
+    async fn git_worktree_root_validation_rejects_parent_repo_climb() {
+        let temporary = tempfile::tempdir().expect("temporary repository");
+        let repository = initialized_repository(temporary.path());
+        let nested = repository.join(".agentd/worktrees/fake");
+        fs::create_dir_all(&nested).expect("create nested directory");
+
+        let error = validate_git_worktree_root(&nested)
+            .await
+            .expect_err("nested directory without git metadata must fail");
+        assert!(error.to_string().contains("missing .git metadata"));
+    }
+
+    #[tokio::test]
+    async fn git_provider_create_returns_valid_worktree_root() {
+        let temporary = tempfile::tempdir().expect("temporary repository");
+        let repository = initialized_repository(temporary.path());
+        let worktree_base = temporary.path().join("worktrees");
+        let provider = GitWorktreeProvider::new(&repository, &worktree_base);
+
+        let worktree = provider
+            .create("wt-task-tr_0123456789ABCDEFGHJKMNPQRS")
+            .await
+            .expect("create worktree");
+        assert!(worktree.join(".git").exists());
+        validate_git_worktree_root(&worktree)
+            .await
+            .expect("created path is a worktree root");
+    }
+
+    #[test]
+    fn pool_worktrees_keeps_task_keyed_names_preserving_foreign() {
+        let valid = "/pool/wt-task-tr_0123456789ABCDEFGHJKMNPQRS";
+        let porcelain = format!(
+            "worktree {valid}\nHEAD a\ndetached\n\nworktree /pool/wt-task-feature\nHEAD b\n\n"
+        );
+
+        assert_eq!(pool_worktrees(&porcelain), [PathBuf::from(valid)]);
+    }
+
+    #[test]
+    fn pool_worktrees_keeps_reviewer_keyed_names_preserving_foreign() {
+        let valid = "/pool/wt-review-rr_0123456789ABCDEFGHJKMNPQRS-codex-sec";
+        let porcelain = format!(
+            "worktree {valid}\nHEAD a\ndetached\n\nworktree /pool/wt-review-feature\nHEAD b\n\n"
+        );
+
+        assert_eq!(pool_worktrees(&porcelain), [PathBuf::from(valid)]);
+    }
+}

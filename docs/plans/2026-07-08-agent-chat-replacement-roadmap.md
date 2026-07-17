@@ -126,7 +126,7 @@ are not stored by dashboard script and remain mandatory for mutations. Phase C
 is still incomplete because this browser path awaits final TLS/browser evidence,
 and bridge/relay secrets, import-time token provisioning, token rotation, and
 dashboard agent views remain open. The earlier p234 candidate covers the local
-kill/rebind/session-recovery baseline but not its final cutover acceptance.
+kill, rebind, and session recovery baseline but not its final cutover acceptance.
 
 Deliverables:
 

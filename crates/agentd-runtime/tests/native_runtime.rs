@@ -171,6 +171,7 @@ impl<T> ExpectLock<T> for Mutex<T> {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn fake_pty_proves_redacted_lifecycle_input_and_archive() {
     let temporary = tempfile::tempdir().expect("temporary archive");
     let archive: Arc<dyn RuntimeArchivePort> = Arc::new(

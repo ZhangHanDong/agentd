@@ -258,6 +258,7 @@ async fn offline_leader_cannot_commit_before_its_lease_expires() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn rollout_and_autoscaling_are_zone_and_policy_bounded() {
     let directory = tempfile::tempdir().unwrap();
     let store = SqliteStore::connect(&directory.path().join("agentd.db"))
@@ -540,11 +541,11 @@ async fn legal_hold_precedes_expiry_and_replication() {
         released_at: None,
     };
     scale.place_legal_hold(&fence, &hold).await.unwrap();
-    let held = scale
+    let held_decision = scale
         .decide_retention(&tenant, "artifact", &subject, 1, 100)
         .await
         .unwrap();
-    assert_eq!(RetentionDisposition::LegalHold, held.disposition);
+    assert_eq!(RetentionDisposition::LegalHold, held_decision.disposition);
     scale
         .release_legal_hold(&fence, &hold.legal_hold_id, 101)
         .await
@@ -571,6 +572,7 @@ async fn legal_hold_precedes_expiry_and_replication() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn tenant_key_rotation_and_replica_retry_preserve_state_transitions() {
     let directory = tempfile::tempdir().unwrap();
     let store = SqliteStore::connect(&directory.path().join("agentd.db"))

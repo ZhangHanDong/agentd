@@ -6,7 +6,7 @@ use agentd_store::native_agent_binding::{
 #[tokio::test]
 async fn local_native_authority_is_stable_and_system_tasks_are_explicit() {
     let directory = tempfile::tempdir().expect("native authority directory");
-    let store = SqliteStore::connect(directory.path().join("agentd.db"))
+    let store = SqliteStore::connect(&directory.path().join("agentd.db"))
         .await
         .expect("store");
     let first = ensure_native_runtime_authority(store.pool(), "host-one")

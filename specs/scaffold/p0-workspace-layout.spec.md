@@ -5,7 +5,7 @@ tags: [scaffold, mvp, p0]
 
 ## Intent
 
-Establish a Cargo workspace with the nine crates described in design §1.2.
+Establish a Cargo workspace with the current twelve crates described in design §1.2.
 All crates must compile cleanly. The workspace lint table forbids unsafe and
 warns at clippy::all + clippy::pedantic; production crates opt into
 clippy::unwrap_used / clippy::panic per-crate so test code stays clean. Major
@@ -14,7 +14,7 @@ pinned at the workspace root and inherited.
 
 ## Decisions
 
-- Seven library crates: agentd-core, agentd-tmux, agentd-store, agentd-mempal, agentd-github, agentd-matrix, agentd-surface
+- Ten library crates: agentd-core, agentd-worktree, agentd-store, agentd-mempal, agentd-github, agentd-matrix, agentd-project-authority, agentd-security, agentd-runtime, agentd-surface
 - Two binary crates: agentd-bin (the `agentd` binary) and agentctl
 - Rust edition 2024, MSRV 1.85, resolver 3
 - Workspace `[lints]` table forbids unsafe_code and does NOT include unwrap_used (that is opted in per-crate)

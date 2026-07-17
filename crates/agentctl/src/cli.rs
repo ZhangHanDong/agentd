@@ -145,7 +145,7 @@ pub enum CutoverCmd {
     Rollback(CutoverRollbackArgs),
     /// Run bounded structured control-plane diagnostics.
     Doctor(CutoverDoctorArgs),
-    /// Create a consistent SQLite backup and signed-by-digest manifest.
+    /// Create a consistent `SQLite` backup and signed-by-digest manifest.
     Backup(CutoverBackupArgs),
     /// Restore a verified backup while the daemon is offline.
     Restore(CutoverRestoreArgs),

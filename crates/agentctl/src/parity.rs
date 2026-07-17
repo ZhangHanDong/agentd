@@ -34,6 +34,7 @@ const REQUIRED_CATEGORIES: &[&str] = &[
 ];
 const ALLOWED_STATUS: &[&str] = &["covered", "partial", "missing", "deferred", "external"];
 const OK_REQUIRED_STATUS: &[&str] = &["covered", "deferred", "external"];
+const NO_AGENT_CHAT_EQUIVALENT: &str = "no agent-chat equivalent";
 
 #[derive(Debug, Clone)]
 struct ParityRow {
@@ -386,7 +387,10 @@ fn validate_rows(rows: &[ParityRow], agent_chat: &Path) -> Result<(), String> {
         if row.decision.trim().is_empty() {
             return Err(format!("{} has no replacement decision", row.capability));
         }
-        if !row.source.starts_with(&agent_chat.display().to_string()) {
+        let enterprise_only = row.source == NO_AGENT_CHAT_EQUIVALENT
+            && row.category.starts_with("enterprise_")
+            && row.phase.starts_with("AD-E");
+        if !enterprise_only && !row.source.starts_with(&agent_chat.display().to_string()) {
             return Err(format!(
                 "{} source is outside agent-chat path: {}",
                 row.capability, row.source

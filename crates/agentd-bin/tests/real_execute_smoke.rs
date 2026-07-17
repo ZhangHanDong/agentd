@@ -43,9 +43,8 @@ fn script_command() -> Command {
     command
 }
 
-fn write_fake_execute_preflight_tools(fakebin: &Path, include_claude: bool) {
+fn write_fake_execute_preflight_tools(fakebin: &Path) {
     write_fake_tool(fakebin, "cargo", "echo cargo 1.85\n");
-    write_fake_tool(fakebin, "tmux", "echo tmux 3.4\n");
     write_fake_tool(fakebin, "codex", "echo codex 1.0\n");
     write_fake_tool(fakebin, "agent-spec", "echo agent-spec 1.0\n");
     write_fake_tool(fakebin, "curl", "echo curl 8\n");
@@ -61,13 +60,6 @@ case "${1:-}" in
 esac
 "#,
     );
-    if include_claude {
-        write_fake_tool(
-            fakebin,
-            "claude",
-            "if [[ \"${1:-}\" == \"--help\" ]]; then echo 'Usage: claude --mcp-config cfg'; else echo claude; fi\n",
-        );
-    }
     write_fake_tool(
         fakebin,
         "gh",
@@ -133,22 +125,9 @@ fn real_execute_smoke_preflight_fails_when_tool_is_missing() {
     let temp = tempfile::tempdir().expect("tempdir");
     let fakebin = temp.path().join("bin");
     fs::create_dir(&fakebin).expect("fakebin");
-    for tool in [
-        "cargo",
-        "tmux",
-        "claude",
-        "codex",
-        "agent-spec",
-        "curl",
-        "git",
-    ] {
+    for tool in ["cargo", "codex", "agent-spec", "curl", "git"] {
         write_fake_tool(&fakebin, tool, "echo ok\n");
     }
-    write_fake_tool(
-        &fakebin,
-        "claude",
-        "if [[ \"${1:-}\" == \"--help\" ]]; then echo 'Usage: claude --mcp-config cfg'; else echo claude; fi\n",
-    );
     let state_dir = temp.path().join("state");
     let out = Command::new("bash")
         .arg(script_path())
@@ -176,7 +155,6 @@ fn real_execute_smoke_preflight_accepts_fake_tools() {
     let fakebin = temp.path().join("bin");
     fs::create_dir(&fakebin).expect("fakebin");
     write_fake_tool(&fakebin, "cargo", "echo cargo 1.85\n");
-    write_fake_tool(&fakebin, "tmux", "echo tmux 3.4\n");
     write_fake_tool(&fakebin, "codex", "echo codex 1.0\n");
     write_fake_tool(&fakebin, "agent-spec", "echo agent-spec 1.0\n");
     write_fake_tool(&fakebin, "curl", "echo curl 8\n");
@@ -191,11 +169,6 @@ case "${1:-}" in
   *) echo git 2.45 ;;
 esac
 "#,
-    );
-    write_fake_tool(
-        &fakebin,
-        "claude",
-        "if [[ \"${1:-}\" == \"--help\" ]]; then echo 'Usage: claude --mcp-config cfg'; else echo claude; fi\n",
     );
     write_fake_tool(
         &fakebin,
@@ -230,12 +203,11 @@ esac
 }
 
 #[test]
-fn real_execute_smoke_codex_only_preflight_accepts_fake_codex_without_claude() {
+fn real_execute_smoke_codex_only_preflight_accepts_fake_codex() {
     let temp = tempfile::tempdir().expect("tempdir");
     let fakebin = temp.path().join("bin");
     fs::create_dir(&fakebin).expect("fakebin");
     write_fake_tool(&fakebin, "cargo", "echo cargo 1.85\n");
-    write_fake_tool(&fakebin, "tmux", "echo tmux 3.4\n");
     write_fake_tool(&fakebin, "codex", "echo codex 1.0\n");
     write_fake_tool(&fakebin, "agent-spec", "echo agent-spec 1.0\n");
     write_fake_tool(&fakebin, "curl", "echo curl 8\n");
@@ -282,11 +254,6 @@ esac
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("preflight ok"), "{stdout}");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        !stderr.contains("claude"),
-        "codex-only preflight must not require claude: {stderr}"
-    );
     assert!(
         !state_dir.join("daemon.log").exists(),
         "preflight-only should not start the daemon"
@@ -294,36 +261,25 @@ esac
 }
 
 #[test]
-fn real_execute_smoke_mixed_roles_preflight_requires_claude() {
+fn real_execute_smoke_rejects_non_codex_explicit_roles() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let fakebin = temp.path().join("bin");
-    fs::create_dir(&fakebin).expect("fakebin");
-    for tool in ["cargo", "tmux", "codex", "agent-spec", "curl", "git", "gh"] {
-        write_fake_tool(&fakebin, tool, "echo ok\n");
-    }
-
     let state_dir = temp.path().join("state");
-    let out = Command::new("bash")
-        .arg(script_path())
-        .args([
-            "--preflight-only",
-            "--implementer-role",
-            "codex-impl",
-            "--reviewers",
-            "claude-sec,codex-perf",
-            "--state-dir",
-            state_dir.to_string_lossy().as_ref(),
-        ])
-        .current_dir(repo_root())
-        .env("PATH", fake_path(&fakebin))
-        .output()
-        .expect("run execute smoke mixed preflight");
+    let state_dir_arg = state_dir.to_string_lossy().to_string();
+    let out = run_script(&[
+        "--dry-run",
+        "--implementer-role",
+        "codex-impl",
+        "--reviewers",
+        "noncodex-sec,codex-perf",
+        "--state-dir",
+        &state_dir_arg,
+    ]);
 
-    assert!(!out.status.success(), "mixed roles without claude fail");
+    assert!(!out.status.success(), "non-Codex roles must be rejected");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("claude"),
-        "stderr should name missing claude prerequisite: {stderr}"
+        stderr.contains("only codex-* roles are allowed"),
+        "stderr should describe the Codex-only role contract: {stderr}"
     );
 }
 
@@ -333,7 +289,6 @@ fn real_execute_smoke_preflight_rejects_no_common_history_before_agents() {
     let fakebin = temp.path().join("bin");
     fs::create_dir(&fakebin).expect("fakebin");
     write_fake_tool(&fakebin, "cargo", "echo cargo 1.85\n");
-    write_fake_tool(&fakebin, "tmux", "echo tmux 3.4\n");
     write_fake_tool(&fakebin, "codex", "echo codex 1.0\n");
     write_fake_tool(&fakebin, "agent-spec", "echo agent-spec 1.0\n");
     write_fake_tool(&fakebin, "curl", "echo curl 8\n");
@@ -350,11 +305,6 @@ case "${1:-}" in
   *) echo git 2.45 ;;
 esac
 "#,
-    );
-    write_fake_tool(
-        &fakebin,
-        "claude",
-        "if [[ \"${1:-}\" == \"--help\" ]]; then echo 'Usage: claude --mcp-config cfg'; else echo claude; fi\n",
     );
     write_fake_tool(
         &fakebin,
@@ -521,11 +471,11 @@ fn real_execute_smoke_runtime_matrix_dry_run_prints_codex_roles() {
 }
 
 #[test]
-fn real_execute_smoke_runtime_matrix_codex_only_preflight_does_not_require_claude() {
+fn real_execute_smoke_runtime_matrix_codex_only_preflight_succeeds() {
     let temp = tempfile::tempdir().expect("tempdir");
     let fakebin = temp.path().join("bin");
     fs::create_dir(&fakebin).expect("fakebin");
-    write_fake_execute_preflight_tools(&fakebin, false);
+    write_fake_execute_preflight_tools(&fakebin);
 
     let state_dir = temp.path().join("state");
     let mut command = script_command();
@@ -548,11 +498,6 @@ fn real_execute_smoke_runtime_matrix_codex_only_preflight_does_not_require_claud
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("preflight ok"), "{stdout}");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        !stderr.contains("claude"),
-        "codex runtime matrix preflight must not require claude: {stderr}"
-    );
     assert!(
         !state_dir.join("daemon.log").exists(),
         "preflight-only should not start the daemon"
@@ -560,11 +505,11 @@ fn real_execute_smoke_runtime_matrix_codex_only_preflight_does_not_require_claud
 }
 
 #[test]
-fn real_execute_smoke_runtime_matrix_mixed_preflight_requires_claude() {
+fn real_execute_smoke_runtime_matrix_rejects_non_codex_runtime() {
     let temp = tempfile::tempdir().expect("tempdir");
     let dry_state_dir = temp.path().join("dry-state");
     let dry_state_arg = dry_state_dir.to_string_lossy().to_string();
-    let matrix = "codex,claude,codex,codex";
+    let matrix = "codex,noncodex,codex,codex";
     let dry = run_script_with_env(
         &[
             "--dry-run",
@@ -575,50 +520,15 @@ fn real_execute_smoke_runtime_matrix_mixed_preflight_requires_claude() {
         ],
         &[("AGENTD_REAL_EXECUTE_RUNTIMES", matrix)],
     );
+    assert!(!dry.status.success(), "non-Codex runtime matrix must fail");
+    let stderr = String::from_utf8_lossy(&dry.stderr);
     assert!(
-        dry.status.success(),
-        "mixed matrix dry-run exits 0; stderr: {}",
-        String::from_utf8_lossy(&dry.stderr)
-    );
-    let dry_stdout = String::from_utf8_lossy(&dry.stdout);
-    assert!(
-        dry_stdout.contains(&format!("runtime_matrix: {matrix}")),
-        "{dry_stdout}"
+        stderr.contains("only codex is allowed"),
+        "stderr should describe the Codex-only matrix contract: {stderr}"
     );
     assert!(
-        dry_stdout.contains("reviewers: claude-sec,codex-perf,codex-readability"),
-        "{dry_stdout}"
-    );
-    assert!(
-        !dry_stdout.contains("gemini-readability"),
-        "runtime matrix must replace the old default reviewer set: {dry_stdout}"
-    );
-
-    let fakebin = temp.path().join("bin");
-    fs::create_dir(&fakebin).expect("fakebin");
-    write_fake_execute_preflight_tools(&fakebin, false);
-    let state_dir = temp.path().join("state");
-    let mut command = script_command();
-    let out = command
-        .args([
-            "--preflight-only",
-            "--state-dir",
-            state_dir.to_string_lossy().as_ref(),
-        ])
-        .env("PATH", fake_path(&fakebin))
-        .env("AGENTD_REAL_EXECUTE_RUNTIMES", matrix)
-        .output()
-        .expect("run execute smoke runtime-matrix mixed preflight");
-
-    assert!(!out.status.success(), "mixed matrix without claude fails");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("claude"),
-        "stderr should name missing claude prerequisite: {stderr}"
-    );
-    assert!(
-        !state_dir.join("daemon.log").exists(),
-        "preflight-only should not start the daemon"
+        !dry_state_dir.exists(),
+        "invalid dry-run should not create the state directory"
     );
 }
 

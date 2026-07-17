@@ -10,9 +10,10 @@ fn digest(byte: char) -> String {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn cutover_ledger_is_exactly_idempotent_and_immutable() {
     let directory = tempfile::tempdir().expect("temporary cutover database");
-    let store = SqliteStore::connect(directory.path().join("agentd.db"))
+    let store = SqliteStore::connect(&directory.path().join("agentd.db"))
         .await
         .expect("store");
     let ledger = SqliteCutoverLedger::new(store.pool().clone());
@@ -144,7 +145,7 @@ async fn cutover_ledger_is_exactly_idempotent_and_immutable() {
 #[tokio::test]
 async fn cutover_ledger_rejects_skipped_state_edges() {
     let directory = tempfile::tempdir().expect("temporary cutover database");
-    let store = SqliteStore::connect(directory.path().join("agentd.db"))
+    let store = SqliteStore::connect(&directory.path().join("agentd.db"))
         .await
         .expect("store");
     let ledger = SqliteCutoverLedger::new(store.pool().clone());

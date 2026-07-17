@@ -63,6 +63,7 @@ impl<R, C> std::fmt::Debug for OidcAuthenticator<R, C> {
             .field("authorized_parties", &self.config.authorized_parties)
             .field("key_ids", &self.keys.keys().collect::<Vec<_>>())
             .field("repository", &std::any::type_name::<R>())
+            .field("clock", &std::any::type_name::<C>())
             .finish()
     }
 }

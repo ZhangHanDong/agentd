@@ -216,8 +216,8 @@ fn agent_cli_register_ls_inspect_heartbeat_and_offline_use_api_agents() {
         "codex",
         "--model",
         "gpt-5",
-        "--tmux-target",
-        "codex-sec:0.0",
+        "--native-runtime-ref",
+        "native://rs_01ARZ3NDEKTSV4RRFFQ69G5FAV/ra_01ARZ3NDEKTSV4RRFFQ69G5FAV",
         "--daemon-url",
         &url,
     ]);
@@ -253,8 +253,8 @@ fn agent_cli_register_ls_inspect_heartbeat_and_offline_use_api_agents() {
         "codex-sec",
         "--server",
         "local",
-        "--tmux-target",
-        "codex-sec:0.0",
+        "--native-runtime-ref",
+        "native://rs_01ARZ3NDEKTSV4RRFFQ69G5FAV/ra_01ARZ3NDEKTSV4RRFFQ69G5FAV",
         "--daemon-url",
         &url,
     ]);

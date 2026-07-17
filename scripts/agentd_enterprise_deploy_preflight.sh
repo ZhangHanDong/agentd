@@ -62,11 +62,11 @@ fi
 TMP_RENDER="$(mktemp "${TMPDIR:-/tmp}/agentd-enterprise-render.XXXXXX")"
 cleanup() { rm -f "$TMP_RENDER"; }
 trap cleanup EXIT
-kubectl kustomize "$KUSTOMIZATION" >"$TMP_RENDER"
+kubectl kustomize --load-restrictor=LoadRestrictionsNone "$KUSTOMIZATION" >"$TMP_RENDER"
 
 scalar() {
     local expression="$1"
-    yq ea -r "$expression" "$TMP_RENDER"
+    yq ea -N -r "$expression" "$TMP_RENDER"
 }
 
 CONTROL_PLANE_REPLICAS="$(scalar 'select(.kind == "Deployment" and .metadata.name == "agentd-control-plane") | .spec.replicas')"
@@ -111,18 +111,18 @@ fi
 EXPECTED_WORKERS="$(printf '%s\n' \
     agentd-worker-cn-east-1a agentd-worker-cn-east-1b agentd-worker-cn-east-1c \
     agentd-worker-cn-north-1a agentd-worker-cn-north-1b agentd-worker-cn-north-1c)"
-ACTUAL_WORKERS="$(scalar 'select(.kind == "Deployment" and (.metadata.name | startswith("agentd-worker-"))) | .metadata.name' | sort)"
+ACTUAL_WORKERS="$(scalar 'select(.kind == "Deployment" and (.metadata.name | test("^agentd-worker-"))) | .metadata.name' | sort)"
 if [[ "$ACTUAL_WORKERS" != "$EXPECTED_WORKERS" ]]; then
     echo "enterprise profile does not contain the exact six worker zone pools" >&2
     exit 1
 fi
-INVALID_WORKER_REPLICAS="$(scalar 'select(.kind == "Deployment" and (.metadata.name | startswith("agentd-worker-")) and .spec.replicas != 3) | .metadata.name')"
+INVALID_WORKER_REPLICAS="$(scalar 'select(.kind == "Deployment" and (.metadata.name | test("^agentd-worker-")) and .spec.replicas != 3) | .metadata.name')"
 if [[ -n "$INVALID_WORKER_REPLICAS" ]]; then
     echo "worker pools must start with exactly three replicas: $INVALID_WORKER_REPLICAS" >&2
     exit 1
 fi
 INVALID_WORKER_SECURITY="$(scalar '
-    select(.kind == "Deployment" and (.metadata.name | startswith("agentd-worker-"))) |
+    select(.kind == "Deployment" and (.metadata.name | test("^agentd-worker-"))) |
     select(
         .spec.template.spec.securityContext.runAsNonRoot != true or
         .spec.template.spec.securityContext.runAsUser != 65532 or
@@ -135,7 +135,7 @@ if [[ -n "$INVALID_WORKER_SECURITY" ]]; then
     exit 1
 fi
 INVALID_WORKER_PLACEMENT="$(scalar '
-    select(.kind == "Deployment" and (.metadata.name | startswith("agentd-worker-"))) |
+    select(.kind == "Deployment" and (.metadata.name | test("^agentd-worker-"))) |
     select(
         .spec.template.spec.nodeSelector."topology.kubernetes.io/region" != .metadata.labels."agentd.dev/region" or
         .spec.template.spec.nodeSelector."topology.kubernetes.io/zone" != .metadata.labels."agentd.dev/zone"
@@ -146,7 +146,7 @@ if [[ -n "$INVALID_WORKER_PLACEMENT" ]]; then
     exit 1
 fi
 INVALID_WORKER_SPREAD="$(scalar '
-    select(.kind == "Deployment" and (.metadata.name | startswith("agentd-worker-"))) |
+    select(.kind == "Deployment" and (.metadata.name | test("^agentd-worker-"))) |
     select(([
         .spec.template.spec.topologySpreadConstraints[]? |
         select(.topologyKey == "kubernetes.io/hostname" and .whenUnsatisfiable == "DoNotSchedule")
@@ -156,13 +156,13 @@ if [[ -n "$INVALID_WORKER_SPREAD" ]]; then
     echo "every worker pool requires exactly one hard hostname topology spread constraint: $INVALID_WORKER_SPREAD" >&2
     exit 1
 fi
-ACTUAL_HPAS="$(scalar 'select(.kind == "HorizontalPodAutoscaler" and (.metadata.name | startswith("agentd-worker-"))) | .metadata.name' | sort)"
+ACTUAL_HPAS="$(scalar 'select(.kind == "HorizontalPodAutoscaler" and (.metadata.name | test("^agentd-worker-"))) | .metadata.name' | sort)"
 if [[ "$ACTUAL_HPAS" != "$EXPECTED_WORKERS" ]]; then
     echo "enterprise profile requires one exactly named HPA for every worker pool" >&2
     exit 1
 fi
 INVALID_HPA_TARGETS="$(scalar '
-    select(.kind == "HorizontalPodAutoscaler" and (.metadata.name | startswith("agentd-worker-"))) |
+    select(.kind == "HorizontalPodAutoscaler" and (.metadata.name | test("^agentd-worker-"))) |
     select(
         .spec.scaleTargetRef.apiVersion != "apps/v1" or
         .spec.scaleTargetRef.kind != "Deployment" or

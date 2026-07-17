@@ -1,4 +1,4 @@
-//! SQLite implementation of the durable enterprise scheduler and worker fleet.
+//! `SQLite` implementation of the durable enterprise scheduler and worker fleet.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -90,6 +90,7 @@ impl SqliteFleetScheduler {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 #[async_trait::async_trait]
 impl FleetSchedulerPort for SqliteFleetScheduler {
     async fn submit_task(
@@ -209,7 +210,9 @@ impl FleetSchedulerPort for SqliteFleetScheduler {
         .fetch_optional(&mut *connection)
         .await
         .map_err(storage_error)?
-        .ok_or_else(|| FleetSchedulerError::Denied(FleetDenialReason::WorkerNotCurrent))?;
+        .ok_or(FleetSchedulerError::Denied(
+            FleetDenialReason::WorkerNotCurrent,
+        ))?;
         if worker.get::<i64, _>("is_current") != 1 {
             rollback(&mut connection).await?;
             return Err(FleetSchedulerError::Denied(
@@ -396,31 +399,30 @@ impl FleetSchedulerPort for SqliteFleetScheduler {
 
         for row in rows {
             let task_id = TaskRunId::from_string(row.get::<String, _>("execution_task_id"));
-            let block =
-                match candidate_block(&row, &availability, &request.workload, request.observed_at)?
-                {
-                    Some(block) => block,
-                    None => {
-                        let epoch_request = epoch_request_from_row(
-                            &row,
-                            SecurityCheckpoint::Dispatch,
-                            request.observed_at,
-                        )?;
-                        match self.check_epoch(&epoch_request).await {
-                            Ok(()) => {
-                                if quota_available(&self.pool, &row).await? {
-                                    return self
-                                        .acquire_task(request, &availability, &task_id)
-                                        .await
-                                        .map(Some);
-                                }
-                                FleetDenialReason::QuotaExceeded
-                            }
-                            Err(FleetSchedulerError::Denied(reason)) => reason,
-                            Err(error) => return Err(error),
+            let block = if let Some(block) =
+                candidate_block(&row, &availability, &request.workload, request.observed_at)?
+            {
+                block
+            } else {
+                let epoch_request = epoch_request_from_row(
+                    &row,
+                    SecurityCheckpoint::Dispatch,
+                    request.observed_at,
+                )?;
+                match self.check_epoch(&epoch_request).await {
+                    Ok(()) => {
+                        if quota_available(&self.pool, &row).await? {
+                            return self
+                                .acquire_task(request, &availability, &task_id)
+                                .await
+                                .map(Some);
                         }
+                        FleetDenialReason::QuotaExceeded
                     }
-                };
+                    Err(FleetSchedulerError::Denied(reason)) => reason,
+                    Err(error) => return Err(error),
+                }
+            };
             record_block(
                 &self.pool,
                 &request.workload,
@@ -634,7 +636,7 @@ impl FleetSchedulerPort for SqliteFleetScheduler {
         .fetch_optional(&mut *connection)
         .await
         .map_err(storage_error)?
-        .ok_or_else(|| FleetSchedulerError::Denied(FleetDenialReason::TaskTerminal))?;
+        .ok_or(FleetSchedulerError::Denied(FleetDenialReason::TaskTerminal))?;
         let attempt_count = row.get::<i64, _>("attempt_count");
         let max_attempts = row.get::<i64, _>("max_attempts");
         let retry = request.retryable && attempt_count < max_attempts;
@@ -1102,6 +1104,7 @@ impl FleetSchedulerPort for SqliteFleetScheduler {
 }
 
 impl SqliteFleetScheduler {
+    #[allow(clippy::too_many_lines)]
     async fn acquire_task(
         &self,
         request: &FleetPullRequest,
@@ -1686,7 +1689,7 @@ async fn authorize_or_reject(
     claim: &TaskLeaseClaim,
     observed_at: i64,
 ) -> Result<TaskLeaseGrant, FleetSchedulerError> {
-    match authorize_claim(&mut **connection, claim, observed_at)
+    match authorize_claim(connection, claim, observed_at)
         .await
         .map_err(lease_error)?
     {
@@ -1704,14 +1707,7 @@ async fn reject_report<T>(
     error: agentd_core::ports::TaskLeaseError,
     observed_at: i64,
 ) -> Result<T, FleetSchedulerError> {
-    record_fencing_rejection(
-        &mut **connection,
-        kind,
-        claim,
-        &error.to_string(),
-        observed_at,
-    )
-    .await?;
+    record_fencing_rejection(connection, kind, claim, &error.to_string(), observed_at).await?;
     commit(connection).await?;
     Err(lease_error(error))
 }
@@ -2113,11 +2109,6 @@ fn validate_report_workload(
         "worker incarnation id",
     )?;
     validate_id(claim.lease_id.as_str(), "ls_", "lease id")?;
-    if claim.fencing_token == 0 {
-        return Err(FleetSchedulerError::Invalid(
-            "lease fencing token must be positive".to_string(),
-        ));
-    }
     let worker_id = workload
         .worker_id
         .as_ref()
@@ -2263,6 +2254,7 @@ async fn rollback(connection: &mut SqliteImmediateTransaction) -> Result<(), Fle
     connection.rollback().await.map_err(storage_error)
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn storage_error(error: sqlx::Error) -> FleetSchedulerError {
     FleetSchedulerError::Unavailable(format!("durable fleet scheduler storage: {error}"))
 }

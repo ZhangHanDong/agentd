@@ -8,7 +8,7 @@ use std::sync::Arc;
 use agentd_core::CoreError;
 use agentd_core::ports::{AgentBackend, WorktreeAllocator};
 use agentd_core::types::{AgentHandle, SpawnRequest};
-use agentd_security::{ContentRedactor, RedactionLimits};
+use agentd_security::redaction::{ContentRedactor, RedactionLimits};
 use agentd_store::fleet_scheduler::SqliteFleetScheduler;
 use agentd_store::{
     FailedWorktreeCleanupCandidate, SqliteEnterpriseScaleControlPlane, SqliteStore,
@@ -172,7 +172,7 @@ impl EnterpriseOperatorGate {
 }
 
 /// Build the enterprise operator surface with a hard composition-layer auth
-/// boundary and an HttpOnly dashboard session limited to read requests.
+/// boundary and an `HttpOnly` dashboard session limited to read requests.
 ///
 /// # Errors
 /// [`CoreError`] when no operator bearer credential is configured.
@@ -327,7 +327,7 @@ pub async fn build_production_host(config: &DaemonConfig) -> Result<ProductionRu
     .with_worktree_allocator(Some(Box::new(worktree_pool))))
 }
 
-async fn build_enterprise_control_plane_host(
+fn build_enterprise_control_plane_host(
     config: &DaemonConfig,
     store: SqliteStore,
     leadership: EnterpriseLeadershipGate,
@@ -515,8 +515,7 @@ async fn serve_enterprise_control_plane(
         store,
         coordinator.leadership_gate(),
         auth.clone(),
-    )
-    .await?;
+    )?;
     let media_dir = media_dir_for_db(&config.db_path);
     let app = build_enterprise_operator_router(Arc::new(host), auth, MediaConfig::new(media_dir))?
         .merge(crate::fleet_http::router(fleet_http));

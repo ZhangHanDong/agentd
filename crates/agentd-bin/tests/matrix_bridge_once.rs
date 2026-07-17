@@ -161,7 +161,7 @@ fn daemon_config(api_token: Option<&str>) -> DaemonConfig {
         api_token: api_token.map(ToOwned::to_owned),
         agent_tokens: Vec::new(),
         agent_token_mode: "audit".to_owned(),
-        enterprise: Default::default(),
+        enterprise: agentd_bin::EnterpriseDaemonConfig::default(),
     }
 }
 

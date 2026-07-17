@@ -1,4 +1,4 @@
-//! Fail-closed OpenFab evidence, certification, forge, and Skill Hub orchestration.
+//! Fail-closed `OpenFab` evidence, certification, forge, and Skill Hub orchestration.
 
 use std::fmt;
 use std::sync::Arc;

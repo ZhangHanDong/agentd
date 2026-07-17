@@ -748,7 +748,7 @@ async fn daemon_router_agent_chat_scheduler_persists_after_router_rebuild() {
             "role": "coding",
             "capability": "medium",
             "runtime": "codex",
-            "tmux_target": "cod1:0.0",
+            "native_runtime_ref": "native://rs_cod1/ra_active",
             "workdir": "/tmp/agentd/cod1"
         }),
     )
@@ -805,7 +805,7 @@ async fn daemon_router_task_graph_scheduler_routes_and_releases_nodes() {
             "role": "coding",
             "capability": "medium",
             "runtime": "codex",
-            "tmux_target": "cod1:0.0",
+            "native_runtime_ref": "native://rs_cod1/ra_active",
             "workdir": "/tmp/agentd/cod1"
         }),
     )
@@ -922,7 +922,7 @@ async fn daemon_router_task_graph_scheduler_rejects_spoofed_result_messages() {
             "role": "coding",
             "capability": "medium",
             "runtime": "codex",
-            "tmux_target": "cod1:0.0",
+            "native_runtime_ref": "native://rs_cod1/ra_active",
             "workdir": "/tmp/agentd/cod1"
         }),
     )
@@ -1232,7 +1232,7 @@ async fn daemon_router_agent_registry_round_trips_register_list_inspect() {
             "capability": "strong",
             "runtime": "codex",
             "model": "gpt-5",
-            "tmux_target": "codex-sec:0.0",
+            "native_runtime_ref": "native://rs_codex_sec/ra_active",
             "home_dir": "/tmp/agentd/homes/agents/agent_codex_sec",
             "workdir": "/tmp/agentd/homes/agents/agent_codex_sec/workdir",
             "state_dir": "/tmp/agentd/homes/agents/agent_codex_sec/state",
@@ -1327,14 +1327,14 @@ async fn daemon_router_agent_identity_patch_persists_after_router_rebuild() {
 }
 
 #[tokio::test]
-async fn daemon_router_agent_heartbeat_creates_and_offline_clears_tmux() {
+async fn daemon_router_agent_heartbeat_creates_and_offline_clears_native_runtime_ref() {
     let (app, _dir) = empty_router().await;
     let (heartbeat_status, heartbeat_body) = post(
         app.clone(),
         "/api/agents/codex-worker/heartbeat",
         serde_json::json!({
             "server": "local",
-            "tmux_target": "codex-worker:0.0",
+            "native_runtime_ref": "native://rs_codex_worker/ra_active",
             "workspace_path": "/tmp/agentd/homes/agents/agent_codex_worker/workdir"
         }),
     )
@@ -1343,7 +1343,10 @@ async fn daemon_router_agent_heartbeat_creates_and_offline_clears_tmux() {
     let heartbeat: serde_json::Value = serde_json::from_str(&heartbeat_body).expect("json");
     assert_eq!(heartbeat["created"], true);
     assert_eq!(heartbeat["agent"]["status"], "online");
-    assert_eq!(heartbeat["agent"]["tmux_target"], "codex-worker:0.0");
+    assert_eq!(
+        heartbeat["agent"]["native_runtime_ref"],
+        "native://rs_codex_worker/ra_active"
+    );
 
     let (offline_status, offline_body) = post(
         app,
@@ -1355,7 +1358,10 @@ async fn daemon_router_agent_heartbeat_creates_and_offline_clears_tmux() {
     let offline: serde_json::Value = serde_json::from_str(&offline_body).expect("json");
     assert_eq!(offline["agent"]["status"], "offline");
     assert_eq!(offline["agent"]["offline_reason"], "manual-offline");
-    assert_eq!(offline["agent"]["tmux_target"], serde_json::Value::Null);
+    assert_eq!(
+        offline["agent"]["native_runtime_ref"],
+        serde_json::Value::Null
+    );
 }
 
 #[tokio::test]
@@ -1549,7 +1555,7 @@ async fn daemon_router_agent_start_spawns_codex_and_marks_online() {
     let v: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert_eq!(v["ok"], true);
     assert_eq!(v["agent"]["status"], "online");
-    assert_eq!(v["agent"]["tmux_target"], "fake://codex-worker");
+    assert_eq!(v["agent"]["native_runtime_ref"], "fake://codex-worker");
     assert_eq!(v["handle"]["address"], "fake://codex-worker");
 
     let spawned = backend.spawned();
@@ -1585,7 +1591,7 @@ async fn daemon_router_agent_start_rejects_unknown_online_missing_workdir_and_ba
             "name": "online-worker",
             "runtime": "codex",
             "workdir": workdir.to_string_lossy(),
-            "tmux_target": "online-worker:0.0"
+            "native_runtime_ref": "native://rs_online_worker/ra_active"
         }),
     )
     .await;
@@ -1662,7 +1668,7 @@ async fn daemon_router_remote_server_heartbeat_marks_agents_online_and_missing_o
             "name": "codex-old",
             "runtime": "codex",
             "server": "remote-host-1",
-            "tmux_target": "codex-old:0.0"
+            "native_runtime_ref": "codex-old:runtime-ref"
         }),
     )
     .await;
@@ -1691,7 +1697,7 @@ async fn daemon_router_remote_server_heartbeat_marks_agents_online_and_missing_o
     let new_agent: serde_json::Value = serde_json::from_str(&new_body).expect("new agent json");
     assert_eq!(new_agent["status"], "online");
     assert_eq!(new_agent["server"], "remote-host-1");
-    assert_eq!(new_agent["tmux_target"], "codex-new:0.0");
+    assert_eq!(new_agent["native_runtime_ref"], "codex-new:0.0");
 
     let (old_status, old_body) = get(app, "/api/agents/codex-old").await;
     assert_eq!(old_status, StatusCode::OK, "body: {old_body}");
@@ -1701,7 +1707,7 @@ async fn daemon_router_remote_server_heartbeat_marks_agents_online_and_missing_o
         old_agent["offline_reason"],
         "heartbeat-missing:remote-host-1"
     );
-    assert_eq!(old_agent["tmux_target"], serde_json::Value::Null);
+    assert_eq!(old_agent["native_runtime_ref"], serde_json::Value::Null);
 }
 
 #[tokio::test]
@@ -2146,7 +2152,7 @@ async fn daemon_router_agent_down_stops_runtime_and_marks_offline() {
         serde_json::json!({
             "name": "codex-worker",
             "runtime": "codex",
-            "tmux_target": "agentd-codex-worker:0.0",
+            "native_runtime_ref": "native://rs_codex_worker/ra_active",
             "state_dir": state_dir.to_string_lossy()
         }),
     )
@@ -2164,8 +2170,8 @@ async fn daemon_router_agent_down_stops_runtime_and_marks_offline() {
     assert_eq!(down["ok"], true);
     assert_eq!(down["action"], "agent-down-kill");
     assert_eq!(down["agent"]["status"], "offline");
-    assert_eq!(down["agent"]["tmux_target"], serde_json::Value::Null);
-    assert_eq!(down["agent"]["offline_reason"], "agent-down-kill");
+    assert_eq!(down["agent"]["native_runtime_ref"], serde_json::Value::Null);
+    assert_eq!(down["agent"]["offline_reason"], "agent-down");
     assert_eq!(down["agent"]["runtime_state"]["lifecycle"]["state"], "down");
     assert_eq!(
         down["agent"]["runtime_state"]["lifecycle"]["finalCaptureSha"],
@@ -2174,7 +2180,7 @@ async fn daemon_router_agent_down_stops_runtime_and_marks_offline() {
 
     let shutdowns = lifecycle.shutdowns();
     assert_eq!(shutdowns.len(), 1, "one shutdown call");
-    assert_eq!(shutdowns[0].0, "agentd-codex-worker:0.0");
+    assert_eq!(shutdowns[0].0, "native://rs_codex_worker/ra_active");
     assert!(
         shutdowns[0].1.to_string_lossy().contains("codex-worker"),
         "archive path should identify the agent: {:?}",
@@ -2185,7 +2191,7 @@ async fn daemon_router_agent_down_stops_runtime_and_marks_offline() {
     assert_eq!(detail_status, StatusCode::OK, "body: {detail_body}");
     let detail: serde_json::Value = serde_json::from_str(&detail_body).expect("json");
     assert_eq!(detail["status"], "offline");
-    assert_eq!(detail["tmux_target"], serde_json::Value::Null);
+    assert_eq!(detail["native_runtime_ref"], serde_json::Value::Null);
     assert_eq!(detail["runtime_state"]["lifecycle"]["state"], "down");
 }
 
@@ -2193,15 +2199,18 @@ async fn daemon_router_agent_down_stops_runtime_and_marks_offline() {
 async fn daemon_router_agent_rebind_recovers_live_session_and_marks_missing_offline() {
     let lifecycle = RecordingLifecycle::default();
     lifecycle.set_rebind_result(
-        "agentd-codex-live:0.0",
-        Some(lifecycle_handle("codex-live", "agentd-codex-live:0.0")),
+        "native://rs_codex_live/ra_active",
+        Some(lifecycle_handle(
+            "codex-live",
+            "native://rs_codex_live/ra_active",
+        )),
     );
-    lifecycle.set_rebind_result("agentd-codex-gone:0.0", None);
+    lifecycle.set_rebind_result("native://rs_codex_gone/ra_active", None);
     let (app, _dir, _backend) = empty_router_with_lifecycle(lifecycle.clone()).await;
 
     for (name, target) in [
-        ("codex-live", "agentd-codex-live:0.0"),
-        ("codex-gone", "agentd-codex-gone:0.0"),
+        ("codex-live", "native://rs_codex_live/ra_active"),
+        ("codex-gone", "native://rs_codex_gone/ra_active"),
     ] {
         let (status, body) = post(
             app.clone(),
@@ -2209,7 +2218,7 @@ async fn daemon_router_agent_rebind_recovers_live_session_and_marks_missing_offl
             serde_json::json!({
                 "name": name,
                 "runtime": "codex",
-                "tmux_target": target
+                "native_runtime_ref": target
             }),
         )
         .await;
@@ -2227,7 +2236,10 @@ async fn daemon_router_agent_rebind_recovers_live_session_and_marks_missing_offl
     assert_eq!(live["ok"], true);
     assert_eq!(live["rebound"], true);
     assert_eq!(live["agent"]["status"], "online");
-    assert_eq!(live["handle"]["address"], "agentd-codex-live:0.0");
+    assert_eq!(
+        live["handle"]["address"],
+        "native://rs_codex_live/ra_active"
+    );
     assert_eq!(
         live["agent"]["runtime_state"]["lifecycle"]["state"],
         "rebound"
@@ -2254,8 +2266,8 @@ async fn daemon_router_agent_rebind_recovers_live_session_and_marks_missing_offl
     assert_eq!(
         lifecycle.rebinds(),
         vec![
-            "agentd-codex-live:0.0".to_string(),
-            "agentd-codex-gone:0.0".to_string()
+            "native://rs_codex_live/ra_active".to_string(),
+            "native://rs_codex_gone/ra_active".to_string()
         ]
     );
 }
@@ -2264,8 +2276,11 @@ async fn daemon_router_agent_rebind_recovers_live_session_and_marks_missing_offl
 async fn daemon_router_agent_rebind_recovers_after_host_rebuild() {
     let lifecycle = RecordingLifecycle::default();
     lifecycle.set_rebind_result(
-        "agentd-codex-worker:0.0",
-        Some(lifecycle_handle("codex-worker", "agentd-codex-worker:0.0")),
+        "native://rs_codex_worker/ra_active",
+        Some(lifecycle_handle(
+            "codex-worker",
+            "native://rs_codex_worker/ra_active",
+        )),
     );
     let (first_app, dir, _first_backend) = empty_router_with_lifecycle(lifecycle.clone()).await;
 
@@ -2275,7 +2290,7 @@ async fn daemon_router_agent_rebind_recovers_after_host_rebuild() {
         serde_json::json!({
             "name": "codex-worker",
             "runtime": "codex",
-            "tmux_target": "agentd-codex-worker:0.0"
+            "native_runtime_ref": "native://rs_codex_worker/ra_active"
         }),
     )
     .await;
@@ -2292,7 +2307,10 @@ async fn daemon_router_agent_rebind_recovers_after_host_rebuild() {
     assert_eq!(rebind_status, StatusCode::OK, "body: {rebind_body}");
     let rebind: serde_json::Value = serde_json::from_str(&rebind_body).expect("json");
     assert_eq!(rebind["rebound"], true);
-    assert_eq!(rebind["handle"]["address"], "agentd-codex-worker:0.0");
+    assert_eq!(
+        rebind["handle"]["address"],
+        "native://rs_codex_worker/ra_active"
+    );
     assert!(
         backend.spawned().is_empty(),
         "rebind recovery must not spawn a new agent"
@@ -2360,6 +2378,7 @@ async fn daemon_router_serves_dashboard_shell() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn enterprise_operator_router_issues_read_only_browser_session() {
     let (app, _dir) = empty_enterprise_operator_router().await;
     let (health_status, _) = get(app.clone(), "/healthz").await;

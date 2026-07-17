@@ -110,13 +110,13 @@ Scenario: reviewer snapshot allocation failure is loud
   Then it returns the allocator error
   And no reviewer SpawnRequest is recorded with the shared implementer worktree
 
-Scenario: tmux pool supports tight reviewer-keyed worktrees
+Scenario: worktree pool supports tight reviewer-keyed worktrees
   Test: pool_allocates_reviewer_keyed_snapshot_worktree
   Level: adapter unit
   Test Double: in-memory WorktreeProvider + temp source tree
-  Given a WorktreePool and reviewer key "review-rr_0123456789ABCDEFGHJKMNPQRS-claude-sec"
+  Given a WorktreePool and reviewer key "review-rr_0123456789ABCDEFGHJKMNPQRS-codex-sec"
   When allocate_snapshot creates a reviewer worktree from a source tree containing "src/lib.rs"
-  Then the provider creates "wt-review-rr_0123456789ABCDEFGHJKMNPQRS-claude-sec"
+  Then the provider creates "wt-review-rr_0123456789ABCDEFGHJKMNPQRS-codex-sec"
   And the reviewer worktree contains the copied "src/lib.rs"
 
 Scenario: boot-GC recognizes reviewer-keyed pool names tightly

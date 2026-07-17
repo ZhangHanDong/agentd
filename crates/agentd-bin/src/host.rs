@@ -259,6 +259,7 @@ fn meaningful_json(value: &Value) -> bool {
     }
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn scale_error(error: agentd_core::ports::EnterpriseScaleError) -> CoreError {
     CoreError::Backend(error.to_string())
 }
@@ -2794,6 +2795,7 @@ fn runtime_unconfigured() -> CoreError {
     CoreError::Backend("native runtime is not configured".to_string())
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn core_from_native_runtime(error: NativeRuntimeError) -> CoreError {
     CoreError::Backend(error.to_string())
 }

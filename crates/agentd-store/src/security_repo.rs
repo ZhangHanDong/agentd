@@ -106,6 +106,7 @@ pub async fn get_workload_identity_binding(
 }
 
 /// Revoke an identity binding without deleting its audit-relevant metadata.
+#[allow(clippy::too_many_lines)]
 pub async fn revoke_workload_identity(
     pool: &SqlitePool,
     certificate_sha256: &str,
@@ -137,14 +138,11 @@ pub async fn revoke_workload_identity(
     .fetch_optional(&mut *transaction)
     .await
     .map_err(storage_unavailable)?;
-    let mut record = match row.as_ref().map(identity_binding_from_row).transpose()? {
-        Some(record) => record,
-        None => {
-            transaction.rollback().await.map_err(storage_unavailable)?;
-            return Err(SecurityError::Denied(
-                SecurityDenialReason::IdentityUntrusted,
-            ));
-        }
+    let Some(mut record) = row.as_ref().map(identity_binding_from_row).transpose()? else {
+        transaction.rollback().await.map_err(storage_unavailable)?;
+        return Err(SecurityError::Denied(
+            SecurityDenialReason::IdentityUntrusted,
+        ));
     };
     if revoked_at < record.binding.created_at {
         transaction.rollback().await.map_err(storage_unavailable)?;

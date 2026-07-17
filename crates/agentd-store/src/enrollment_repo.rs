@@ -32,6 +32,7 @@ pub struct WorkerWorkloadEnrollmentRecord {
 }
 
 /// Atomically create or exactly replay one verified worker enrollment.
+#[allow(clippy::too_many_lines)]
 pub async fn enroll_worker_workload_identity(
     pool: &SqlitePool,
     request: WorkerWorkloadEnrollment,
@@ -61,7 +62,11 @@ pub async fn enroll_worker_workload_identity(
             && row.get::<String, _>("role") == "worker"
             && row.get::<String, _>("trust_domain") == request.binding.trust_domain
             && row.get::<Option<String>, _>("worker_id").as_deref()
-                == request.binding.worker_id.as_ref().map(|id| id.as_str())
+                == request
+                    .binding
+                    .worker_id
+                    .as_ref()
+                    .map(agentd_core::types::WorkerId::as_str)
             && row
                 .get::<Option<String>, _>("worker_incarnation_id")
                 .as_deref()
@@ -69,7 +74,7 @@ pub async fn enroll_worker_workload_identity(
                     .binding
                     .worker_incarnation_id
                     .as_ref()
-                    .map(|id| id.as_str())
+                    .map(agentd_core::types::WorkerIncarnationId::as_str)
             && row.get::<i64, _>("not_before") == request.binding.not_before
             && row.get::<i64, _>("not_after") == request.binding.not_after
             && row.get::<Option<i64>, _>("revoked_at").is_none();
@@ -122,70 +127,67 @@ pub async fn enroll_worker_workload_identity(
     .fetch_optional(&mut *tx)
     .await
     .map_err(storage)?;
-    match existing_incarnation.as_ref() {
-        Some(row) => {
-            let stored_capabilities: Value =
-                serde_json::from_str(&row.get::<String, _>("capabilities_json"))
-                    .map_err(|error| storage(format!("corrupt capabilities: {error}")))?;
-            let stored_labels: Value = existing_worker
-                .as_ref()
-                .map(|worker| worker.get::<String, _>("labels_json"))
-                .map(|labels| serde_json::from_str(&labels))
-                .transpose()
-                .map_err(|error| storage(format!("corrupt worker labels: {error}")))?
-                .unwrap_or_else(|| request.worker.labels.clone());
-            let exact = row.get::<String, _>("worker_id") == request.worker.id.as_str()
-                && row.get::<String, _>("daemon_version") == request.incarnation.daemon_version
-                && row.get::<String, _>("host_name") == request.incarnation.host_name
-                && row.get::<Option<String>, _>("network_zone") == request.incarnation.network_zone
-                && stored_capabilities == request.incarnation.capabilities
-                && stored_labels == request.worker.labels
-                && row.get::<i64, _>("is_current") == 1;
-            if !exact {
-                return Err(invalid(
-                    "worker incarnation id already has a changed or stale registration",
-                ));
-            }
+    if let Some(row) = existing_incarnation.as_ref() {
+        let stored_capabilities: Value =
+            serde_json::from_str(&row.get::<String, _>("capabilities_json"))
+                .map_err(|error| storage(format!("corrupt capabilities: {error}")))?;
+        let stored_labels: Value = existing_worker
+            .as_ref()
+            .map(|worker| worker.get::<String, _>("labels_json"))
+            .map(|labels| serde_json::from_str(&labels))
+            .transpose()
+            .map_err(|error| storage(format!("corrupt worker labels: {error}")))?
+            .unwrap_or_else(|| request.worker.labels.clone());
+        let exact = row.get::<String, _>("worker_id") == request.worker.id.as_str()
+            && row.get::<String, _>("daemon_version") == request.incarnation.daemon_version
+            && row.get::<String, _>("host_name") == request.incarnation.host_name
+            && row.get::<Option<String>, _>("network_zone") == request.incarnation.network_zone
+            && stored_capabilities == request.incarnation.capabilities
+            && stored_labels == request.worker.labels
+            && row.get::<i64, _>("is_current") == 1;
+        if !exact {
+            return Err(invalid(
+                "worker incarnation id already has a changed or stale registration",
+            ));
         }
-        None => {
-            sqlx::query(
-                "UPDATE worker_incarnations SET is_current = 0, superseded_at = ? \
+    } else {
+        sqlx::query(
+            "UPDATE worker_incarnations SET is_current = 0, superseded_at = ? \
                  WHERE worker_id = ? AND is_current = 1",
-            )
-            .bind(now)
-            .bind(request.worker.id.as_str())
-            .execute(&mut *tx)
-            .await
-            .map_err(storage)?;
-            sqlx::query(
-                "INSERT INTO worker_incarnations \
+        )
+        .bind(now)
+        .bind(request.worker.id.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?;
+        sqlx::query(
+            "INSERT INTO worker_incarnations \
                  (id, worker_id, daemon_version, host_name, network_zone, capabilities_json, \
                   is_current, registered_at, last_seen_at, superseded_at) \
                  VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)",
-            )
-            .bind(request.incarnation.id.as_str())
-            .bind(request.worker.id.as_str())
-            .bind(&request.incarnation.daemon_version)
-            .bind(&request.incarnation.host_name)
-            .bind(&request.incarnation.network_zone)
-            .bind(&capabilities_json)
-            .bind(now)
-            .bind(now)
-            .execute(&mut *tx)
-            .await
-            .map_err(storage)?;
-            sqlx::query(
-                "UPDATE workers SET status = 'online', labels_json = ?, \
+        )
+        .bind(request.incarnation.id.as_str())
+        .bind(request.worker.id.as_str())
+        .bind(&request.incarnation.daemon_version)
+        .bind(&request.incarnation.host_name)
+        .bind(&request.incarnation.network_zone)
+        .bind(&capabilities_json)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?;
+        sqlx::query(
+            "UPDATE workers SET status = 'online', labels_json = ?, \
                  record_version = record_version + 1, updated_at = ?, retired_at = NULL \
                  WHERE id = ?",
-            )
-            .bind(&labels_json)
-            .bind(now)
-            .bind(request.worker.id.as_str())
-            .execute(&mut *tx)
-            .await
-            .map_err(storage)?;
-        }
+        )
+        .bind(&labels_json)
+        .bind(now)
+        .bind(request.worker.id.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?;
     }
 
     if existing_binding.is_none() {

@@ -79,7 +79,7 @@ impl EnterpriseControlPlaneConfig {
         }
         let enterprise = &config.enterprise;
         let instance_id = required(
-            &enterprise.control_plane_instance_id,
+            enterprise.control_plane_instance_id.as_deref(),
             "control-plane instance id",
         )?;
         if instance_id.len() != 29
@@ -104,11 +104,17 @@ impl EnterpriseControlPlaneConfig {
                 "control-plane instance id must be ci_<26-character ULID>".to_string(),
             ));
         }
-        let region = required(&enterprise.enterprise_region, "enterprise region")?;
-        let zone = required(&enterprise.enterprise_zone, "enterprise zone")?;
-        let endpoint = required(&enterprise.control_plane_endpoint, "control-plane endpoint")?;
-        let specify_url = required(&enterprise.specify_url, "Specify URL")?;
-        let authority = required(&enterprise.specify_authority_key, "Specify authority key")?;
+        let region = required(enterprise.enterprise_region.as_deref(), "enterprise region")?;
+        let zone = required(enterprise.enterprise_zone.as_deref(), "enterprise zone")?;
+        let endpoint = required(
+            enterprise.control_plane_endpoint.as_deref(),
+            "control-plane endpoint",
+        )?;
+        let specify_url = required(enterprise.specify_url.as_deref(), "Specify URL")?;
+        let authority = required(
+            enterprise.specify_authority_key.as_deref(),
+            "Specify authority key",
+        )?;
         let authorization_file = enterprise
             .specify_authorization_file
             .as_deref()
@@ -214,6 +220,7 @@ impl EnterpriseCoordinatorHandle {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn start_enterprise_coordination(
     daemon: &DaemonConfig,
     store: &SqliteStore,
@@ -472,9 +479,8 @@ async fn renew(
         .await
 }
 
-fn required(value: &Option<String>, field: &str) -> Result<String, EnterpriseStartupError> {
+fn required(value: Option<&str>, field: &str) -> Result<String, EnterpriseStartupError> {
     value
-        .as_deref()
         .filter(|value| {
             *value == value.trim()
                 && !value.is_empty()

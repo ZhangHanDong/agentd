@@ -67,17 +67,18 @@ Scenario: submit_outcome with no open task is not_assigned
   When submit_outcome runs
   Then it returns Err whose code is "not_assigned" and the host received no delivered event
 
-Scenario: check_inbox returns an empty inbox in v0
-  Test: check_inbox_returns_empty_v0
-  Given a RunHost and a check_inbox call for agent "impl-a"
-  When check_inbox runs
-  Then it returns an empty messages list
+Scenario: check_inbox returns durable direct messages and drains them
+  Test: check_inbox_returns_durable_direct_messages_and_drains
+  Given a RunHost with a durable direct message for agent "codex-worker"
+  When check_inbox previews and then drains the inbox
+  Then both calls return the message
+  And a later preview returns no direct messages
 
-Scenario: the dispatcher lists the five tools
-  Test: dispatch_lists_five_tools
+Scenario: the dispatcher lists the current messaging tools
+  Test: dispatch_lists_group_tools_after_p220
   Given the tool dispatcher
   When the tool descriptors are listed
-  Then there are exactly five: assign_task, submit_outcome, submit_review, check_inbox, query_run
+  Then it includes post, check_group, send_message, check_inbox, and query_run
 
 Scenario: the dispatcher routes a call to its tool handler
   Test: dispatch_routes_to_handler

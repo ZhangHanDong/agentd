@@ -127,15 +127,15 @@ fn p263_parity_map_adds_enterprise_requirements_without_completion_claim() {
     assert!(map.contains("P200-P262"));
     let rows = parity_rows(&map);
     let expected = [
-        ("native_runtime_process", "missing"),
-        ("native_runtime_session_restore", "missing"),
+        ("native_runtime_process", "partial"),
+        ("native_runtime_session_restore", "partial"),
         ("durable_runtime_identity", "partial"),
         ("project_room_repo_binding", "partial"),
         ("worker_fleet_protocol", "partial"),
         ("durable_task_leases", "partial"),
         ("auth_rbac_quota", "partial"),
         ("artifact_audit_provenance", "partial"),
-        ("operational_doctor_health", "missing"),
+        ("operational_doctor_health", "partial"),
     ];
     for (id, status) in expected {
         let row = rows
@@ -149,7 +149,7 @@ fn p263_parity_map_adds_enterprise_requirements_without_completion_claim() {
         rows["project_room_repo_binding"][5].contains("P269"),
         "partial project authority status requires P269 evidence"
     );
-    assert!(map.contains("cannot fully replace agent-chat yet"));
+    assert!(map.contains("cannot be declared a complete\nreplacement"));
 }
 
 #[test]

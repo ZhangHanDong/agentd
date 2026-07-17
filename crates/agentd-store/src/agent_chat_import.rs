@@ -1311,6 +1311,7 @@ fn now_unix_for_import() -> i64 {
         })
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn canonical_agent_chat_snapshot(
     agent_chat: &Path,
 ) -> Result<AgentChatCanonicalSnapshot, StoreError> {
@@ -1404,7 +1405,7 @@ pub fn canonical_agent_chat_snapshot(
                     "ts": input.ts,
                     "from": input.from,
                     "to": input.to,
-                    "message_type": input.message_type.as_deref().unwrap_or("message"),
+                    "message_type": input.message_type.as_deref().unwrap_or("human"),
                     "priority": input.priority.as_deref().unwrap_or("normal"),
                     "reply_to": input.reply_to,
                     "source": input.source.as_deref().unwrap_or("api"),
@@ -1441,7 +1442,7 @@ pub fn canonical_agent_chat_snapshot(
                     "ts": input.ts,
                     "from": input.from,
                     "group": input.group,
-                    "message_type": input.message_type.as_deref().unwrap_or("message"),
+                    "message_type": input.message_type.as_deref().unwrap_or("inform"),
                     "priority": input.priority.as_deref().unwrap_or("normal"),
                     "mentions": mentions,
                     "reply_to": input.reply_to,
@@ -1520,7 +1521,8 @@ pub fn canonical_agent_chat_snapshot(
     });
     Ok(AgentChatCanonicalSnapshot {
         source_sha256: hex::encode(source_hasher.finalize()),
-        file_count: files.len() as u32,
+        file_count: u32::try_from(files.len())
+            .map_err(|_| StoreError::Invariant("too many source files".to_string()))?,
         record_count: records.len() as u64,
         unsupported_count: (agents.skipped_agents
             + messaging.skipped_groups

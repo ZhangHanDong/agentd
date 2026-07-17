@@ -16,5 +16,7 @@ configMapGenerator:
       - retention-policy-v1.json=../../config/enterprise/retention-policy-v1.json
 generatorOptions:
   disableNameSuffixHash: false
-commonLabels:
-  app.kubernetes.io/part-of: agentd-enterprise
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: agentd-enterprise
+    includeSelectors: true

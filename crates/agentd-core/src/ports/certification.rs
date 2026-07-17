@@ -1,4 +1,4 @@
-//! Signed execution evidence, OpenFab certification, forge, and Skill Hub contracts.
+//! Signed execution evidence, `OpenFab` certification, forge, and Skill Hub contracts.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

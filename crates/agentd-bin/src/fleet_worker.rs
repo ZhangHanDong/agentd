@@ -206,6 +206,7 @@ impl Drop for ExecutorWorkspace {
 }
 
 impl WorkerConfig {
+    #[allow(clippy::too_many_lines)]
     fn from_args(args: &EnterpriseWorkerArgs) -> Result<Self, EnterpriseWorkerError> {
         let identity = load_identity(args)?;
         validate_id(&identity.worker_id, "wk_", "worker id")?;
@@ -491,7 +492,7 @@ pub async fn run(args: &EnterpriseWorkerArgs) -> Result<(), EnterpriseWorkerErro
 
     loop {
         tokio::select! {
-            _ = &mut shutdown => {
+            () = &mut shutdown => {
                 heartbeat_sequence = heartbeat_sequence.saturating_add(1);
                 let _ = heartbeat(&client, &config, heartbeat_sequence, WorkerStatus::Offline).await;
                 return Ok(());
@@ -522,7 +523,7 @@ pub async fn run(args: &EnterpriseWorkerArgs) -> Result<(), EnterpriseWorkerErro
                         ) => {
                             heartbeat_sequence = result?;
                         }
-                        _ = &mut shutdown => {
+                        () = &mut shutdown => {
                             heartbeat_sequence = heartbeat_sequence.saturating_add(1);
                             let _ = heartbeat(
                                 &client,
@@ -617,6 +618,7 @@ async fn execute_assignment(
     Ok(heartbeat_sequence)
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run_executor_with_renewal(
     client: &FleetHttpClient,
     config: &WorkerConfig,
@@ -934,7 +936,7 @@ fn bounded_set(values: &[String], field: &str) -> Result<BTreeSet<String>, Enter
                     "invalid {field} value"
                 )))
             } else {
-                Ok(value.to_string())
+                Ok(value.clone())
             }
         })
         .collect()

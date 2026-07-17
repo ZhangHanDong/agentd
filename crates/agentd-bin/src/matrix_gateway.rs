@@ -229,8 +229,8 @@ pub fn normalize_command(
     let verb = tokens.next().unwrap_or_default();
     let class = match (prefix, verb) {
         ("/agentd", "execute") | ("/run", "start") => MatrixCommandClass::Execute,
-        ("/agentd", "status") | ("/run", "status") => MatrixCommandClass::Status,
-        ("/agentd", "cancel") | ("/run", "cancel") => MatrixCommandClass::Cancel,
+        ("/agentd" | "/run", "status") => MatrixCommandClass::Status,
+        ("/agentd" | "/run", "cancel") => MatrixCommandClass::Cancel,
         _ => {
             return Err(MatrixGatewayError::Invalid(
                 "unsupported Matrix command".to_string(),

@@ -7,22 +7,18 @@ tags: [agent-chat-replacement, real-execute, codex, p201]
 
 Move the agent-chat replacement path one step beyond the p200 parity baseline by
 making the real `execute.dot` smoke Codex-testable without requiring Claude.
-Agentd already supports launching Codex at the tmux backend layer; this slice
-connects workflow role names and the real-execute smoke harness to that runtime
-selection so the user can test with Codex agents only.
+The native runtime owns Codex process/session execution; this slice connects
+workflow role names and the real-execute smoke harness to that runtime selection
+so the user can test with Codex agents only.
 
 ## Decisions
 
-- Runtime selection is role-name based for this slice: roles prefixed `codex-`
-  spawn with `CliKind::Codex`; roles prefixed `claude-` and unprefixed legacy
-  roles keep `CliKind::ClaudeCode` compatibility.
+- Runtime selection remains role-name based at the core compatibility boundary:
+  roles prefixed `codex-` spawn with `CliKind::Codex`.
 - `scripts/agentd_real_execute_smoke.sh` accepts `--implementer-role ROLE` and
   `--reviewers CSV` and uses those values to create a smoke-local workflow copy.
-- A smoke run whose selected roles are all `codex-*` must require the `codex`
-  executable and must not require `claude` or `claude --mcp-config` during
-  preflight.
-- The default smoke plan remains backward-compatible with the shipped
-  `workflows/execute.dot` roles unless explicit runtime options are provided.
+- Every smoke role must be `codex-*`; preflight requires the `codex` executable
+  and does not require Claude or tmux.
 - p201 keeps the p200 parity row `real_codex_execution` at `partial`, because a
   fully successful live Codex run is still gated by the explicit
   `AGENTD_REAL_EXECUTE_SMOKE=1 --execute` environment and real host setup.
@@ -41,11 +37,8 @@ selection so the user can test with Codex agents only.
 
 ### Forbidden
 
-- Do not start real Claude, Codex, tmux, Matrix, or remote relay processes in
-  tests.
-- Do not change `scripts/agentd_real_claude_smoke.sh`.
-- Do not remove Claude compatibility for existing unprefixed or `claude-*`
-  workflow roles.
+- Do not start real Claude, Codex, Matrix, or remote relay processes in tests.
+- Do not add a Claude or tmux prerequisite to the real-execute smoke.
 - Do not mutate the agent-chat checkout.
 
 ## Out of Scope
@@ -87,27 +80,26 @@ Scenario: mixed fan-out reviewers preserve per-role runtime selection
 Scenario: Codex-only smoke preflight does not require Claude
   Test:
     Package: agentd-bin
-    Filter: real_execute_smoke_codex_only_preflight_accepts_fake_codex_without_claude
+    Filter: real_execute_smoke_codex_only_preflight_accepts_fake_codex
   Level: script preflight
   Test Double: fake PATH tools
-  Given fake local `cargo`, `tmux`, `codex`, `agent-spec`, `curl`, `git`, and `gh` executables
+  Given fake local `cargo`, `codex`, `agent-spec`, `curl`, `git`, and `gh` executables
   And no `claude` executable is present in `PATH`
   When `agentd_real_execute_smoke.sh --preflight-only --implementer-role codex-impl --reviewers codex-sec,codex-perf,codex-readability` runs
   Then it exits `0`
   And stdout includes `preflight ok`
   And stderr does not name a missing `claude` prerequisite
 
-Scenario: mixed-role smoke preflight still requires Claude
+Scenario: non-Codex smoke roles are rejected
   Test:
     Package: agentd-bin
-    Filter: real_execute_smoke_mixed_roles_preflight_requires_claude
-  Level: script preflight
-  Test Double: fake PATH tools
-  Given fake local `cargo`, `tmux`, `codex`, `agent-spec`, `curl`, `git`, and `gh` executables
-  And no `claude` executable is present in `PATH`
-  When `agentd_real_execute_smoke.sh --preflight-only --implementer-role codex-impl --reviewers claude-sec,codex-perf` runs
+    Filter: real_execute_smoke_rejects_non_codex_explicit_roles
+  Level: script validation
+  Test Double: script output
+  Given an explicit reviewer role without the `codex-` prefix
+  When `agentd_real_execute_smoke.sh --dry-run` runs
   Then it exits non-zero
-  And stderr names the missing `claude` prerequisite
+  And stderr states that only `codex-*` roles are allowed
 
 Scenario: dry-run documents Codex-only runtime choices
   Test:

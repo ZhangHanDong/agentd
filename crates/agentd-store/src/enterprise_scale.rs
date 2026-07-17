@@ -1,5 +1,6 @@
 //! Durable AD-E7 enterprise scale reference control plane.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use agentd_core::ports::{
@@ -10,14 +11,13 @@ use agentd_core::ports::{
     DisasterRecoveryDrillStatus, EnterpriseMutationFence, EnterpriseOperationalSnapshot,
     EnterpriseScaleError, EnterpriseScalePort, EnterpriseZoneStatus, LegalHold,
     LoadModelRegistration, ReplicaStatus, RetentionDecision, RetentionDisposition, RetentionPolicy,
-    ServiceLevelMeasurement, ServiceLevelStatus, TenantKeyStatus, TenantKeyTransition,
-    TenantKeyVersion, WorkerImageRollback, WorkerImageRollout, WorkerImageRolloutStatus,
-    WorkerImageZoneObservation, ZonePoolPolicy,
+    ServiceLevelMeasurement, TenantKeyStatus, TenantKeyTransition, TenantKeyVersion,
+    WorkerImageRollback, WorkerImageRollout, WorkerImageRolloutStatus, WorkerImageZoneObservation,
+    ZonePoolPolicy,
 };
 use agentd_core::types::{
-    ArtifactReplicationId, ControlPlaneInstanceId, DisasterRecoveryCheckpointId,
-    DisasterRecoveryDrillId, ExecutionArtifactId, LegalHoldId, LoadModelId, TenantKeyId,
-    WorkerImageRolloutId, ZonePoolId,
+    ArtifactReplicationId, ControlPlaneInstanceId, DisasterRecoveryCheckpointId, LegalHoldId,
+    LoadModelId, TenantKeyId, WorkerImageRolloutId, ZonePoolId,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -146,10 +146,12 @@ async fn rollback(connection: &mut SqliteImmediateTransaction) {
     let _ = connection.rollback().await;
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn storage_error(error: sqlx::Error) -> EnterpriseScaleError {
     EnterpriseScaleError::Unavailable(error.to_string())
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn serde_error(error: serde_json::Error) -> EnterpriseScaleError {
     EnterpriseScaleError::Invalid(error.to_string())
 }
@@ -671,6 +673,7 @@ fn validate_legal_hold(hold: &LegalHold) -> Result<(), EnterpriseScaleError> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 #[async_trait::async_trait]
 impl EnterpriseScalePort for SqliteEnterpriseScaleControlPlane {
     async fn heartbeat_control_plane(
@@ -1454,9 +1457,7 @@ impl EnterpriseScalePort for SqliteEnterpriseScaleControlPlane {
                 "capacity observation predates current rollout or zone policy".to_string(),
             ));
         }
-        let (mut desired, mut reason) = if !policy.enabled {
-            (0, "pool_disabled")
-        } else {
+        let (mut desired, mut reason) = if policy.enabled {
             let slots_per_replica = if observation.ready_replicas == 0 {
                 1
             } else {
@@ -1474,14 +1475,14 @@ impl EnterpriseScalePort for SqliteEnterpriseScaleControlPlane {
             let replicas = u32::try_from(replicas)
                 .unwrap_or(u32::MAX)
                 .clamp(policy.minimum_replicas, policy.maximum_replicas);
-            let reason = if replicas > observation.ready_replicas {
-                "queue_pressure"
-            } else if replicas < observation.ready_replicas {
-                "excess_capacity"
-            } else {
-                "capacity_balanced"
+            let reason = match replicas.cmp(&observation.ready_replicas) {
+                Ordering::Greater => "queue_pressure",
+                Ordering::Less => "excess_capacity",
+                Ordering::Equal => "capacity_balanced",
             };
             (replicas, reason)
+        } else {
+            (0, "pool_disabled")
         };
         if desired < observation.ready_replicas
             && observation.last_scale_at.is_some_and(|last| {

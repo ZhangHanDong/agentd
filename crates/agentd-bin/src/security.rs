@@ -443,6 +443,7 @@ impl fmt::Debug for EnterpriseSecurityPipeline {
 }
 
 impl EnterpriseSecurityPipeline {
+    #[allow(clippy::too_many_lines)]
     pub async fn execute(
         &self,
         mut operation: EnterpriseWorkerOperation,

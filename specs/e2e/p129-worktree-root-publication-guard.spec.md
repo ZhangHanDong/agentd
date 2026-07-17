@@ -30,7 +30,7 @@ publish helper and the real worktree provider need explicit root validation.
 - specs/e2e/p129-worktree-root-publication-guard.spec.md
 - scripts/agentd_publish_worktree.sh
 - crates/agentd-bin/tests/publish_worktree.rs
-- crates/agentd-tmux/src/pool.rs
+- crates/agentd-worktree/src/lib.rs
 
 ### Forbidden
 
@@ -73,7 +73,7 @@ Scenario: publish helper still accepts a real git worktree root
 
 Scenario: provider validation rejects fake nested worktree paths
   Test:
-    Package: agentd-tmux
+    Package: agentd-worktree
     Filter: git_worktree_root_validation_rejects_parent_repo_climb
   Level: adapter unit
   Test Double: temporary git repository
@@ -83,7 +83,7 @@ Scenario: provider validation rejects fake nested worktree paths
 
 Scenario: provider returns a real git worktree root after allocation
   Test:
-    Package: agentd-tmux
+    Package: agentd-worktree
     Filter: git_provider_create_returns_valid_worktree_root
   Level: adapter integration
   Test Double: temporary git repository
