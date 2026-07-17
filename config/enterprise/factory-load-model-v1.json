@@ -1,6 +1,8 @@
 {
   "schemaVersion": "agentd.factory-load-model/v1",
   "modelId": "factory-load-model-v1",
+  "registrationId": "lm_01J00000000000000000000000",
+  "registeredAt": 1784217600,
   "description": "Pinned AD-E7 enterprise pre-production capacity and failure profile.",
   "dimensions": {
     "tenant": { "count": 1000, "activeConcurrency": 250 },
@@ -34,4 +36,3 @@
     "operatorExplainCoveragePercent": 100
   }
 }
-

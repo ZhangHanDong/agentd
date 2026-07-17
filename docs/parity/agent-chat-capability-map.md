@@ -23,7 +23,19 @@ AD-E6 candidate disposition (2026-07-17):
   disaster recovery, and enterprise load profiles are explicit AD-E7 product
   scope and do not block AD-E6 code completion;
 - no remaining `partial` or `missing` row is implicitly waived. A product owner
-  must approve its disposition during final sign-off before legacy retirement.
+must approve its disposition during final sign-off before legacy retirement.
+
+AD-E7 candidate disposition (2026-07-17):
+
+- the enterprise scale ledger, Specify HTTPS transport, HA coordination
+  contract, Kubernetes profile, operator APIs/CLI/dashboard/doctor, retention,
+  legal hold, replication/key references, DR, load model, and SLO projections
+  are implemented candidates;
+- the checked-in SQLite adapter is reference-only. A replicated durable-store
+  adapter and deployed identity/KMS/object-store/Matrix/Robrix/Specify/OpenFab
+  providers remain explicit enterprise deployment dependencies;
+- no scale, failover, zone recovery, signed rollout, load, browser, or runtime
+  acceptance has been executed, so all AD-E7 rows remain `partial`.
 
 P263 freezes P200-P262 in this worktree as the only authoritative implemented
 range. Conflicting sibling-worktree P202-P228 artifacts count only through the
@@ -73,3 +85,8 @@ sequence.
 | openfab_certification_protocol | enterprise_certification | required | no agent-chat equivalent | partial | The AD-E4 candidate binds immutable snapshot/source/spec/evidence/policy/skill digests, stores request and externally signed result as separate exact-idempotent events, verifies registered OpenFab `did:key` signatures, enforces gate=none/machine/human N-of-M Forge semantics, and fails startup closed without signer/verifier/store/state/transport/revocation/clock providers. Real OpenFab service deployment, independent verification, failure injection, and FSF-5 sign-off remain pending. | AD-E4 |
 | skill_hub_package_trust | enterprise_supply_chain | required | no agent-chat equivalent | partial | The AD-E4 candidate pins exact package/version/archive/manifest/dependency-lock/permissions hashes in Specify snapshots and evidence, resolves signed time-bounded OpenFab trust over HTTPS, admits only approved/signed package versions, and preserves immutable trust-at-install history after yank/revoke. Real Skill Hub publication, package installation, status transition drills, and operator acceptance remain pending. | AD-E4 |
 | operational_doctor_health | enterprise_operations | required | /Users/zhangalex/Work/Projects/consult/agent-chat/server.js | partial | The AD-E6 code candidate adds bounded structured doctor output over schema, cutover, worker, lease, queue, native runtime, artifact, Matrix, and recovery state without raw-log inspection. AD-E7 adds fleet-scale capacity/SLO projections. Production outage drills, dashboard comparison, and operator acceptance remain pending. | AD-E6/AD-E7 |
+| enterprise_ha_control_plane | enterprise_scale | required | no agent-chat equivalent | partial | The AD-E7 candidate adds storage-neutral scale contracts, durable member heartbeats, expiring leadership with monotonic term/fence, authenticated Specify HTTPS startup checks, an explicit non-executing control-plane profile, and bounded leader-gated operator mutations. A production replicated durable-store adapter, multi-instance deployment, instance-loss evidence, and operator acceptance remain pending. | AD-E7 |
+| kubernetes_zone_worker_profile | enterprise_worker | required | /Users/zhangalex/Work/Projects/consult/agent-chat/remote | partial | The AD-E7 candidate adds digest-only control-plane/worker resources, three-member topology/PDB intent, outbound-only zone-labelled pull workers, default-deny network policy, Sigstore admission intent, external-metric HPA, and audited rollout/zone contracts. Real cluster admission, workload identity, worker listener/client deployment, signed rollout, autoscaling, zone loss, and recovery evidence remain pending. | AD-E7 |
+| multi_region_artifact_keys | enterprise_storage | required | no agent-chat equivalent | partial | The AD-E7 candidate persists digest-only replication plans and per-region acknowledgements plus opaque tenant KMS key/version references; it never stores object bytes or key material. Production object-store/KMS transports, key rotation, replica failure, regional recovery, and deletion-side-effect acceptance remain pending. | AD-E7 |
+| retention_legal_hold_dr | enterprise_compliance | required | no agent-chat equivalent | partial | The AD-E7 candidate adds versioned retention, legal-hold precedence, immutable release, DR checkpoint/drill ledgers, RPO/RTO validation, doctor checks, and forward-only operations runbooks. Real compliance approval, backup/restore, legal-hold deletion denial, region failover/failback, and operator evidence remain pending. | AD-E7 |
+| enterprise_capacity_slo | enterprise_observability | required | /Users/zhangalex/Work/Projects/consult/agent-chat/server.js | partial | The AD-E7 candidate adds a pinned factory load model, zone capacity/autoscaling recommendations, queue/failure/replica/budget/SLO snapshots, authenticated status/explain APIs, agentctl commands, dashboard projections, and a guarded immutable-digest load harness. Load, noisy-neighbor, Palpo/Matrix, Robrix, browser, and SLO acceptance remain pending. | AD-E7 |

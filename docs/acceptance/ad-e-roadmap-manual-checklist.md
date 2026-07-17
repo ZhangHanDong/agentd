@@ -84,11 +84,35 @@
 
 ## AD-E7
 
-- [ ] Run the pinned factory load model across tenants, projects, rooms, Matrix events, queues, artifacts/logs, certification throughput, failures, and noisy neighbors.
-- [ ] Lose a worker, control-plane instance, and zone independently; prove no accepted state is lost and lease fencing remains valid.
-- [ ] Verify signed Kubernetes image rollout, per-zone pull workers, autoscaling, multi-region artifact replication, and tenant encryption keys.
-- [ ] Execute retention, legal hold, disaster recovery, RPO/RTO, capacity, backlog, budget, failure, and SLO operator drills.
+- Candidate inventory: migration `0024`, `EnterpriseScalePort`, SQLite reference
+  adapter, Specify HTTPS transport, enterprise coordination/profile,
+  `/api/enterprise`, `agentctl enterprise`, dashboard/doctor, Kubernetes profile,
+  factory load/retention inputs, runbooks, and guarded load harness.
+- [ ] Record `git rev-parse HEAD`, `rustc -Vv`, `cargo -V`, Codex version, Kubernetes version, policy-controller version, image digests, provider revisions, and the replicated durable-store adapter/version. Refuse multi-replica acceptance if the target uses one shared SQLite file.
+- [ ] Run `cargo test -p agentd-store --test enterprise_scale`, `cargo test -p agentd-project-authority --test http_specify_authority`, `cargo test -p agentd-bin --test enterprise_coordination`, `cargo test -p agentd-surface --test enterprise --features test-support`, and `cargo test -p agentctl --test enterprise_cli`; retain output.
+- [ ] Run `kubectl kustomize deploy/enterprise`, policy/schema validation, server-side dry-run, and Sigstore admission against the exact digest-pinned images. Reject placeholder digests, keys, endpoints, KMS refs, or state-adapter configuration.
+- [ ] Register the exact factory model and retention policy through `agentctl enterprise`; retain content SHA-256 values and redacted responses.
+- [ ] Run `AGENTD_ENTERPRISE_LOAD_PROFILE=1 bash scripts/agentd_enterprise_load_profile.sh --execute --driver "$AGENTD_LOAD_DRIVER" --evidence-dir "$AGENTD_ACCEPTANCE_DIR/ad-e7-load"`; cover tenant, project, room, Matrix event, queue, artifact/log, certification throughput, failure injection, test window, noisy neighbor, and budget dimensions.
+- [ ] Run Palpo/Matrix ingress/replay and Robrix projections throughout the load profile; compare canonical project, task, lease, artifact, evidence, denial, capacity, and SLO ids without exposing prompt/transcript bytes.
+- [ ] Lose a worker while leased; prove a new incarnation and higher fencing token recover the task and the old worker cannot publish any side effect.
+- [ ] Lose the leader control-plane instance; prove a surviving member obtains a higher leadership term/fence, no accepted queue/lease/outbox/audit state is lost, and stale leader mutations conflict.
+- [ ] Lose one entire zone; prove placement is not weakened, no accepted state is lost, replica/key policies hold, and recovery meets declared RPO/RTO.
+- [ ] Block and restore Specify, KMS, object store, Matrix, and OpenFab independently; retain fail-closed admission, durable retry/replay, and no-fallback evidence.
+- [ ] Execute a signed canary/zone rollout and forward rollback, queue/policy autoscaling, multi-region replica acknowledgement, tenant key rotation, retention expiry, legal-hold deletion denial/release, DR restore, and failback.
+- [ ] Compare `agentctl enterprise status`, exact task explain, dashboard, doctor, metrics, and immutable ledgers for leadership, zones, backlog, rollout, replicas, budget, failures, and SLOs.
 - [ ] FSF-7 operator sign-off recorded.
+
+## Unified Verification Sequence
+
+- [ ] Ensure `ANTHROPIC_API_KEY` and `CLAUDE_API_KEY` are unset. Confirm no final smoke command or runtime matrix names Claude.
+- [ ] Run `cargo fmt --all -- --check`.
+- [ ] Run `cargo check --workspace --all-targets --all-features`.
+- [ ] Run `cargo test --workspace --all-targets --all-features`.
+- [ ] Run `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
+- [ ] Run `bash scripts/check.sh` and every guarded dry-run/preflight script before enabling real execution.
+- [ ] Run the AD-E1 OCI security smoke, AD-E4 OpenFab checks, AD-E5 native runtime smoke, and `AGENTD_REAL_EXECUTE_RUNTIMES=codex,codex,codex,codex AGENTD_REAL_EXECUTE_SMOKE=1 bash scripts/agentd_real_execute_smoke.sh --execute`; retain Codex-only evidence.
+- [ ] Start the dashboard against the final candidate and capture desktop/mobile browser screenshots; inspect enterprise band, run/runtime detail, overflow, auth failures, and nonblank live updates.
+- [ ] Execute all AD-E1 through AD-E7 failure, rollback, restore, and cross-surface checks above in order; link immutable evidence digests before any status promotion.
 
 ## Final Decision
 

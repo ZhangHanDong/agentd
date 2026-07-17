@@ -7,6 +7,7 @@ use std::time::Duration;
 use reqwest::header::{AUTHORIZATION, HeaderValue};
 use reqwest::{Client, Method, Url};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::cli::{
@@ -90,7 +91,12 @@ async fn mutate(
     args: &EnterpriseMutationFileArgs,
     operation: &str,
 ) -> Result<Value, EnterpriseCliError> {
-    let body = read_json(&args.file)?;
+    let (body, bytes) = read_json(&args.file)?;
+    let body = if operation == "register-load-model" {
+        normalize_load_model(body, &bytes)?
+    } else {
+        body
+    };
     request(
         &args.daemon,
         Method::POST,
@@ -216,7 +222,7 @@ fn validate_url(url: &Url, allow_loopback_http: bool) -> Result<(), EnterpriseCl
     ))
 }
 
-fn read_json(path: &Path) -> Result<Value, EnterpriseCliError> {
+fn read_json(path: &Path) -> Result<(Value, Vec<u8>), EnterpriseCliError> {
     let metadata = std::fs::metadata(path).map_err(|error| {
         EnterpriseCliError::Invalid(format!("cannot inspect {}: {error}", path.display()))
     })?;
@@ -228,9 +234,88 @@ fn read_json(path: &Path) -> Result<Value, EnterpriseCliError> {
     let bytes = std::fs::read(path).map_err(|error| {
         EnterpriseCliError::Invalid(format!("cannot read {}: {error}", path.display()))
     })?;
-    serde_json::from_slice(&bytes).map_err(|error| {
+    let value = serde_json::from_slice(&bytes).map_err(|error| {
         EnterpriseCliError::Invalid(format!("invalid JSON in {}: {error}", path.display()))
-    })
+    })?;
+    Ok((value, bytes))
+}
+
+fn normalize_load_model(body: Value, source: &[u8]) -> Result<Value, EnterpriseCliError> {
+    if body.get("load_model_id").is_some() {
+        return Ok(body);
+    }
+    if body.get("schemaVersion").and_then(Value::as_str)
+        != Some("agentd.factory-load-model/v1")
+    {
+        return Err(EnterpriseCliError::Invalid(
+            "load model must be a LoadModelRegistration or agentd.factory-load-model/v1"
+                .to_string(),
+        ));
+    }
+    let string = |pointer: &str| -> Result<&str, EnterpriseCliError> {
+        body.pointer(pointer)
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| EnterpriseCliError::Invalid(format!("load model missing {pointer}")))
+    };
+    let number = |pointer: &str| -> Result<u64, EnterpriseCliError> {
+        body.pointer(pointer)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| EnterpriseCliError::Invalid(format!("load model missing {pointer}")))
+    };
+    let bounded_u32 = |value: u64, field: &str| -> Result<u32, EnterpriseCliError> {
+        u32::try_from(value).map_err(|_| {
+            EnterpriseCliError::Invalid(format!("load model {field} exceeds u32"))
+        })
+    };
+    let tenant_count = number("/dimensions/tenant/count")?;
+    let project_count = tenant_count
+        .checked_mul(number("/dimensions/project/perTenant")?)
+        .ok_or_else(|| EnterpriseCliError::Invalid("project count overflow".to_string()))?;
+    let room_count = project_count
+        .checked_mul(number("/dimensions/room/perProject")?)
+        .ok_or_else(|| EnterpriseCliError::Invalid("room count overflow".to_string()))?;
+    let test_minutes = number("/dimensions/testWindow/warmupMinutes")?
+        .checked_add(number("/dimensions/testWindow/steadyMinutes")?)
+        .and_then(|value| {
+            value.checked_add(
+                body.pointer("/dimensions/testWindow/recoveryMinutes")
+                    .and_then(Value::as_u64)?,
+            )
+        })
+        .ok_or_else(|| EnterpriseCliError::Invalid("test window overflow".to_string()))?;
+    let test_window_seconds = test_minutes
+        .checked_mul(60)
+        .ok_or_else(|| EnterpriseCliError::Invalid("test window overflow".to_string()))?;
+    let noisy_neighbor_ratio = number("/dimensions/noisyNeighbor/tenantTrafficMultiplier")?
+        .checked_mul(100)
+        .ok_or_else(|| EnterpriseCliError::Invalid("noisy-neighbor ratio overflow".to_string()))?;
+    Ok(json!({
+        "load_model_id": string("/registrationId")?,
+        "version": string("/modelId")?,
+        "content_sha256": format!("{:x}", Sha256::digest(source)),
+        "dimensions": [
+            "tenant",
+            "project",
+            "room",
+            "matrix_event",
+            "queue",
+            "artifact_log",
+            "certification_throughput",
+            "failure_injection",
+            "test_window",
+            "noisy_neighbor",
+            "budget"
+        ],
+        "test_window_seconds": bounded_u32(test_window_seconds, "test window")?,
+        "tenant_count": bounded_u32(tenant_count, "tenant count")?,
+        "project_count": bounded_u32(project_count, "project count")?,
+        "room_count": bounded_u32(room_count, "room count")?,
+        "matrix_events_per_second": bounded_u32(number("/dimensions/matrixEvent/eventsPerSecond")?, "Matrix event rate")?,
+        "maximum_queue_depth": number("/dimensions/queue/burstDepth")?,
+        "noisy_neighbor_ratio_basis_points": bounded_u32(noisy_neighbor_ratio, "noisy-neighbor ratio")?,
+        "registered_at": number("/registeredAt")?
+    }))
 }
 
 fn run_async<F, T>(future: F) -> Result<T, EnterpriseCliError>

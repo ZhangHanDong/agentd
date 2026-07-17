@@ -121,8 +121,8 @@
 **Interfaces:**
 - Produces the AD-E7 code-complete candidate and the single final verification sequence.
 
-- [ ] Document instance/worker/zone loss, Specify outage, rollout, scaling, replication, key rotation, legal hold, and RPO/RTO drills.
-- [ ] Add a guarded load-profile harness that records immutable result digests.
-- [ ] Mark code candidate status without changing any gate to accepted.
-- [ ] Record every final command and Codex-only real smoke in the manual checklist.
-- [ ] Commit, then begin the unified verification pass.
+- [x] Document instance/worker/zone loss, Specify outage, rollout, scaling, replication, key rotation, legal hold, and RPO/RTO drills.
+- [x] Add a guarded load-profile harness that records immutable result digests.
+- [x] Mark code candidate status without changing any gate to accepted.
+- [x] Record every final command and Codex-only real smoke in the manual checklist.
+- [x] Commit, then begin the unified verification pass.

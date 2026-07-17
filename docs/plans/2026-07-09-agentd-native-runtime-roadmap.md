@@ -723,6 +723,28 @@ Exit gate:
 
 Depends on: AD-E2, AD-E4, and AD-E6.
 
+Implementation status (2026-07-17): AD-E7 code-complete candidate. Migration
+`0024`, `EnterpriseScalePort`, and the SQLite reference adapter add fenced
+control-plane membership/leadership, signed rollout and zone observations,
+zone policy/autoscaling recommendations, digest-only artifact replicas and
+tenant KMS references, retention/legal hold, DR checkpoints/drills, pinned load
+models, and SLO snapshots. Enterprise startup now has an authenticated
+control-plane-only profile, authenticated Specify HTTPS transport, leadership
+lifecycle, bounded status/explain/mutation HTTP APIs, `agentctl enterprise`,
+dashboard scale projections, and enterprise doctor checks. The Kubernetes
+profile describes three control-plane members, outbound-only zone workers,
+deny-by-default networking, signed-image admission, HPA, region/key contracts,
+and pinned load/retention inputs. Operations, DR, and guarded load-profile
+artifacts are checked in.
+
+This is not an AD-E7 or FSF-7 exit. The SQLite implementation is a reference
+adapter and must not be shared by multiple replicas; enterprise deployment
+still requires the production replicated durable-store adapter and real
+workload identity, KMS, object store, Matrix/Robrix, Specify, and OpenFab
+providers. No compile, test, Kubernetes, load, failure-injection, browser, or
+Codex runtime evidence has been accepted yet. Those checks and operator sign-off
+remain in the final manual checklist.
+
 Purpose: scale the established contracts.
 
 Work:
