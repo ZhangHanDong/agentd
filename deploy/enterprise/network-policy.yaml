@@ -1,0 +1,93 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: control-plane-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agentd-control-plane
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: agentd-enterprise
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agentd-worker
+        - namespaceSelector:
+            matchLabels:
+              agentd.dev/operator-access: "true"
+      ports:
+        - protocol: TCP
+          port: 8787
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: worker-outbound-pull-only
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agentd-worker
+  policyTypes: ["Ingress", "Egress"]
+  ingress: []
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agentd-control-plane
+      ports:
+        - protocol: TCP
+          port: 8787
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: control-plane-egress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agentd-control-plane
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              agentd.dev/enterprise-dependency-access: "true"
+      ports:
+        - protocol: TCP
+          port: 443
+

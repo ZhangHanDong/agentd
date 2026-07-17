@@ -1,0 +1,44 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: agentd-worker-cn-east-1a
+  annotations:
+    agentd.dev/scaling-authority: enterprise-scale-port
+    agentd.dev/scaling-receipt-required: "true"
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: agentd-worker-cn-east-1a
+  minReplicas: 3
+  maxReplicas: 100
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      selectPolicy: Max
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+        - type: Pods
+          value: 10
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      selectPolicy: Min
+      policies:
+        - type: Percent
+          value: 25
+          periodSeconds: 60
+  metrics:
+    - type: External
+      external:
+        metric:
+          name: agentd_queue_per_available_slot
+          selector:
+            matchLabels:
+              agentd.dev/zone-pool: cn-east-1a-standard
+        target:
+          type: AverageValue
+          averageValue: "4"
+

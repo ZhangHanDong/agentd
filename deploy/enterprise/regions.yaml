@@ -1,0 +1,77 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agentd-enterprise
+  labels:
+    app.kubernetes.io/part-of: agentd-enterprise
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentd-control-plane
+  annotations:
+    agentd.dev/workload-identity: spiffe://factory.example/agentd/control-plane
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentd-worker
+  annotations:
+    agentd.dev/workload-identity: spiffe://factory.example/agentd/worker
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentd-enterprise-regions
+  annotations:
+    agentd.dev/config-version: enterprise-regions-v1
+data:
+  regions.json: |
+    {
+      "version": "enterprise-regions-v1",
+      "primaryRegion": "cn-east-1",
+      "regions": [
+        {
+          "name": "cn-east-1",
+          "zones": ["cn-east-1a", "cn-east-1b", "cn-east-1c"],
+          "artifactReplicaRequired": true,
+          "tenantKeyProvider": "kms",
+          "tenantKeyReferenceSecret": "agentd-tenant-key-refs-cn-east-1"
+        },
+        {
+          "name": "cn-north-1",
+          "zones": ["cn-north-1a", "cn-north-1b", "cn-north-1c"],
+          "artifactReplicaRequired": true,
+          "tenantKeyProvider": "kms",
+          "tenantKeyReferenceSecret": "agentd-tenant-key-refs-cn-north-1"
+        }
+      ]
+    }
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: agentd-tenant-key-refs-cn-east-1
+  annotations:
+    agentd.dev/secret-contract: opaque-kms-references-only
+type: Opaque
+stringData:
+  active-key-ref: kms://tenant-key-provider/replace-me
+  active-key-version-ref: kms-version://tenant-key-provider/replace-me
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: agentd-tenant-key-refs-cn-north-1
+  annotations:
+    agentd.dev/secret-contract: opaque-kms-references-only
+type: Opaque
+stringData:
+  active-key-ref: kms://tenant-key-provider/replace-me
+  active-key-version-ref: kms-version://tenant-key-provider/replace-me
+

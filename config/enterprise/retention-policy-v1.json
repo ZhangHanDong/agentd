@@ -1,0 +1,24 @@
+{
+  "schemaVersion": "agentd.retention-policy/v1",
+  "policyId": "enterprise-retention-v1",
+  "policyVersion": 1,
+  "records": {
+    "auditReceiptDays": 2555,
+    "executionEvidenceDays": 2555,
+    "runtimeTranscriptDays": 365,
+    "runtimeMetadataDays": 2555,
+    "artifactDays": 365,
+    "matrixCursorDays": 2555,
+    "serviceLevelMeasurementDays": 730
+  },
+  "deletePreconditions": [
+    "retention-expired",
+    "all-required-replicas-available",
+    "no-active-legal-hold",
+    "tenant-key-policy-allows-disposition",
+    "immutable-deletion-receipt-written"
+  ],
+  "legalHoldPrecedence": "absolute",
+  "keyMaterialPersistence": "forbidden",
+  "opaqueKmsReferencesOnly": true
+}

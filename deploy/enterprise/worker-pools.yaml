@@ -1,0 +1,99 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentd-worker-cn-east-1a
+  labels:
+    app.kubernetes.io/name: agentd-worker
+    agentd.dev/region: cn-east-1
+    agentd.dev/zone: cn-east-1a
+    agentd.dev/resource-class: standard
+  annotations:
+    agentd.dev/zone-pool-id: zp_replace_with_ulid
+    agentd.dev/rollout-id: ir_replace_with_ulid
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentd-worker
+      agentd.dev/zone: cn-east-1a
+      agentd.dev/resource-class: standard
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentd-worker
+        agentd.dev/network-role: worker
+        agentd.dev/region: cn-east-1
+        agentd.dev/zone: cn-east-1a
+        agentd.dev/resource-class: standard
+      annotations:
+        agentd.dev/dispatch-mode: outbound-pull
+        agentd.dev/image-signature-policy: agentd-signed-images
+    spec:
+      serviceAccountName: agentd-worker
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 90
+      nodeSelector:
+        topology.kubernetes.io/region: cn-east-1
+        topology.kubernetes.io/zone: cn-east-1a
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: registry.example.invalid/agentd-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          args:
+            - enterprise-worker
+            - --control-plane-url
+            - https://agentd-control-plane.agentd-enterprise.svc
+            - --region
+            - cn-east-1
+            - --zone
+            - cn-east-1a
+            - --resource-class
+            - standard
+            - --identity-token-file
+            - /var/run/secrets/agentd/workload/authorization
+          env:
+            - name: AGENTD_WORKER_POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: workload-identity
+              mountPath: /var/run/secrets/agentd/workload
+              readOnly: true
+            - name: worktrees
+              mountPath: /var/lib/agentd/worktrees
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: workload-identity
+          projected:
+            defaultMode: 0400
+            sources:
+              - serviceAccountToken:
+                  path: authorization
+                  audience: agentd-control-plane
+                  expirationSeconds: 3600
+        - name: worktrees
+          emptyDir:
+            sizeLimit: 100Gi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 10Gi
+

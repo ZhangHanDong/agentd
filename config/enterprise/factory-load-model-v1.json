@@ -1,0 +1,37 @@
+{
+  "schemaVersion": "agentd.factory-load-model/v1",
+  "modelId": "factory-load-model-v1",
+  "description": "Pinned AD-E7 enterprise pre-production capacity and failure profile.",
+  "dimensions": {
+    "tenant": { "count": 1000, "activeConcurrency": 250 },
+    "project": { "perTenant": 10, "activeFraction": 0.2 },
+    "room": { "perProject": 4, "activeFraction": 0.25 },
+    "matrixEvent": { "eventsPerSecond": 2000, "burstEventsPerSecond": 8000, "deduplicationFraction": 0.05 },
+    "queue": { "steadyDepth": 10000, "burstDepth": 50000, "oldestAcceptedAgeSecondsObjective": 120 },
+    "artifactLog": { "artifactsPerTask": 8, "logBytesPerTask": 1048576, "crossRegionReplicaCount": 2 },
+    "certificationThroughput": { "packagesPerMinute": 500, "maximumPendingMinutes": 10 },
+    "failureInjection": {
+      "workerLossFraction": 0.1,
+      "controlPlaneInstanceLossCount": 1,
+      "zoneLossCount": 1,
+      "specifyOutageSeconds": 300,
+      "objectStoreOutageSeconds": 300,
+      "kmsOutageSeconds": 180,
+      "matrixReplayWindowEvents": 100000
+    },
+    "testWindow": { "warmupMinutes": 15, "steadyMinutes": 60, "recoveryMinutes": 30 },
+    "noisyNeighbor": { "tenantTrafficMultiplier": 20, "tenantCount": 10, "maximumHealthyTenantLatencyIncreasePercent": 15 },
+    "budget": { "monthlyComputeUnits": 1000000, "warningPercent": 80, "breachPercent": 100 }
+  },
+  "objectives": {
+    "acceptedStateLoss": 0,
+    "staleLeaseMutationsAccepted": 0,
+    "taskAdmissionP99Milliseconds": 500,
+    "workerPullP99Milliseconds": 1000,
+    "zoneRecoveryRtoSeconds": 900,
+    "zoneRecoveryRpoSeconds": 0,
+    "artifactReplicationP99Seconds": 300,
+    "operatorExplainCoveragePercent": 100
+  }
+}
+

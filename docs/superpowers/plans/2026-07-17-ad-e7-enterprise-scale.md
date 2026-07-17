@@ -76,12 +76,12 @@
 - Consumes the fleet handoff and enterprise scale contracts.
 - Produces digest-only signed-image deployment, per-zone pull pools, HPA, workload identity, and region/retention inputs.
 
-- [ ] Add three-replica control-plane and disruption/health policy.
-- [ ] Add zone-labelled outbound-only workers and deny-by-default network policy.
-- [ ] Add signed image admission and audited rollout annotations.
-- [ ] Add queue-driven HPA and multi-region/tenant-key configuration contracts.
-- [ ] Add a versioned load model covering every roadmap dimension.
-- [ ] Commit without executing validation.
+- [x] Add three-replica control-plane and disruption/health policy.
+- [x] Add zone-labelled outbound-only workers and deny-by-default network policy.
+- [x] Add signed image admission and audited rollout annotations.
+- [x] Add queue-driven HPA and multi-region/tenant-key configuration contracts.
+- [x] Add a versioned load model covering every roadmap dimension.
+- [x] Commit without executing validation.
 
 ### Task 4: Enterprise HTTP, CLI, Dashboard, And Doctor
 

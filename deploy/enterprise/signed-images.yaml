@@ -1,0 +1,32 @@
+apiVersion: policy.sigstore.dev/v1beta1
+kind: ClusterImagePolicy
+metadata:
+  name: agentd-signed-images
+spec:
+  images:
+    - glob: registry.example.invalid/agentd**
+  authorities:
+    - key:
+        data: |
+          -----BEGIN PUBLIC KEY-----
+          REPLACE_WITH_CI_SIGNING_PUBLIC_KEY
+          -----END PUBLIC KEY-----
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentd-rollout-contract
+data:
+  rollout.json: |
+    {
+      "version": "enterprise-rollout-v1",
+      "imageReferenceRule": "digest-only",
+      "signaturePolicy": "agentd-signed-images",
+      "requiredAnnotations": [
+        "agentd.dev/rollout-id",
+        "agentd.dev/signature-bundle-sha256",
+        "agentd.dev/policy-sha256"
+      ],
+      "healthyWhen": "all-required-zones-report-exact-digest-and-verified-signature"
+    }
+
