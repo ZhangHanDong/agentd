@@ -694,7 +694,7 @@ async fn import_agent(pool: &SqlitePool, agent: &ImportAgent) -> Result<(), Stor
             capability: agent.capability.clone(),
             runtime: agent.runtime.clone(),
             model: agent.model.clone(),
-            tmux_target: agent.tmux_target.clone(),
+            native_runtime_ref: None,
             home_dir: agent.home_dir.clone(),
             workdir: agent.workdir.clone(),
             state_dir: agent.state_dir.clone(),
@@ -713,7 +713,7 @@ async fn import_agent(pool: &SqlitePool, agent: &ImportAgent) -> Result<(), Stor
                     .offline_reason
                     .clone()
                     .or_else(|| Some("agent-chat-offline".to_string())),
-                clear_tmux: false,
+                clear_runtime: false,
             },
         )
         .await?;

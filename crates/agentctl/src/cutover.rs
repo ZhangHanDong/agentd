@@ -27,7 +27,7 @@ use crate::cli::{
 
 const EXIT_INVALID: u8 = 2;
 const EXIT_OPERATION: u8 = 3;
-const CURRENT_SCHEMA_VERSION: u32 = 22;
+const CURRENT_SCHEMA_VERSION: u32 = 23;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type CommandResult<T> = Result<T, BoxError>;

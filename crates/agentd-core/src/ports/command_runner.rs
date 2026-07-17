@@ -1,4 +1,4 @@
-//! The command-execution seam (design §4, D6). The tmux backend (P0.3) and the
+//! The command-execution seam (design §4, D6). Runtime adapters and the
 //! `tool` handler (Task 7) both shell out through this one trait, so the fake
 //! (`RecordingCommandRunner`) is the exact shape the real runner is tested against.
 

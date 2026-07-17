@@ -60,12 +60,12 @@ pub async fn run_doctor(
     }];
     checks.push(DoctorCheck {
         name: "schema".to_string(),
-        status: if schema_version == 22 {
+        status: if schema_version == 23 {
             DoctorStatus::Pass
         } else {
             DoctorStatus::Fail
         },
-        code: if schema_version == 22 {
+        code: if schema_version == 23 {
             "schema_current".to_string()
         } else {
             "schema_mismatch".to_string()

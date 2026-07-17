@@ -16,7 +16,7 @@ pub struct AgentRecord {
     pub capability: Option<String>,
     pub runtime: Option<String>,
     pub model: Option<String>,
-    pub tmux_target: Option<String>,
+    pub native_runtime_ref: Option<String>,
     pub home_dir: Option<String>,
     pub workdir: Option<String>,
     pub state_dir: Option<String>,
@@ -37,7 +37,7 @@ pub struct RegisterAgent {
     pub capability: Option<String>,
     pub runtime: Option<String>,
     pub model: Option<String>,
-    pub tmux_target: Option<String>,
+    pub native_runtime_ref: Option<String>,
     pub home_dir: Option<String>,
     pub workdir: Option<String>,
     pub state_dir: Option<String>,
@@ -48,19 +48,19 @@ pub struct RegisterAgent {
 #[derive(Debug, Clone)]
 pub struct HeartbeatAgent {
     pub server: Option<String>,
-    pub tmux_target: Option<String>,
+    pub native_runtime_ref: Option<String>,
     pub workspace_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct OfflineAgent {
     pub reason: Option<String>,
-    pub clear_tmux: bool,
+    pub clear_runtime: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct StartedAgent {
-    pub tmux_target: String,
+    pub native_runtime_ref: String,
 }
 
 #[derive(Debug, Clone)]
@@ -70,7 +70,7 @@ pub struct RuntimeUpdate {
     pub active_now: Option<bool>,
     pub active_duration_sec: Option<i64>,
     pub idle_duration_sec: Option<i64>,
-    pub last_tmux_activity_sec: Option<i64>,
+    pub last_runtime_activity_sec: Option<i64>,
     pub workspace_path: Option<String>,
     pub mcp_present: Option<bool>,
 }
@@ -117,7 +117,7 @@ pub async fn register_agent(
     let capability = clean_opt(input.capability);
     let runtime = clean_opt(input.runtime);
     let model = clean_opt(input.model);
-    let tmux_target = clean_opt(input.tmux_target);
+    let native_runtime_ref = clean_opt(input.native_runtime_ref);
     let home_dir = clean_opt(input.home_dir);
     let workdir = clean_opt(input.workdir);
     let state_dir = clean_opt(input.state_dir);
@@ -125,7 +125,7 @@ pub async fn register_agent(
     let runtime_profile = normalize_runtime_profile(input.runtime_profile);
     let runtime_profile_text = serde_json::to_string(&runtime_profile)?;
     let now = now_unix();
-    let status = if tmux_target.is_some() {
+    let status = if native_runtime_ref.is_some() {
         "online"
     } else {
         "offline"
@@ -137,7 +137,7 @@ pub async fn register_agent(
     sqlx::query(
         "INSERT INTO agents \
          (id, mxid, role, backend, backend_target, prompt_profile, enabled, created_at, \
-          name, capability, runtime, model, tmux_target, home_dir, workdir, state_dir, \
+          name, capability, runtime, model, native_runtime_ref, home_dir, workdir, state_dir, \
           server, status, offline_reason, last_seen_at, registered_at, updated_at, runtime_profile) \
          VALUES (?, ?, ?, ?, ?, NULL, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
@@ -149,7 +149,7 @@ pub async fn register_agent(
           capability = excluded.capability, \
           runtime = excluded.runtime, \
           model = excluded.model, \
-          tmux_target = excluded.tmux_target, \
+          native_runtime_ref = excluded.native_runtime_ref, \
           home_dir = excluded.home_dir, \
           workdir = excluded.workdir, \
           state_dir = excluded.state_dir, \
@@ -164,13 +164,13 @@ pub async fn register_agent(
     .bind(mxid)
     .bind(role)
     .bind(backend)
-    .bind(tmux_target.as_deref())
+    .bind(native_runtime_ref.as_deref())
     .bind(now)
     .bind(&name)
     .bind(capability.as_deref())
     .bind(runtime.as_deref())
     .bind(model.as_deref())
-    .bind(tmux_target.as_deref())
+    .bind(native_runtime_ref.as_deref())
     .bind(home_dir.as_deref())
     .bind(workdir.as_deref())
     .bind(state_dir.as_deref())
@@ -213,7 +213,7 @@ pub async fn heartbeat_agent(
 ) -> Result<(AgentRecord, bool), StoreError> {
     let name = normalize_name(name)?;
     let server = clean_opt(input.server);
-    let tmux_target = clean_opt(input.tmux_target);
+    let native_runtime_ref = clean_opt(input.native_runtime_ref);
     let workspace_path = clean_opt(input.workspace_path);
     let now = now_unix();
     let created = get_agent(pool, &name).await?.is_none();
@@ -226,7 +226,7 @@ pub async fn heartbeat_agent(
         sqlx::query(
             "INSERT INTO agents \
              (id, mxid, role, backend, backend_target, prompt_profile, enabled, created_at, \
-              name, tmux_target, workdir, server, status, offline_reason, last_seen_at, \
+              name, native_runtime_ref, workdir, server, status, offline_reason, last_seen_at, \
               registered_at, updated_at, runtime_profile) \
              VALUES (?, ?, ?, ?, ?, NULL, 1, ?, ?, ?, ?, ?, 'online', NULL, ?, ?, ?, ?)",
         )
@@ -234,10 +234,10 @@ pub async fn heartbeat_agent(
         .bind(mxid)
         .bind(role)
         .bind(backend)
-        .bind(tmux_target.as_deref())
+        .bind(native_runtime_ref.as_deref())
         .bind(now)
         .bind(&name)
-        .bind(tmux_target.as_deref())
+        .bind(native_runtime_ref.as_deref())
         .bind(workspace_path.as_deref())
         .bind(server.as_deref())
         .bind(now)
@@ -250,7 +250,7 @@ pub async fn heartbeat_agent(
         sqlx::query(
             "UPDATE agents SET \
               server = COALESCE(?, server), \
-              tmux_target = COALESCE(?, tmux_target), \
+              native_runtime_ref = COALESCE(?, native_runtime_ref), \
               backend_target = COALESCE(?, backend_target), \
               workdir = COALESCE(?, workdir), \
               status = 'online', \
@@ -260,8 +260,8 @@ pub async fn heartbeat_agent(
              WHERE name = ? OR id = ?",
         )
         .bind(server.as_deref())
-        .bind(tmux_target.as_deref())
-        .bind(tmux_target.as_deref())
+        .bind(native_runtime_ref.as_deref())
+        .bind(native_runtime_ref.as_deref())
         .bind(workspace_path.as_deref())
         .bind(now)
         .bind(now)
@@ -288,9 +288,9 @@ pub async fn mark_agent_offline(
     }
     let reason = clean_opt(input.reason).unwrap_or_else(|| "manual-offline".to_string());
     let now = now_unix();
-    if input.clear_tmux {
+    if input.clear_runtime {
         sqlx::query(
-            "UPDATE agents SET status = 'offline', offline_reason = ?, tmux_target = NULL, \
+            "UPDATE agents SET status = 'offline', offline_reason = ?, native_runtime_ref = NULL, \
              backend_target = NULL, last_seen_at = ?, updated_at = ? WHERE name = ? OR id = ?",
         )
         .bind(&reason)
@@ -325,12 +325,12 @@ pub async fn mark_agent_started(
     if get_agent(pool, &name).await?.is_none() {
         return Ok(None);
     }
-    let tmux_target = clean_opt(Some(input.tmux_target))
-        .ok_or_else(|| StoreError::Invariant("tmux target required".to_string()))?;
+    let native_runtime_ref = clean_opt(Some(input.native_runtime_ref))
+        .ok_or_else(|| StoreError::Invariant("native runtime reference required".to_string()))?;
     let now = now_unix();
     sqlx::query(
         "UPDATE agents SET \
-          tmux_target = ?, \
+          native_runtime_ref = ?, \
           backend_target = ?, \
           status = 'online', \
           offline_reason = NULL, \
@@ -338,8 +338,8 @@ pub async fn mark_agent_started(
           updated_at = ? \
          WHERE name = ? OR id = ?",
     )
-    .bind(&tmux_target)
-    .bind(&tmux_target)
+    .bind(&native_runtime_ref)
+    .bind(&native_runtime_ref)
     .bind(now)
     .bind(now)
     .bind(&name)
@@ -384,10 +384,10 @@ pub async fn update_agent_runtime(
     if let Some(idle_duration_sec) = input.idle_duration_sec {
         object.insert("idleDurationSec".to_string(), json!(idle_duration_sec));
     }
-    if let Some(last_tmux_activity_sec) = input.last_tmux_activity_sec {
+    if let Some(last_runtime_activity_sec) = input.last_runtime_activity_sec {
         object.insert(
-            "lastTmuxActivitySec".to_string(),
-            json!(last_tmux_activity_sec),
+            "lastRuntimeActivitySec".to_string(),
+            json!(last_runtime_activity_sec),
         );
     }
     if let Some(path) = workspace_path.as_deref() {
@@ -500,7 +500,7 @@ fn local_mxid(name: &str) -> String {
 
 fn agent_select_sql(tail: &str) -> String {
     format!(
-        "SELECT id, name, role, capability, runtime, model, tmux_target, home_dir, \
+        "SELECT id, name, role, capability, runtime, model, native_runtime_ref, home_dir, \
          workdir, state_dir, server, status, offline_reason, last_seen_at, \
          registered_at, updated_at, runtime_profile, runtime_state FROM agents {tail}"
     )
@@ -518,7 +518,7 @@ fn row_to_agent(row: &sqlx::sqlite::SqliteRow) -> AgentRecord {
         capability: row.get("capability"),
         runtime: row.get("runtime"),
         model: row.get("model"),
-        tmux_target: row.get("tmux_target"),
+        native_runtime_ref: row.get("native_runtime_ref"),
         home_dir: row.get("home_dir"),
         workdir: row.get("workdir"),
         state_dir: row.get("state_dir"),

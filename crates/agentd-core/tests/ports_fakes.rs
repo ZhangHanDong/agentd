@@ -20,6 +20,7 @@ use agentd_core::types::{
 fn spawn_req() -> SpawnRequest {
     SpawnRequest {
         agent_id: AgentId::parsed("reviewer-1"),
+        execution_task_id: None,
         mxid: None,
         cli: CliKind::ClaudeCode,
         worktree: PathBuf::from("/tmp/wt"),

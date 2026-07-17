@@ -1,6 +1,6 @@
 //! The agent-spawning seam (design §4.1, §4.2). P0.1 needs only `spawn`; later
-//! phases (P0.3) widen this trait with capture/status/shutdown. The tmux backend
-//! implements it for real; `FakeBackend` implements it in memory for tests.
+//! phases widen this trait with allocation-aware dispatch. The native runtime
+//! backend implements it for real; `FakeBackend` implements it in memory.
 
 use crate::CoreError;
 use crate::ports::agent_allocator::AgentAllocation;

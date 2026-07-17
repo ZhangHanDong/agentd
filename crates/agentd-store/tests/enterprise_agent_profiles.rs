@@ -30,7 +30,7 @@ fn legacy_agent(id: &str) -> RegisterAgent {
         capability: Some("implementation".to_string()),
         runtime: Some("codex".to_string()),
         model: Some("gpt-5".to_string()),
-        tmux_target: Some("legacy-pane".to_string()),
+        native_runtime_ref: Some("native://rs_profile/ra_profile".to_string()),
         home_dir: None,
         workdir: Some("/tmp/legacy-work".to_string()),
         state_dir: None,
@@ -90,7 +90,10 @@ async fn agent_profile_round_trip_alias_and_lifecycle() {
         .expect("get")
         .expect("exists");
     assert_eq!(loaded, active);
-    assert_eq!(legacy.tmux_target.as_deref(), Some("legacy-pane"));
+    assert_eq!(
+        legacy.native_runtime_ref.as_deref(),
+        Some("native://rs_profile/ra_profile")
+    );
     assert_eq!(legacy.runtime_profile["session_name"], "legacy-session");
 }
 

@@ -24,7 +24,7 @@ async fn agent_registry_registers_lists_and_inspects_agent_chat_identity_fields(
             capability: Some(text("strong")),
             runtime: Some(text("codex")),
             model: Some(text("gpt-5")),
-            tmux_target: Some(text("codex-sec:0.0")),
+            native_runtime_ref: Some(text("native://rs_sec/ra_sec")),
             home_dir: Some(text("/tmp/agentd/homes/agents/agent_codex_sec")),
             workdir: Some(text("/tmp/agentd/homes/agents/agent_codex_sec/workdir")),
             state_dir: Some(text("/tmp/agentd/homes/agents/agent_codex_sec/state")),
@@ -46,7 +46,10 @@ async fn agent_registry_registers_lists_and_inspects_agent_chat_identity_fields(
     assert_eq!(registered.capability.as_deref(), Some("strong"));
     assert_eq!(registered.runtime.as_deref(), Some("codex"));
     assert_eq!(registered.model.as_deref(), Some("gpt-5"));
-    assert_eq!(registered.tmux_target.as_deref(), Some("codex-sec:0.0"));
+    assert_eq!(
+        registered.native_runtime_ref.as_deref(),
+        Some("native://rs_sec/ra_sec")
+    );
     assert_eq!(registered.status, "online");
     assert_eq!(registered.runtime_profile["primary"]["framework"], "codex");
 
@@ -82,7 +85,7 @@ async fn agent_registry_identity_patch_persists_runtime_profile_text() {
             capability: Some(text("coding")),
             runtime: Some(text("codex")),
             model: Some(text("gpt-5")),
-            tmux_target: None,
+            native_runtime_ref: None,
             home_dir: None,
             workdir: Some(text("/tmp/agentd/codex-worker")),
             state_dir: None,
@@ -136,7 +139,7 @@ async fn agent_registry_identity_patch_rejects_empty_and_unknown_agents() {
             capability: Some(text("coding")),
             runtime: Some(text("codex")),
             model: Some(text("gpt-5")),
-            tmux_target: None,
+            native_runtime_ref: None,
             home_dir: None,
             workdir: Some(text("/tmp/agentd/codex-worker")),
             state_dir: None,
@@ -175,7 +178,7 @@ async fn agent_registry_heartbeat_and_offline_update_liveness_state() {
         "codex-worker",
         agent_repo::HeartbeatAgent {
             server: Some(text("local")),
-            tmux_target: Some(text("codex-worker:0.0")),
+            native_runtime_ref: Some(text("native://rs_worker/ra_worker")),
             workspace_path: Some(text("/tmp/agentd/homes/agents/agent_codex_worker/workdir")),
         },
     )
@@ -186,7 +189,10 @@ async fn agent_registry_heartbeat_and_offline_update_liveness_state() {
     assert_eq!(agent.name, "codex-worker");
     assert_eq!(agent.status, "online");
     assert_eq!(agent.server.as_deref(), Some("local"));
-    assert_eq!(agent.tmux_target.as_deref(), Some("codex-worker:0.0"));
+    assert_eq!(
+        agent.native_runtime_ref.as_deref(),
+        Some("native://rs_worker/ra_worker")
+    );
     assert_eq!(
         agent.workdir.as_deref(),
         Some("/tmp/agentd/homes/agents/agent_codex_worker/workdir")
@@ -198,7 +204,7 @@ async fn agent_registry_heartbeat_and_offline_update_liveness_state() {
         "codex-worker",
         agent_repo::OfflineAgent {
             reason: Some(text("manual-offline")),
-            clear_tmux: true,
+            clear_runtime: true,
         },
     )
     .await
@@ -207,7 +213,7 @@ async fn agent_registry_heartbeat_and_offline_update_liveness_state() {
 
     assert_eq!(offline.status, "offline");
     assert_eq!(offline.offline_reason.as_deref(), Some("manual-offline"));
-    assert_eq!(offline.tmux_target, None);
+    assert_eq!(offline.native_runtime_ref, None);
 }
 
 #[tokio::test]
@@ -222,7 +228,7 @@ async fn agent_registry_start_marks_agent_online_and_records_runtime_state() {
             capability: Some(text("coding")),
             runtime: Some(text("codex")),
             model: Some(text("gpt-5")),
-            tmux_target: None,
+            native_runtime_ref: None,
             home_dir: None,
             workdir: Some(text("/tmp/agentd/codex-worker")),
             state_dir: None,
@@ -243,7 +249,7 @@ async fn agent_registry_start_marks_agent_online_and_records_runtime_state() {
         store.pool(),
         "codex-worker",
         agent_repo::StartedAgent {
-            tmux_target: text("agentd-codex-worker:0.0"),
+            native_runtime_ref: text("native://rs_worker/ra_worker"),
         },
     )
     .await
@@ -251,8 +257,8 @@ async fn agent_registry_start_marks_agent_online_and_records_runtime_state() {
     .expect("agent exists");
     assert_eq!(started.status, "online");
     assert_eq!(
-        started.tmux_target.as_deref(),
-        Some("agentd-codex-worker:0.0")
+        started.native_runtime_ref.as_deref(),
+        Some("native://rs_worker/ra_worker")
     );
     assert_eq!(started.offline_reason, None);
     assert!(started.last_seen_at.is_some(), "start records liveness");
@@ -266,7 +272,7 @@ async fn agent_registry_start_marks_agent_online_and_records_runtime_state() {
             active_now: Some(false),
             active_duration_sec: Some(0),
             idle_duration_sec: Some(12),
-            last_tmux_activity_sec: Some(12),
+            last_runtime_activity_sec: Some(12),
             workspace_path: Some(text("/tmp/agentd/codex-worker")),
             mcp_present: Some(true),
         },
@@ -302,7 +308,7 @@ async fn agent_registry_lifecycle_patch_merges_runtime_state() {
             capability: Some(text("coding")),
             runtime: Some(text("codex")),
             model: Some(text("gpt-5")),
-            tmux_target: Some(text("agentd-codex-worker:0.0")),
+            native_runtime_ref: Some(text("native://rs_worker/ra_worker")),
             home_dir: None,
             workdir: Some(text("/tmp/agentd/codex-worker")),
             state_dir: None,
@@ -322,7 +328,7 @@ async fn agent_registry_lifecycle_patch_merges_runtime_state() {
             active_now: Some(false),
             active_duration_sec: None,
             idle_duration_sec: Some(9),
-            last_tmux_activity_sec: Some(9),
+            last_runtime_activity_sec: Some(9),
             workspace_path: Some(text("/tmp/agentd/codex-worker")),
             mcp_present: Some(true),
         },
@@ -372,7 +378,7 @@ async fn agent_registry_rejects_empty_agent_name() {
             capability: None,
             runtime: None,
             model: None,
-            tmux_target: None,
+            native_runtime_ref: None,
             home_dir: None,
             workdir: None,
             state_dir: None,

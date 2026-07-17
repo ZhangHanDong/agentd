@@ -149,7 +149,7 @@ impl AgentBackend for RecordingDispatchBackend {
             .push((req.clone(), allocation.clone()));
         Ok(AgentHandle {
             agent_id: req.agent_id,
-            backend: BackendKind::Tmux,
+            backend: BackendKind::NativeRuntime,
             address: allocation
                 .runtime
                 .get("tmuxTarget")

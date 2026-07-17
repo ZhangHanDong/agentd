@@ -1854,8 +1854,8 @@ pub struct MatrixBotCommandSnapshot {
     pub agents: Vec<MatrixBotAgentSummary>,
     /// Known groups.
     pub groups: Vec<MatrixBotGroupSummary>,
-    /// Optional tmux session count. `None` renders as unavailable.
-    pub tmux_sessions: Option<usize>,
+    /// Optional native runtime session count. `None` renders as unavailable.
+    pub runtime_sessions: Option<usize>,
     /// Whether the Matrix bridge process is running.
     pub bridge_running: bool,
 }
@@ -1878,8 +1878,8 @@ pub enum MatrixBotCommandSideEffect {
     MutatesBackend,
     /// Creates, joins, leaves, or otherwise changes Matrix rooms.
     ChangesMatrixRooms,
-    /// Controls tmux panes or agentctl processes.
-    ControlsTmux,
+    /// Controls native runtime processes or agentctl operations.
+    ControlsRuntime,
     /// Launches or wakes agent runtimes.
     LaunchesAgents,
 }
@@ -2670,8 +2670,8 @@ fn render_matrix_bot_help() -> String {
 }
 
 fn render_matrix_bot_status(snapshot: &MatrixBotCommandSnapshot) -> String {
-    let tmux_sessions = snapshot
-        .tmux_sessions
+    let runtime_sessions = snapshot
+        .runtime_sessions
         .map_or_else(|| "unavailable".to_owned(), |count| count.to_string());
     let bridge = if snapshot.bridge_running {
         "running"
@@ -2682,7 +2682,7 @@ fn render_matrix_bot_status(snapshot: &MatrixBotCommandSnapshot) -> String {
         "=== System Status ===".to_owned(),
         format!("Agents: {}", snapshot.agents.len()),
         format!("Groups: {}", snapshot.groups.len()),
-        format!("Tmux sessions: {tmux_sessions}"),
+        format!("Native runtime sessions: {runtime_sessions}"),
         format!("Bridge: {bridge}"),
     ]
     .join("\n")
@@ -4028,7 +4028,7 @@ impl AgentdHttpBackend {
         Ok(MatrixBotCommandSnapshot {
             agents: decode_bot_agent_summaries(&agents)?,
             groups: decode_bot_group_summaries(&groups)?,
-            tmux_sessions: None,
+            runtime_sessions: None,
             bridge_running: true,
         })
     }

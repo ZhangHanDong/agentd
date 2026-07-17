@@ -6,13 +6,12 @@ use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::ids::AgentId;
+use crate::types::ids::{AgentId, TaskRunId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackendKind {
-    Tmux,
-    // Future: Headless, McpOnly
+    NativeRuntime,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,6 +24,9 @@ pub enum CliKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpawnRequest {
     pub agent_id: AgentId,
+    /// Existing workflow task, or `None` when the backend must create a
+    /// controlled system task for a standalone runtime.
+    pub execution_task_id: Option<TaskRunId>,
     pub mxid: Option<String>,
     pub cli: CliKind,
     pub worktree: PathBuf,

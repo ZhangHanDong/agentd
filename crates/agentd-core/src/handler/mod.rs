@@ -178,12 +178,14 @@ pub(crate) fn cli_kind_for_role(role: &str) -> crate::types::CliKind {
 #[must_use]
 pub(crate) fn spawn_request(
     role: &str,
+    execution_task_id: Option<crate::types::TaskRunId>,
     initial_prompt: Option<String>,
     worktree: &std::path::Path,
 ) -> crate::types::SpawnRequest {
     use crate::types::{AgentId, LaunchStrategy, SpawnRequest};
     SpawnRequest {
         agent_id: AgentId::parsed(role),
+        execution_task_id,
         mxid: None,
         cli: cli_kind_for_role(role),
         worktree: worktree.to_path_buf(),

@@ -2,7 +2,7 @@
 resolver = "3"
 members = [
     "crates/agentd-core",
-    "crates/agentd-tmux",
+    "crates/agentd-worktree",
     "crates/agentd-store",
     "crates/agentd-mempal",
     "crates/agentd-github",

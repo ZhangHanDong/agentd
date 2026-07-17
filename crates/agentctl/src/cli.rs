@@ -419,7 +419,7 @@ pub struct AgentRuntimeArgs {
     #[arg(long)]
     pub idle_duration_sec: Option<i64>,
     #[arg(long)]
-    pub last_tmux_activity_sec: Option<i64>,
+    pub last_runtime_activity_sec: Option<i64>,
     #[arg(long)]
     pub workspace_path: Option<String>,
     #[arg(long)]
@@ -445,7 +445,7 @@ pub struct AgentRegisterArgs {
     #[arg(long)]
     pub model: Option<String>,
     #[arg(long)]
-    pub tmux_target: Option<String>,
+    pub native_runtime_ref: Option<String>,
     #[arg(long)]
     pub home_dir: Option<String>,
     #[arg(long)]
@@ -469,7 +469,7 @@ pub struct AgentHeartbeatArgs {
     #[arg(long)]
     pub server: Option<String>,
     #[arg(long)]
-    pub tmux_target: Option<String>,
+    pub native_runtime_ref: Option<String>,
     #[arg(long)]
     pub workspace_path: Option<String>,
     /// The agentd daemon base URL.
@@ -486,9 +486,9 @@ pub struct AgentOfflineArgs {
     pub name: String,
     #[arg(long)]
     pub reason: Option<String>,
-    /// Keep the agent's tmux target while marking it offline.
+    /// Keep the native runtime reference while marking it offline.
     #[arg(long)]
-    pub no_clear_tmux: bool,
+    pub no_clear_runtime: bool,
     /// The agentd daemon base URL.
     #[arg(long, default_value = "http://127.0.0.1:8787")]
     pub daemon_url: String,

@@ -215,9 +215,9 @@ async fn enrich_scheduler_allocation(
         .unwrap_or_else(serde_json::Map::new);
     insert_runtime_string(&mut runtime, "runtime", agent.runtime.as_deref());
     insert_runtime_string(&mut runtime, "model", agent.model.as_deref());
-    if let Some(tmux_target) = agent.tmux_target.as_deref() {
-        insert_runtime_string(&mut runtime, "tmuxTarget", Some(tmux_target));
-        insert_runtime_string(&mut runtime, "tmux_target", Some(tmux_target));
+    if let Some(runtime_ref) = agent.native_runtime_ref.as_deref() {
+        insert_runtime_string(&mut runtime, "runtimeSessionRef", Some(runtime_ref));
+        insert_runtime_string(&mut runtime, "runtime_session_ref", Some(runtime_ref));
     }
     insert_runtime_string(&mut runtime, "homeDir", agent.home_dir.as_deref());
     insert_runtime_string(&mut runtime, "home_dir", agent.home_dir.as_deref());
@@ -343,7 +343,7 @@ impl AgentLifecycle for UnconfiguredAgentLifecycle {
 }
 
 /// The daemon's production `RunHost`. Holds the real store + the swappable ports
-/// as trait objects (the daemon supplies `TmuxBackend`/`SystemClock`/…; tests
+/// as trait objects (the daemon supplies the native backend/SystemClock; tests
 /// supply the in-memory fakes), and re-resolves each run's graph from
 /// `runs.workflow_path` under `workflows_dir`.
 pub struct ProductionRunHost {
@@ -497,6 +497,11 @@ impl ProductionRunHost {
     pub fn with_native_runtime(mut self, service: Arc<NativeRuntimeService>) -> Self {
         self.native_runtime = Some(service);
         self
+    }
+
+    #[must_use]
+    pub fn native_runtime_service(&self) -> Option<Arc<NativeRuntimeService>> {
+        self.native_runtime.as_ref().map(Arc::clone)
     }
 
     /// Re-read + build the run's graph from `runs.workflow_path`, returning it
@@ -729,6 +734,7 @@ impl ProductionRunHost {
         );
         let request = SpawnRequest {
             agent_id: allocation.agent_id.clone(),
+            execution_task_id: Some(task_run_id.clone()),
             mxid: None,
             cli: cli_kind_for_agent(allocation.agent_id.as_str()),
             worktree: queued.worktree,
@@ -809,6 +815,7 @@ impl ProductionRunHost {
         );
         let request = SpawnRequest {
             agent_id: allocation.agent_id.clone(),
+            execution_task_id: None,
             mxid: None,
             cli: cli_kind_for_agent(allocation.agent_id.as_str()),
             worktree: review_worktree,
@@ -1398,7 +1405,7 @@ impl RunHost for ProductionRunHost {
                 capability: input.capability,
                 runtime: input.runtime,
                 model: input.model,
-                tmux_target: input.tmux_target,
+                native_runtime_ref: input.native_runtime_ref,
                 home_dir: input.home_dir,
                 workdir: input.workdir,
                 state_dir: input.state_dir,
@@ -1443,7 +1450,7 @@ impl RunHost for ProductionRunHost {
             name,
             agent_repo::HeartbeatAgent {
                 server: input.server,
-                tmux_target: input.tmux_target,
+                native_runtime_ref: input.native_runtime_ref,
                 workspace_path: input.workspace_path,
             },
         )
@@ -1461,7 +1468,7 @@ impl RunHost for ProductionRunHost {
             name,
             agent_repo::OfflineAgent {
                 reason: input.reason,
-                clear_tmux: input.clear_tmux,
+                clear_runtime: input.clear_runtime,
             },
         )
         .await?
@@ -1479,6 +1486,7 @@ impl RunHost for ProductionRunHost {
         let worktree = clean_required(agent.workdir.as_deref(), "agent workdir required")?;
         let req = SpawnRequest {
             agent_id: AgentId::parsed(agent.name.clone()),
+            execution_task_id: None,
             mxid: None,
             cli,
             worktree: PathBuf::from(worktree),
@@ -1494,7 +1502,7 @@ impl RunHost for ProductionRunHost {
             self.store.pool(),
             &agent.name,
             agent_repo::StartedAgent {
-                tmux_target: handle.address.clone(),
+                native_runtime_ref: handle.address.clone(),
             },
         )
         .await?
@@ -1511,7 +1519,10 @@ impl RunHost for ProductionRunHost {
         let Some(agent) = agent_repo::get_agent(self.store.pool(), name).await? else {
             return Ok(None);
         };
-        let target = clean_required(agent.tmux_target.as_deref(), "agent tmux target required")?;
+        let target = clean_required(
+            agent.native_runtime_ref.as_deref(),
+            "agent native runtime reference required",
+        )?;
         let archive_to = agent_down_archive_path(&agent, self.clock.now_unix())?;
         let handle = agent_handle_from_record(&agent, &target);
         let report = self
@@ -1531,7 +1542,7 @@ impl RunHost for ProductionRunHost {
             serde_json::json!({
                 "lifecycle": {
                     "state": "down",
-                    "action": "agent-down-kill",
+                    "action": "agent-down",
                     "target": target,
                     "method": report_method,
                     "archivePath": archive_to.to_string_lossy(),
@@ -1545,8 +1556,8 @@ impl RunHost for ProductionRunHost {
             self.store.pool(),
             &agent.name,
             agent_repo::OfflineAgent {
-                reason: Some("agent-down-kill".to_string()),
-                clear_tmux: true,
+                reason: Some("agent-down".to_string()),
+                clear_runtime: true,
             },
         )
         .await?
@@ -1568,7 +1579,10 @@ impl RunHost for ProductionRunHost {
         let Some(agent) = agent_repo::get_agent(self.store.pool(), name).await? else {
             return Ok(None);
         };
-        let target = clean_required(agent.tmux_target.as_deref(), "agent tmux target required")?;
+        let target = clean_required(
+            agent.native_runtime_ref.as_deref(),
+            "agent native runtime reference required",
+        )?;
         let Some(handle) = self.agent_lifecycle.rebind(&target).await? else {
             agent_repo::merge_agent_runtime_state(
                 self.store.pool(),
@@ -1588,7 +1602,7 @@ impl RunHost for ProductionRunHost {
                 &agent.name,
                 agent_repo::OfflineAgent {
                     reason: Some("rebind-missing-session".to_string()),
-                    clear_tmux: true,
+                    clear_runtime: true,
                 },
             )
             .await?
@@ -1608,7 +1622,7 @@ impl RunHost for ProductionRunHost {
             self.store.pool(),
             &agent.name,
             agent_repo::StartedAgent {
-                tmux_target: rebound_target.clone(),
+                native_runtime_ref: rebound_target.clone(),
             },
         )
         .await?
@@ -1655,7 +1669,7 @@ impl RunHost for ProductionRunHost {
                 active_now: input.active_now,
                 active_duration_sec: input.active_duration_sec,
                 idle_duration_sec: input.idle_duration_sec,
-                last_tmux_activity_sec: input.last_tmux_activity_sec,
+                last_runtime_activity_sec: input.last_runtime_activity_sec,
                 workspace_path: input.workspace_path,
                 mcp_present: input.mcp_present,
             },
@@ -1704,7 +1718,7 @@ impl RunHost for ProductionRunHost {
                         capability: None,
                         runtime: Some("codex".to_string()),
                         model: None,
-                        tmux_target: target.clone(),
+                        native_runtime_ref: target.clone(),
                         home_dir: None,
                         workdir: None,
                         state_dir: None,
@@ -1721,7 +1735,7 @@ impl RunHost for ProductionRunHost {
                 agent,
                 agent_repo::HeartbeatAgent {
                     server: Some(server_id.clone()),
-                    tmux_target: target,
+                    native_runtime_ref: target,
                     workspace_path: None,
                 },
             )
@@ -1739,7 +1753,7 @@ impl RunHost for ProductionRunHost {
                     &agent.name,
                     agent_repo::OfflineAgent {
                         reason: Some(format!("heartbeat-missing:{server_id}")),
-                        clear_tmux: true,
+                        clear_runtime: true,
                     },
                 )
                 .await?;
@@ -2615,7 +2629,7 @@ fn surface_agent_record(record: agent_repo::AgentRecord) -> SurfaceAgentRecord {
         capability: record.capability,
         runtime: record.runtime,
         model: record.model,
-        tmux_target: record.tmux_target,
+        native_runtime_ref: record.native_runtime_ref,
         home_dir: record.home_dir,
         workdir: record.workdir,
         state_dir: record.state_dir,
@@ -3013,10 +3027,9 @@ fn surface_agent_handle(handle: AgentHandle) -> SurfaceAgentStartHandle {
     SurfaceAgentStartHandle {
         agent_id: handle.agent_id.as_str().to_string(),
         backend: match handle.backend {
-            BackendKind::Tmux => "tmux".to_string(),
+            BackendKind::NativeRuntime => "native_runtime".to_string(),
         },
         address: handle.address,
-        pane_id: handle.pane_id,
         pid: handle.pid,
         session_name: handle.session_name,
     }
@@ -3048,7 +3061,7 @@ fn agent_handle_from_record(agent: &agent_repo::AgentRecord, target: &str) -> Ag
     let session_name = target.split(':').next().unwrap_or(target).to_string();
     AgentHandle {
         agent_id: AgentId::parsed(agent.name.clone()),
-        backend: BackendKind::Tmux,
+        backend: BackendKind::NativeRuntime,
         address: target.to_string(),
         pane_id: None,
         pid: None,

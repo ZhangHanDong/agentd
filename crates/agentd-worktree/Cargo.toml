@@ -1,0 +1,20 @@
+[package]
+name = "agentd-worktree"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+agentd-core = { path = "../agentd-core" }
+async-trait = "0.1"
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

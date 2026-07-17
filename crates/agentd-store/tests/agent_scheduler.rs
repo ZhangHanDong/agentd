@@ -21,7 +21,7 @@ async fn register_online_coding_agent(store: &SqliteStore, name: &str) {
             capability: Some(text("medium")),
             runtime: Some(text("codex")),
             model: Some(text("gpt-5")),
-            tmux_target: Some(format!("{name}:0.0")),
+            native_runtime_ref: Some(format!("native://rs_{name}/ra_{name}")),
             home_dir: None,
             workdir: Some(format!("/tmp/agentd/{name}")),
             state_dir: None,

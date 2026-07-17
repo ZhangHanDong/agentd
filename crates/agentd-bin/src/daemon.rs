@@ -6,24 +6,25 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agentd_core::CoreError;
-use agentd_core::ports::{AgentAllocation, AgentBackend, WorktreeAllocator};
-use agentd_core::types::{AgentHandle, SpawnRequest};
+use agentd_core::ports::WorktreeAllocator;
 use agentd_store::{FailedWorktreeCleanupCandidate, SqliteStore};
 use agentd_surface::host::RunHost;
 use agentd_surface::http::{AppState, AuthConfig, MediaConfig, SchedulerConfig, router};
-use agentd_tmux::{
-    Config, GitWorktreeProvider, ShutdownMethod, ShutdownOpts, TmuxBackend, TokioCommandRunner,
-    WorktreePool,
-};
+use agentd_security::{ContentRedactor, RedactionLimits};
+use agentd_worktree::{GitWorktreeProvider, WorktreePool};
 use axum::Router;
 
 use crate::agent_mcp_context::{McpStdioContextBackend, mcp_stdio_command_from_current_process};
 use crate::cli::DaemonConfig;
 use crate::clock::SystemClock;
-use crate::host::{
-    AgentLifecycle, AgentLifecycleShutdown, AgentLifecycleShutdownReport, ProductionRunHost,
+use crate::command_runner::TokioCommandRunner;
+use crate::host::ProductionRunHost;
+use crate::native_backend::{
+    LocalInteractiveSandbox, NativeAgentBackend, NativeAgentLifecycle,
+    StandalonePolicyRevocation,
 };
 use crate::mempal::OfflineMempal;
+use crate::runtime::{NativeRuntimeCompositionConfig, compose_native_runtime};
 use crate::security::{SecurityRuntimeMode, build_security_runtime};
 
 /// Build the HTTP/SSE router over a host (testable via `tower::oneshot`).
@@ -68,62 +69,8 @@ pub fn media_dir_for_db(db_path: &Path) -> PathBuf {
         .join("media")
 }
 
-#[derive(Clone)]
-struct SharedTmuxBackend(Arc<TmuxBackend>);
-
-#[async_trait::async_trait]
-impl AgentBackend for SharedTmuxBackend {
-    async fn spawn(&self, req: SpawnRequest) -> Result<AgentHandle, CoreError> {
-        self.0.spawn(req).await
-    }
-
-    async fn dispatch_allocated(
-        &self,
-        req: SpawnRequest,
-        allocation: &AgentAllocation,
-    ) -> Result<AgentHandle, CoreError> {
-        self.0.dispatch_allocated(req, allocation).await
-    }
-}
-
-#[derive(Clone)]
-struct TmuxAgentLifecycle(Arc<TmuxBackend>);
-
-#[async_trait::async_trait]
-impl AgentLifecycle for TmuxAgentLifecycle {
-    async fn shutdown(
-        &self,
-        handle: &AgentHandle,
-        opts: AgentLifecycleShutdown,
-    ) -> Result<AgentLifecycleShutdownReport, CoreError> {
-        let report = self
-            .0
-            .shutdown(
-                handle,
-                ShutdownOpts {
-                    archive_to: opts.archive_to,
-                },
-            )
-            .await?;
-        Ok(AgentLifecycleShutdownReport {
-            method: match report.method {
-                ShutdownMethod::Graceful => "graceful",
-                ShutdownMethod::Interrupt => "interrupt",
-                ShutdownMethod::Kill => "kill",
-            }
-            .to_string(),
-            final_capture_sha: report.final_capture_sha,
-        })
-    }
-
-    async fn rebind(&self, target: &str) -> Result<Option<AgentHandle>, CoreError> {
-        self.0.rebind(target).await.map_err(Into::into)
-    }
-}
-
 /// Construct the production host from a real `SqliteStore`, the real
-/// `TmuxBackend`, the offline mempal, and the system clock. Spawning real agents
-/// is a runtime (deployment) concern; constructing the host does not touch tmux.
+/// native PTY runtime, the offline mempal, and the system clock.
 ///
 /// # Errors
 /// [`CoreError`] if the store cannot be opened/migrated.
@@ -140,14 +87,54 @@ pub async fn build_production_host(config: &DaemonConfig) -> Result<ProductionRu
         config.worktree_base.clone(),
     )));
     gc_worktrees_on_boot(&store, &worktree_pool).await?;
-    let tmux_backend = Arc::new(TmuxBackend::new(
-        Arc::new(TokioCommandRunner::new()),
-        PathBuf::from("tmux"),
-        Config::default(),
+    let transcript_root = config
+        .db_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("runtime-transcripts");
+    let sandbox = Arc::new(LocalInteractiveSandbox::new([
+        config.repo_dir.clone(),
+        config.worktree_base.clone(),
+    ])?);
+    let redactor = Arc::new(
+        ContentRedactor::compile(
+            Vec::new(),
+            vec![
+                r"(?i)(api[_-]?key|token|secret|password)[[:space:]]*[:=][[:space:]]*[^[:space:]]+"
+                    .to_string(),
+            ],
+            RedactionLimits {
+                max_input_bytes: 1024 * 1024,
+                max_output_bytes: 1024 * 1024,
+            },
+        )
+        .map_err(|error| CoreError::Backend(format!("runtime redaction policy: {error}")))?,
+    );
+    let runtime_service = compose_native_runtime(
+        &store,
+        sandbox,
+        redactor,
+        Arc::new(StandalonePolicyRevocation),
+        Arc::new(SystemClock),
+        &NativeRuntimeCompositionConfig {
+            transcript_root,
+            max_transcript_object_bytes: 64 * 1024 * 1024,
+        },
+    )
+    .map_err(|error| CoreError::Backend(error.to_string()))?;
+    let recovered = runtime_service
+        .recover_startup(1_000)
+        .await
+        .map_err(|error| CoreError::Backend(error.to_string()))?;
+    tracing::info!(sessions = recovered.len(), "native runtime startup recovery complete");
+    let native_backend = Arc::new(NativeAgentBackend::new(
+        store.clone(),
+        Arc::clone(&runtime_service),
+        format!("agentd-{}", std::process::id()),
     ));
     let mcp_stdio_command = mcp_stdio_command_from_current_process(config)?;
     let backend = McpStdioContextBackend::new(
-        Box::new(SharedTmuxBackend(Arc::clone(&tmux_backend))),
+        Box::new((*native_backend).clone()),
         mcp_stdio_command,
     );
     Ok(ProductionRunHost::new(
@@ -158,7 +145,8 @@ pub async fn build_production_host(config: &DaemonConfig) -> Result<ProductionRu
         Box::new(SystemClock),
         config.workflows_dir.clone(),
     )
-    .with_agent_lifecycle(Box::new(TmuxAgentLifecycle(Arc::clone(&tmux_backend))))
+    .with_agent_lifecycle(Box::new(NativeAgentLifecycle::new(native_backend)))
+    .with_native_runtime(runtime_service)
     .with_tool_cwd(config.repo_dir.clone())
     .with_worktree_allocator(Some(Box::new(worktree_pool))))
 }
@@ -265,6 +253,23 @@ pub async fn serve(config: DaemonConfig) -> Result<(), Box<dyn std::error::Error
     tracing::info!(%addr, "agentd daemon listening");
 
     let host = build_production_host(&config).await?;
+    if let Some(runtime) = host.native_runtime_service() {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                match runtime.reap_idle().await {
+                    Ok(reports) if !reports.is_empty() => {
+                        tracing::info!(count = reports.len(), "reaped idle native runtimes");
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::error!(%error, "native runtime idle reaper failed");
+                    }
+                }
+            }
+        });
+    }
     if let Ok(parked) = agentd_store::run_repo::count_in_flight(host.store().pool()).await {
         tracing::info!(
             parked,

@@ -185,7 +185,7 @@ fn snapshot() -> MatrixBotCommandSnapshot {
             name: "ops".to_owned(),
             members: vec!["codex-worker".to_owned(), "codex-reviewer".to_owned()],
         }],
-        tmux_sessions: None,
+        runtime_sessions: None,
         bridge_running: true,
     }
 }

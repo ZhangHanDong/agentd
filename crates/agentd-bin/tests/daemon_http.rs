@@ -98,7 +98,7 @@ fn lifecycle_handle(agent: &str, target: &str) -> AgentHandle {
     let session_name = target.split(':').next().unwrap_or(target).to_string();
     AgentHandle {
         agent_id: AgentId::parsed(agent),
-        backend: BackendKind::Tmux,
+        backend: BackendKind::NativeRuntime,
         address: target.to_string(),
         pane_id: Some("%42".to_string()),
         pid: Some(4242),

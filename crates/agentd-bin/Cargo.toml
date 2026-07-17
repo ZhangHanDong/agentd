@@ -29,9 +29,10 @@ path = "src/main.rs"
 agentd-core = { path = "../agentd-core" }
 agentd-matrix = { path = "../agentd-matrix" }
 agentd-runtime = { path = "../agentd-runtime" }
+agentd-security = { path = "../agentd-security" }
 agentd-store = { path = "../agentd-store" }
 agentd-surface = { path = "../agentd-surface" }
-agentd-tmux = { path = "../agentd-tmux" }
+agentd-worktree = { path = "../agentd-worktree" }
 async-trait = "0.1"
 sha2 = "0.10"
 hex = { workspace = true }

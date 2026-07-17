@@ -103,7 +103,7 @@ fn backup_manifest_and_offline_restore_are_digest_verified() {
         .output()
         .expect("run backup");
     let manifest = stdout_json(&backup_output);
-    assert_eq!(manifest["schema_version"], 22);
+    assert_eq!(manifest["schema_version"], 23);
     assert_eq!(manifest["size_bytes"], fs::metadata(&backup).expect("backup").len());
     let manifest_path = PathBuf::from(format!("{}.manifest.json", backup.display()));
 

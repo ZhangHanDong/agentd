@@ -23,7 +23,7 @@ use agentd_store::{
 };
 use agentd_surface::host::RunHost;
 use agentd_surface::mcp_server::dispatch;
-use agentd_tmux::{WorktreePool, WorktreeProvider};
+use agentd_worktree::{WorktreePool, WorktreeProvider};
 use serde_json::json;
 
 fn workflows_dir() -> PathBuf {
@@ -62,7 +62,7 @@ impl RecordingAllocationBackend {
     fn handle(req: SpawnRequest, address: String) -> AgentHandle {
         AgentHandle {
             agent_id: req.agent_id,
-            backend: agentd_core::types::BackendKind::Tmux,
+            backend: agentd_core::types::BackendKind::NativeRuntime,
             address,
             pane_id: Some("%42".to_string()),
             pid: Some(4242),
@@ -289,7 +289,7 @@ async fn register_online_agent(host: &ProductionRunHost, name: &str, role: &str,
             capability: Some(capability.to_string()),
             runtime: Some("codex".to_string()),
             model: None,
-            tmux_target: Some(format!("{name}:0.0")),
+            native_runtime_ref: Some(format!("native://rs_{name}/ra_{name}")),
             home_dir: None,
             workdir: None,
             state_dir: None,
@@ -475,7 +475,7 @@ async fn production_workflow_scheduler_reuses_registered_pane_without_spawn() {
             capability: Some("medium".to_string()),
             runtime: Some("codex".to_string()),
             model: Some("codex-test".to_string()),
-            tmux_target: Some("agentd-codex-coding-1:0.0".to_string()),
+            native_runtime_ref: Some("native://rs_coding/ra_coding".to_string()),
             home_dir: None,
             workdir: Some("/tmp/codex-coding-1".to_string()),
             state_dir: None,

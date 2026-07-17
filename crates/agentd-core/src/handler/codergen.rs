@@ -102,7 +102,12 @@ impl Handler for CodergenHandler {
             agent_id.as_str(),
             &task_run_id,
         );
-        let request = spawn_request(agent_id.as_str(), Some(prompt), worktree);
+        let request = spawn_request(
+            agent_id.as_str(),
+            Some(task_run_id.clone()),
+            Some(prompt),
+            worktree,
+        );
         ctx.ports
             .backend
             .dispatch_allocated(request, &allocation)

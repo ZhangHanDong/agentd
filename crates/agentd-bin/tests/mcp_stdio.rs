@@ -65,7 +65,7 @@ async fn register_agent(host: &ProductionRunHost, name: &str) {
         capability: None,
         runtime: Some("codex".to_string()),
         model: None,
-        tmux_target: None,
+        native_runtime_ref: None,
         home_dir: None,
         workdir: Some("/tmp/agentd-test".to_string()),
         state_dir: None,

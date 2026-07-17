@@ -43,7 +43,7 @@ impl AgentBackend for RecordingBackend {
         self.spawned.lock().expect("spawned lock").push(req);
         Ok(AgentHandle {
             agent_id: agent_id.clone(),
-            backend: BackendKind::Tmux,
+            backend: BackendKind::NativeRuntime,
             address: format!("fake://{}", agent_id.as_str()),
             pane_id: Some("%1".to_string()),
             pid: Some(120),
@@ -64,7 +64,7 @@ impl AgentBackend for RecordingBackend {
             .push((req, allocation.clone()));
         Ok(AgentHandle {
             agent_id: agent_id.clone(),
-            backend: BackendKind::Tmux,
+            backend: BackendKind::NativeRuntime,
             address: format!("fake://{}", agent_id.as_str()),
             pane_id: Some("%1".to_string()),
             pid: Some(120),
@@ -92,6 +92,7 @@ fn request(initial_prompt: Option<&str>) -> SpawnRequest {
     env_overrides.insert("EXISTING_ENV".to_string(), "kept".to_string());
     SpawnRequest {
         agent_id: AgentId::parsed("implementer"),
+        execution_task_id: None,
         mxid: None,
         cli: CliKind::ClaudeCode,
         worktree: PathBuf::from("/tmp/agentd-task-wt"),

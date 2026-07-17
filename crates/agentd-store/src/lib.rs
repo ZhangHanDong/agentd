@@ -32,6 +32,7 @@ pub mod matrix_bridge_repo;
 pub mod matrix_gateway;
 pub mod message_repo;
 pub mod native_runtime_control_plane;
+pub mod native_agent_binding;
 pub mod outbox_repo;
 pub mod outcome_repo;
 pub mod operator;

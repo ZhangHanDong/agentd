@@ -117,8 +117,12 @@ impl Handler for FanOutHandler {
                 );
                 continue;
             }
-            let request =
-                spawn_request(reviewer.agent_id.as_str(), Some(prompt), &reviewer.worktree);
+            let request = spawn_request(
+                reviewer.agent_id.as_str(),
+                None,
+                Some(prompt),
+                &reviewer.worktree,
+            );
             ctx.ports
                 .backend
                 .dispatch_allocated(request, &reviewer.allocation)

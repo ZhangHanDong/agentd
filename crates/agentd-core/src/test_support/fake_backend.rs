@@ -36,7 +36,7 @@ impl AgentBackend for FakeBackend {
             address: format!("fake://{}", agent_id.as_str()),
             session_name: format!("agentd-{}", agent_id.as_str()),
             agent_id,
-            backend: BackendKind::Tmux,
+            backend: BackendKind::NativeRuntime,
             pane_id: Some("%0".to_string()),
             pid: Some(4242),
             spawned_at: SystemTime::UNIX_EPOCH,

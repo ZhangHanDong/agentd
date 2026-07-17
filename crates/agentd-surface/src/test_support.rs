@@ -354,7 +354,7 @@ impl RunHost for FakeRunHost {
     async fn register_agent(&self, input: AgentRegistration) -> Result<AgentRecord, CoreError> {
         let name = normalize_agent_name(&input.name)?;
         let status = if input
-            .tmux_target
+            .native_runtime_ref
             .as_deref()
             .is_some_and(|v| !v.trim().is_empty())
         {
@@ -369,7 +369,7 @@ impl RunHost for FakeRunHost {
             capability: input.capability,
             runtime: input.runtime,
             model: input.model,
-            tmux_target: input.tmux_target,
+            native_runtime_ref: input.native_runtime_ref,
             home_dir: input.home_dir,
             workdir: input.workdir,
             state_dir: input.state_dir,
@@ -448,7 +448,7 @@ impl RunHost for FakeRunHost {
             capability: None,
             runtime: None,
             model: None,
-            tmux_target: None,
+            native_runtime_ref: None,
             home_dir: None,
             workdir: None,
             state_dir: None,
@@ -464,8 +464,8 @@ impl RunHost for FakeRunHost {
         if input.server.is_some() {
             record.server = input.server;
         }
-        if input.tmux_target.is_some() {
-            record.tmux_target = input.tmux_target;
+        if input.native_runtime_ref.is_some() {
+            record.native_runtime_ref = input.native_runtime_ref;
         }
         if input.workspace_path.is_some() {
             record.workdir = input.workspace_path;
@@ -494,8 +494,8 @@ impl RunHost for FakeRunHost {
                 .filter(|r| !r.trim().is_empty())
                 .unwrap_or_else(|| "manual-offline".to_string()),
         );
-        if input.clear_tmux {
-            record.tmux_target = None;
+        if input.clear_runtime {
+            record.native_runtime_ref = None;
         }
         record.last_seen_at = Some(3);
         record.updated_at = 3;
@@ -529,14 +529,13 @@ impl RunHost for FakeRunHost {
         let address = format!("fake://{name}");
         record.status = "online".to_string();
         record.offline_reason = None;
-        record.tmux_target = Some(address.clone());
+        record.native_runtime_ref = Some(address.clone());
         record.last_seen_at = Some(4);
         record.updated_at = 4;
         let handle = AgentStartHandle {
             agent_id: name,
-            backend: "tmux".to_string(),
+            backend: "native_runtime".to_string(),
             address,
-            pane_id: Some("%0".to_string()),
             pid: Some(4242),
             session_name: format!("agentd-{}", record.name),
         };
@@ -553,22 +552,22 @@ impl RunHost for FakeRunHost {
             return Ok(None);
         };
         if record
-            .tmux_target
+            .native_runtime_ref
             .as_deref()
             .is_none_or(|target| target.trim().is_empty())
         {
             return Err(CoreError::Invariant(
-                "agent tmux target required".to_string(),
+                "agent native runtime reference required".to_string(),
             ));
         }
         record.status = "offline".to_string();
-        record.offline_reason = Some("agent-down-kill".to_string());
-        record.tmux_target = None;
+        record.offline_reason = Some("agent-down".to_string());
+        record.native_runtime_ref = None;
         record.runtime_state = serde_json::json!({
             "agent": name,
             "lifecycle": {
                 "state": "down",
-                "action": "agent-down-kill",
+                "action": "agent-down",
                 "method": "kill",
                 "finalCaptureSha": "fake-sha",
             },
@@ -592,11 +591,13 @@ impl RunHost for FakeRunHost {
             return Ok(None);
         };
         let target = record
-            .tmux_target
+            .native_runtime_ref
             .as_deref()
             .map(str::trim)
             .filter(|target| !target.is_empty())
-            .ok_or_else(|| CoreError::Invariant("agent tmux target required".to_string()))?
+            .ok_or_else(|| {
+                CoreError::Invariant("agent native runtime reference required".to_string())
+            })?
             .to_string();
         record.status = "online".to_string();
         record.offline_reason = None;
@@ -611,9 +612,8 @@ impl RunHost for FakeRunHost {
         record.updated_at = 7;
         let handle = AgentStartHandle {
             agent_id: name,
-            backend: "tmux".to_string(),
+            backend: "native_runtime".to_string(),
             address: target,
-            pane_id: Some("%0".to_string()),
             pid: Some(4242),
             session_name: format!("agentd-{}", record.name),
         };
@@ -641,7 +641,7 @@ impl RunHost for FakeRunHost {
             "activeNow": input.active_now,
             "activeDurationSec": input.active_duration_sec,
             "idleDurationSec": input.idle_duration_sec,
-            "lastTmuxActivitySec": input.last_tmux_activity_sec,
+            "lastRuntimeActivitySec": input.last_runtime_activity_sec,
             "workspacePath": input.workspace_path,
             "mcpPresent": input.mcp_present,
             "updatedAt": 5,

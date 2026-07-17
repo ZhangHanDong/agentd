@@ -98,8 +98,8 @@ fn runtime(args: &AgentRuntimeArgs) -> ExitCode {
     push_i64_opt(&mut fields, "idleDurationSec", args.idle_duration_sec);
     push_i64_opt(
         &mut fields,
-        "lastTmuxActivitySec",
-        args.last_tmux_activity_sec,
+        "lastRuntimeActivitySec",
+        args.last_runtime_activity_sec,
     );
     push_opt(&mut fields, "workspacePath", args.workspace_path.as_deref());
     push_bool_opt(&mut fields, "mcpPresent", args.mcp_present);
@@ -119,7 +119,11 @@ fn register(args: &AgentRegisterArgs) -> ExitCode {
     push_opt(&mut fields, "capability", args.capability.as_deref());
     push_opt(&mut fields, "runtime", args.runtime.as_deref());
     push_opt(&mut fields, "model", args.model.as_deref());
-    push_opt(&mut fields, "tmux_target", args.tmux_target.as_deref());
+    push_opt(
+        &mut fields,
+        "native_runtime_ref",
+        args.native_runtime_ref.as_deref(),
+    );
     push_opt(&mut fields, "home_dir", args.home_dir.as_deref());
     push_opt(&mut fields, "workdir", args.workdir.as_deref());
     push_opt(&mut fields, "state_dir", args.state_dir.as_deref());
@@ -137,7 +141,11 @@ fn register(args: &AgentRegisterArgs) -> ExitCode {
 fn heartbeat(args: &AgentHeartbeatArgs) -> ExitCode {
     let mut fields = Vec::new();
     push_opt(&mut fields, "server", args.server.as_deref());
-    push_opt(&mut fields, "tmux_target", args.tmux_target.as_deref());
+    push_opt(
+        &mut fields,
+        "native_runtime_ref",
+        args.native_runtime_ref.as_deref(),
+    );
     push_opt(
         &mut fields,
         "workspace_path",
@@ -156,8 +164,8 @@ fn heartbeat(args: &AgentHeartbeatArgs) -> ExitCode {
 fn offline(args: &AgentOfflineArgs) -> ExitCode {
     let mut fields = Vec::new();
     push_opt(&mut fields, "reason", args.reason.as_deref());
-    if args.no_clear_tmux {
-        fields.push("\"clear_tmux\":false".to_string());
+    if args.no_clear_runtime {
+        fields.push("\"clear_runtime\":false".to_string());
     }
     let body = json_object(&fields);
     request_and_print(

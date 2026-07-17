@@ -76,7 +76,7 @@ pub struct AgentRecord {
     pub capability: Option<String>,
     pub runtime: Option<String>,
     pub model: Option<String>,
-    pub tmux_target: Option<String>,
+    pub native_runtime_ref: Option<String>,
     pub home_dir: Option<String>,
     pub workdir: Option<String>,
     pub state_dir: Option<String>,
@@ -98,7 +98,7 @@ pub struct AgentRegistration {
     pub capability: Option<String>,
     pub runtime: Option<String>,
     pub model: Option<String>,
-    pub tmux_target: Option<String>,
+    pub native_runtime_ref: Option<String>,
     pub home_dir: Option<String>,
     pub workdir: Option<String>,
     pub state_dir: Option<String>,
@@ -117,7 +117,7 @@ pub struct AgentIdentityPatch {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct AgentHeartbeat {
     pub server: Option<String>,
-    pub tmux_target: Option<String>,
+    pub native_runtime_ref: Option<String>,
     pub workspace_path: Option<String>,
 }
 
@@ -125,8 +125,8 @@ pub struct AgentHeartbeat {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentOffline {
     pub reason: Option<String>,
-    #[serde(default = "default_clear_tmux")]
-    pub clear_tmux: bool,
+    #[serde(default = "default_clear_runtime")]
+    pub clear_runtime: bool,
 }
 
 /// Serializable runtime handle returned by agent start.
@@ -135,7 +135,6 @@ pub struct AgentStartHandle {
     pub agent_id: String,
     pub backend: String,
     pub address: String,
-    pub pane_id: Option<String>,
     pub pid: Option<u32>,
     pub session_name: String,
 }
@@ -181,8 +180,8 @@ pub struct AgentRuntimeUpdate {
     pub active_duration_sec: Option<i64>,
     #[serde(alias = "idleDurationSec")]
     pub idle_duration_sec: Option<i64>,
-    #[serde(alias = "lastTmuxActivitySec")]
-    pub last_tmux_activity_sec: Option<i64>,
+    #[serde(alias = "lastRuntimeActivitySec")]
+    pub last_runtime_activity_sec: Option<i64>,
     #[serde(alias = "workspacePath")]
     pub workspace_path: Option<String>,
     #[serde(alias = "mcpPresent")]
@@ -895,7 +894,7 @@ pub struct DirectMessageInput {
     pub attachments: Vec<Value>,
 }
 
-fn default_clear_tmux() -> bool {
+fn default_clear_runtime() -> bool {
     true
 }
 
