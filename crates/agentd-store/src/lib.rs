@@ -20,6 +20,7 @@ pub mod artifact_repo;
 pub mod certification_control_plane;
 pub mod checkpoint_repo;
 pub mod cutover;
+pub mod cutover_service;
 pub mod error;
 pub mod event_repo;
 pub mod execution_artifact_repo;
@@ -51,6 +52,10 @@ pub mod worker_repo;
 pub mod worktree_cleanup_repo;
 
 pub use cutover::SqliteCutoverLedger;
+pub use cutover_service::{
+    CutoverActivationReport, CutoverDrainReport, CutoverImportReport, CutoverService,
+    CutoverShadowMismatch, CutoverShadowReport,
+};
 pub use error::StoreError;
 pub use native_runtime_control_plane::SqliteNativeRuntimeControlPlane;
 pub use store::SqliteStore;

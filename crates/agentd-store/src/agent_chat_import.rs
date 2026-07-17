@@ -5,11 +5,30 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 
 use crate::StoreError;
 use crate::agent_repo::{self, OfflineAgent, RegisterAgent};
 use crate::message_repo::{self, DirectMessageInput, GroupCreateInput, GroupMessageInput};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalLegacyRecord {
+    pub surface: agentd_core::ports::CutoverSurface,
+    pub legacy_id: String,
+    pub native_id: String,
+    pub record_sha256: String,
+    pub decision_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentChatCanonicalSnapshot {
+    pub source_sha256: String,
+    pub file_count: u32,
+    pub record_count: u64,
+    pub unsupported_count: u64,
+    pub records: Vec<CanonicalLegacyRecord>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentChatImportMode {
@@ -1290,4 +1309,378 @@ fn now_unix_for_import() -> i64 {
         .map_or(0, |duration| {
             i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
         })
+}
+
+pub fn canonical_agent_chat_snapshot(
+    agent_chat: &Path,
+) -> Result<AgentChatCanonicalSnapshot, StoreError> {
+    let files = [
+        ("agents.json", Value::Object(Map::new())),
+        ("groups.json", Value::Object(Map::new())),
+        ("messages.json", Value::Array(Vec::new())),
+        ("cursors.json", Value::Object(Map::new())),
+        ("tasks.json", Value::Array(Vec::new())),
+        ("task_graphs.json", Value::Object(Map::new())),
+    ];
+    let mut source_hasher = Sha256::new();
+    for (name, default) in &files {
+        let value = read_json_or_default(&agent_chat.join("data").join(name), default.clone())?;
+        hash_snapshot_field(&mut source_hasher, name.as_bytes());
+        hash_snapshot_field(&mut source_hasher, &canonical_json_bytes(&value)?);
+    }
+
+    let agents = SourceSnapshot::read(agent_chat)?;
+    let messaging = MessageSourceSnapshot::read(agent_chat)?;
+    let tasks = TaskSourceSnapshot::read(agent_chat)?;
+    let mut records = Vec::new();
+    for agent in agents.agents {
+        let status = if agent.online == Some(false) {
+            "offline"
+        } else if agent.online == Some(true) || agent.tmux_target.is_some() {
+            "online"
+        } else {
+            "offline"
+        };
+        let offline_reason = if status == "offline" {
+            agent
+                .offline_reason
+                .as_deref()
+                .or(if agent.online == Some(false) {
+                    Some("agent-chat-offline")
+                } else {
+                    Some("offline")
+                })
+        } else {
+            None
+        };
+        let decision = json!({
+            "name": agent.name,
+            "role": agent.role.as_deref().unwrap_or("agent"),
+            "capability": agent.capability,
+            "runtime": agent.runtime,
+            "model": agent.model,
+            "server": agent.server,
+            "status": status,
+            "offline_reason": offline_reason,
+        });
+        let record = json!({
+            "decision": decision,
+            "runtime_profile": agent.runtime_profile,
+            "home_dir": agent.home_dir,
+            "workdir": agent.workdir,
+            "state_dir": agent.state_dir,
+        });
+        records.push(canonical_record(
+            agentd_core::ports::CutoverSurface::Agent,
+            &agent.name,
+            &agent.name,
+            &record,
+            &decision,
+        )?);
+    }
+    for group in messaging.groups.values() {
+        let mut members = group.members.clone();
+        members.sort();
+        members.dedup();
+        let decision = json!({ "name": group.name, "members": members });
+        let record = json!({ "decision": decision, "created_at": group.created_at });
+        records.push(canonical_record(
+            agentd_core::ports::CutoverSurface::Group,
+            &group.name,
+            &group.name,
+            &record,
+            &decision,
+        )?);
+    }
+    for message in &messaging.messages {
+        match message {
+            ImportMessage::Direct(input) => {
+                let id = input.message_id.as_deref().ok_or_else(|| {
+                    StoreError::Invariant("canonical direct message id is missing".to_string())
+                })?;
+                let decision = json!({
+                    "kind": "direct",
+                    "id": id,
+                    "ts": input.ts,
+                    "from": input.from,
+                    "to": input.to,
+                    "message_type": input.message_type.as_deref().unwrap_or("message"),
+                    "priority": input.priority.as_deref().unwrap_or("normal"),
+                    "reply_to": input.reply_to,
+                    "source": input.source.as_deref().unwrap_or("api"),
+                    "source_room": input.source_room,
+                    "sender_mxid": input.sender_mxid,
+                    "trust_level": input.trust_level,
+                    "from_id": input.from_id,
+                });
+                let record = json!({
+                    "decision": decision,
+                    "summary": input.summary,
+                    "full": input.full,
+                    "schema": input.schema,
+                    "attachments": input.attachments,
+                });
+                records.push(canonical_record(
+                    agentd_core::ports::CutoverSurface::Message,
+                    id,
+                    id,
+                    &record,
+                    &decision,
+                )?);
+            }
+            ImportMessage::Group(input) => {
+                let id = input.message_id.as_deref().ok_or_else(|| {
+                    StoreError::Invariant("canonical group message id is missing".to_string())
+                })?;
+                let mut mentions = input.mentions.clone();
+                mentions.sort();
+                mentions.dedup();
+                let decision = json!({
+                    "kind": "group",
+                    "id": id,
+                    "ts": input.ts,
+                    "from": input.from,
+                    "group": input.group,
+                    "message_type": input.message_type.as_deref().unwrap_or("message"),
+                    "priority": input.priority.as_deref().unwrap_or("normal"),
+                    "mentions": mentions,
+                    "reply_to": input.reply_to,
+                    "source": input.source.as_deref().unwrap_or("api"),
+                });
+                let record = json!({
+                    "decision": decision,
+                    "summary": input.summary,
+                    "full": input.full,
+                    "schema": input.schema,
+                    "attachments": input.attachments,
+                });
+                records.push(canonical_record(
+                    agentd_core::ports::CutoverSurface::Message,
+                    id,
+                    id,
+                    &record,
+                    &decision,
+                )?);
+            }
+        }
+    }
+    for cursor in &messaging.cursors {
+        let decision = canonical_cursor_decision(cursor, &messaging.messages)?;
+        records.push(canonical_record(
+            agentd_core::ports::CutoverSurface::Cursor,
+            &cursor.agent,
+            &cursor.agent,
+            &decision,
+            &decision,
+        )?);
+    }
+    for task in tasks.tasks {
+        let record: Value = serde_json::from_str(&task.raw_json)?;
+        let decision = json!({
+            "id": task.id,
+            "status": task.status,
+            "priority": task.priority,
+            "granularity": task.granularity,
+            "assignee": task.assignee,
+            "parent_id": task.parent_id,
+            "labels": serde_json::from_str::<Value>(&task.labels_json)?,
+            "waiting_reason": task.waiting_reason,
+            "waiting_until": task.waiting_until,
+        });
+        records.push(canonical_record(
+            agentd_core::ports::CutoverSurface::Task,
+            &task.id,
+            &task.id,
+            &record,
+            &decision,
+        )?);
+    }
+    for graph in tasks.task_graphs {
+        let record: Value = serde_json::from_str(&graph.raw_json)?;
+        let decision = json!({
+            "id": graph.id,
+            "owner": graph.owner,
+            "label": graph.label,
+            "status": graph.status,
+            "graph": record,
+        });
+        records.push(canonical_record(
+            agentd_core::ports::CutoverSurface::TaskGraph,
+            &graph.id,
+            &graph.id,
+            &record,
+            &decision,
+        )?);
+    }
+    records.sort_by(|left, right| {
+        left.surface
+            .as_str()
+            .cmp(right.surface.as_str())
+            .then_with(|| left.legacy_id.cmp(&right.legacy_id))
+    });
+    Ok(AgentChatCanonicalSnapshot {
+        source_sha256: hex::encode(source_hasher.finalize()),
+        file_count: files.len() as u32,
+        record_count: records.len() as u64,
+        unsupported_count: (agents.skipped_agents
+            + messaging.skipped_groups
+            + messaging.skipped_messages
+            + tasks.skipped_tasks
+            + tasks.skipped_task_graphs) as u64,
+        records,
+    })
+}
+
+fn canonical_cursor_decision(
+    cursor: &ImportCursor,
+    messages: &[ImportMessage],
+) -> Result<Value, StoreError> {
+    let mut inbox_read_ids = Vec::new();
+    if let Some(inbox_ts) = cursor.inbox_ts {
+        for message in messages {
+            match message {
+                ImportMessage::Direct(input) if input.to.eq_ignore_ascii_case(&cursor.agent) => {
+                    let id = required_message_id(input.message_id.as_deref())?;
+                    let ts = required_message_ts(input.ts)?;
+                    if position_is_read(ts, id, inbox_ts, cursor.inbox_id.as_deref()) {
+                        inbox_read_ids.push(id.to_string());
+                    }
+                }
+                ImportMessage::Group(input)
+                    if input
+                        .mentions
+                        .iter()
+                        .any(|mention| mention.eq_ignore_ascii_case(&cursor.agent)) =>
+                {
+                    let id = required_message_id(input.message_id.as_deref())?;
+                    let ts = required_message_ts(input.ts)?;
+                    if position_is_read(ts, id, inbox_ts, cursor.inbox_id.as_deref()) {
+                        inbox_read_ids.push(id.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    inbox_read_ids.sort();
+    let mut group_reads = Vec::new();
+    for group_cursor in &cursor.group_cursors {
+        let mut message_ids = Vec::new();
+        for message in messages {
+            let ImportMessage::Group(input) = message else {
+                continue;
+            };
+            if input.group != group_cursor.group {
+                continue;
+            }
+            let id = required_message_id(input.message_id.as_deref())?;
+            let ts = required_message_ts(input.ts)?;
+            if position_is_read(ts, id, group_cursor.ts, group_cursor.id.as_deref()) {
+                message_ids.push(id.to_string());
+            }
+        }
+        message_ids.sort();
+        group_reads.push(json!({
+            "group": group_cursor.group,
+            "message_ids": message_ids,
+        }));
+    }
+    group_reads.sort_by_key(|value| {
+        value
+            .get("group")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    });
+    Ok(json!({
+        "agent": cursor.agent,
+        "inbox_read_ids": inbox_read_ids,
+        "group_reads": group_reads,
+    }))
+}
+
+fn required_message_id(id: Option<&str>) -> Result<&str, StoreError> {
+    id.ok_or_else(|| StoreError::Invariant("cursor message id is missing".to_string()))
+}
+
+fn required_message_ts(ts: Option<i64>) -> Result<i64, StoreError> {
+    ts.ok_or_else(|| StoreError::Invariant("cursor message timestamp is missing".to_string()))
+}
+
+fn position_is_read(ts: i64, id: &str, cursor_ts: i64, cursor_id: Option<&str>) -> bool {
+    ts < cursor_ts || (ts == cursor_ts && cursor_id.is_none_or(|cursor_id| id <= cursor_id))
+}
+
+pub fn canonical_decision_sha256(value: &Value) -> Result<String, StoreError> {
+    Ok(sha256_bytes(&canonical_json_bytes(value)?))
+}
+
+pub fn agent_chat_inflight_count(agent_chat: &Path) -> Result<u64, StoreError> {
+    let snapshot = TaskSourceSnapshot::read(agent_chat)?;
+    let task_count = snapshot
+        .tasks
+        .iter()
+        .filter(|task| !terminal_legacy_status(task.status.as_deref()))
+        .count();
+    let graph_count = snapshot
+        .task_graphs
+        .iter()
+        .filter(|graph| !terminal_legacy_status(graph.status.as_deref()))
+        .count();
+    Ok((task_count + graph_count) as u64)
+}
+
+fn terminal_legacy_status(status: Option<&str>) -> bool {
+    status.is_some_and(|status| {
+        matches!(
+            status.trim().to_ascii_lowercase().as_str(),
+            "done" | "completed" | "failed" | "cancelled" | "canceled" | "skipped" | "closed"
+        )
+    })
+}
+
+fn canonical_record(
+    surface: agentd_core::ports::CutoverSurface,
+    legacy_id: &str,
+    native_id: &str,
+    record: &Value,
+    decision: &Value,
+) -> Result<CanonicalLegacyRecord, StoreError> {
+    Ok(CanonicalLegacyRecord {
+        surface,
+        legacy_id: legacy_id.to_string(),
+        native_id: native_id.to_string(),
+        record_sha256: sha256_bytes(&canonical_json_bytes(record)?),
+        decision_sha256: sha256_bytes(&canonical_json_bytes(decision)?),
+    })
+}
+
+fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, StoreError> {
+    serde_json::to_vec(&canonicalize_json(value))
+        .map_err(|error| StoreError::Invariant(format!("canonical JSON failed: {error}")))
+}
+
+fn canonicalize_json(value: &Value) -> Value {
+    match value {
+        Value::Object(object) => {
+            let mut keys = object.keys().collect::<Vec<_>>();
+            keys.sort();
+            Value::Object(
+                keys.into_iter()
+                    .map(|key| (key.clone(), canonicalize_json(&object[key])))
+                    .collect(),
+            )
+        }
+        Value::Array(values) => Value::Array(values.iter().map(canonicalize_json).collect()),
+        _ => value.clone(),
+    }
+}
+
+fn hash_snapshot_field(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_be_bytes());
+    hasher.update(bytes);
+}
+
+fn sha256_bytes(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
 }

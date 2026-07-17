@@ -76,8 +76,7 @@ impl CutoverLedgerPort for SqliteCutoverLedger {
                 == transition.expected_state.as_str()
                 && row.get::<String, _>("next_state") == transition.next_state.as_str()
                 && row.get::<String, _>("input_sha256") == transition.input_sha256
-                && row.get::<String, _>("authority_owner") == transition.authority_owner
-                && row.get::<i64, _>("occurred_at") == transition.occurred_at;
+                && row.get::<String, _>("authority_owner") == transition.authority_owner;
             if !exact {
                 return Err(CutoverError::Conflict(
                     "cutover transition idempotency key has different content".to_string(),
@@ -211,7 +210,21 @@ impl CutoverLedgerPort for SqliteCutoverLedger {
         .await
         .map_err(db_error)?;
         let stored = load_mapping(&self.pool, mapping).await?;
-        exact_or_conflict(stored, mapping, "legacy id mapping")
+        let stored = stored.ok_or_else(|| {
+            CutoverError::Unavailable("legacy id mapping disappeared".to_string())
+        })?;
+        if stored.cutover_id == mapping.cutover_id
+            && stored.surface == mapping.surface
+            && stored.legacy_id_sha256 == mapping.legacy_id_sha256
+            && stored.native_id == mapping.native_id
+            && stored.native_record_sha256 == mapping.native_record_sha256
+        {
+            Ok(stored)
+        } else {
+            Err(CutoverError::Conflict(
+                "legacy id mapping was replayed with different content".to_string(),
+            ))
+        }
     }
 
     async fn record_shadow(
@@ -237,7 +250,22 @@ impl CutoverLedgerPort for SqliteCutoverLedger {
         .await
         .map_err(db_error)?;
         let stored = load_shadow(&self.pool, decision).await?;
-        exact_or_conflict(stored, decision, "shadow decision")
+        let stored = stored
+            .ok_or_else(|| CutoverError::Unavailable("shadow decision disappeared".to_string()))?;
+        if stored.cutover_id == decision.cutover_id
+            && stored.surface == decision.surface
+            && stored.decision_key_sha256 == decision.decision_key_sha256
+            && stored.legacy_decision_sha256 == decision.legacy_decision_sha256
+            && stored.native_decision_sha256 == decision.native_decision_sha256
+            && stored.matched == decision.matched
+            && stored.reason_code == decision.reason_code
+        {
+            Ok(stored)
+        } else {
+            Err(CutoverError::Conflict(
+                "shadow decision was replayed with different content".to_string(),
+            ))
+        }
     }
 
     async fn record_step(
@@ -269,7 +297,21 @@ impl CutoverLedgerPort for SqliteCutoverLedger {
         .await
         .map_err(db_error)?;
         let stored = load_receipt(&self.pool, receipt).await?;
-        exact_or_conflict(stored, receipt, "cutover step receipt")
+        let stored = stored.ok_or_else(|| {
+            CutoverError::Unavailable("cutover step receipt disappeared".to_string())
+        })?;
+        if stored.cutover_id == receipt.cutover_id
+            && stored.step == receipt.step
+            && stored.idempotency_key == receipt.idempotency_key
+            && stored.input_sha256 == receipt.input_sha256
+            && stored.output_sha256 == receipt.output_sha256
+        {
+            Ok(stored)
+        } else {
+            Err(CutoverError::Conflict(
+                "cutover step receipt was replayed with different content".to_string(),
+            ))
+        }
     }
 
     async fn record_cursor_handoff(
@@ -301,7 +343,21 @@ impl CutoverLedgerPort for SqliteCutoverLedger {
         .await
         .map_err(db_error)?;
         let stored = load_handoff(&self.pool, handoff).await?;
-        exact_or_conflict(stored, handoff, "cursor handoff")
+        let stored = stored
+            .ok_or_else(|| CutoverError::Unavailable("cursor handoff disappeared".to_string()))?;
+        if stored.cutover_id == handoff.cutover_id
+            && stored.project_ref_sha256 == handoff.project_ref_sha256
+            && stored.previous_cursor_sha256 == handoff.previous_cursor_sha256
+            && stored.next_cursor == handoff.next_cursor
+            && stored.authority_owner == handoff.authority_owner
+            && stored.acknowledged == handoff.acknowledged
+        {
+            Ok(stored)
+        } else {
+            Err(CutoverError::Conflict(
+                "cursor handoff was replayed with different content".to_string(),
+            ))
+        }
     }
 
     async fn record_backup(
