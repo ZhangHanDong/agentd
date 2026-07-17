@@ -15,12 +15,14 @@ pub use enterprise::{
 };
 pub use handle::{AgentHandle, AgentStatus, BackendKind, CliKind, LaunchStrategy, SpawnRequest};
 pub use ids::{
-    AgentId, AgentProfileId, ArtifactUploadId, AuditEventId, BackupManifestId,
-    CertificationRequestId, CertificationResultId, CutoverId, CutoverReceiptId, CutoverSourceId,
-    EvidenceEnvelopeId, ExecutionArtifactId, FleetOutboxId, ForgeAdmissionId, LeaseId,
-    MatrixCommandId, MatrixGatewayOutboxId, NodeId, ReviewRunId, RunId, RuntimeAttemptId,
-    RuntimeEventId, RuntimeSessionId, RuntimeTranscriptId, ServiceInstallationId,
-    SkillInstallationId, TaskRunId, WorkerId, WorkerIncarnationId,
+    AgentId, AgentProfileId, ArtifactReplicationId, ArtifactUploadId, AuditEventId,
+    BackupManifestId, CertificationRequestId, CertificationResultId, ControlPlaneInstanceId,
+    CutoverId, CutoverReceiptId, CutoverSourceId, DisasterRecoveryCheckpointId,
+    DisasterRecoveryDrillId, EvidenceEnvelopeId, ExecutionArtifactId, FleetOutboxId,
+    ForgeAdmissionId, LeaseId, LegalHoldId, LoadModelId, MatrixCommandId,
+    MatrixGatewayOutboxId, NodeId, ReviewRunId, RunId, RuntimeAttemptId, RuntimeEventId,
+    RuntimeSessionId, RuntimeTranscriptId, ServiceInstallationId, SkillInstallationId,
+    TaskRunId, TenantKeyId, WorkerId, WorkerImageRolloutId, WorkerIncarnationId, ZonePoolId,
 };
 pub use outcome::{Artifact, ArtifactKind, MempalWrite, Outcome, Status};
 pub use principal::{

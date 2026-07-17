@@ -1,0 +1,1823 @@
+//! Durable AD-E7 enterprise scale reference control plane.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use agentd_core::ports::{
+    ArtifactReplicaAcknowledgement, ArtifactReplicationPlan, AutoscalingRecommendation,
+    CapacityObservation, ControlPlaneHeartbeatRequest, ControlPlaneLeadershipLease,
+    ControlPlaneLeadershipRequest, ControlPlaneLeadershipRenewal, ControlPlaneMember,
+    ControlPlaneMemberStatus, DisasterRecoveryCheckpoint, DisasterRecoveryDrill,
+    DisasterRecoveryDrillStatus, EnterpriseOperationalSnapshot, EnterpriseScaleError,
+    EnterpriseScalePort, EnterpriseZoneStatus, LegalHold, LoadModelRegistration, ReplicaStatus,
+    RetentionDecision, RetentionDisposition, RetentionPolicy, ServiceLevelMeasurement,
+    ServiceLevelStatus, TenantKeyStatus, TenantKeyVersion, WorkerImageRollout,
+    WorkerImageRolloutStatus, WorkerImageZoneObservation, ZonePoolPolicy,
+};
+use agentd_core::types::{
+    ArtifactReplicationId, ControlPlaneInstanceId, DisasterRecoveryCheckpointId,
+    DisasterRecoveryDrillId, ExecutionArtifactId, LegalHoldId, LoadModelId, TenantKeyId,
+    WorkerImageRolloutId, ZonePoolId,
+};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use sha2::{Digest, Sha256};
+use sqlx::pool::PoolConnection;
+use sqlx::{Row, Sqlite, SqlitePool};
+
+const REQUIRED_LOAD_DIMENSIONS: [&str; 11] = [
+    "tenant",
+    "project",
+    "room",
+    "matrix_event",
+    "queue",
+    "artifact_log",
+    "certification_throughput",
+    "failure_injection",
+    "test_window",
+    "noisy_neighbor",
+    "budget",
+];
+
+#[derive(Clone)]
+pub struct SqliteEnterpriseScaleControlPlane {
+    pool: SqlitePool,
+}
+
+impl std::fmt::Debug for SqliteEnterpriseScaleControlPlane {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SqliteEnterpriseScaleControlPlane")
+            .field("pool", &"[SQLITE]")
+            .finish()
+    }
+}
+
+impl SqliteEnterpriseScaleControlPlane {
+    #[must_use]
+    pub const fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+
+    #[must_use]
+    pub const fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+}
+
+async fn begin_immediate(
+    pool: &SqlitePool,
+) -> Result<PoolConnection<Sqlite>, EnterpriseScaleError> {
+    let mut connection = pool.acquire().await.map_err(storage_error)?;
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *connection)
+        .await
+        .map_err(storage_error)?;
+    Ok(connection)
+}
+
+async fn commit(connection: &mut PoolConnection<Sqlite>) -> Result<(), EnterpriseScaleError> {
+    sqlx::query("COMMIT")
+        .execute(&mut **connection)
+        .await
+        .map_err(storage_error)?;
+    Ok(())
+}
+
+async fn rollback(connection: &mut PoolConnection<Sqlite>) {
+    let _ = sqlx::query("ROLLBACK").execute(&mut **connection).await;
+}
+
+fn storage_error(error: sqlx::Error) -> EnterpriseScaleError {
+    EnterpriseScaleError::Unavailable(error.to_string())
+}
+
+fn serde_error(error: serde_json::Error) -> EnterpriseScaleError {
+    EnterpriseScaleError::Invalid(error.to_string())
+}
+
+fn canonical_sha256<T: Serialize>(value: &T) -> Result<String, EnterpriseScaleError> {
+    let bytes = serde_json::to_vec(value).map_err(serde_error)?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn json<T: Serialize>(value: &T) -> Result<String, EnterpriseScaleError> {
+    serde_json::to_string(value).map_err(serde_error)
+}
+
+fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, EnterpriseScaleError> {
+    serde_json::from_str(value).map_err(serde_error)
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn valid_image_digest(value: &str) -> bool {
+    value
+        .strip_prefix("sha256:")
+        .is_some_and(valid_sha256)
+}
+
+fn nonempty(value: &str) -> bool {
+    !value.trim().is_empty() && value.len() <= 512
+}
+
+fn u64_to_i64(value: u64, field: &str) -> Result<i64, EnterpriseScaleError> {
+    i64::try_from(value)
+        .map_err(|_| EnterpriseScaleError::Invalid(format!("{field} exceeds SQLite range")))
+}
+
+fn i64_to_u64(value: i64, field: &str) -> Result<u64, EnterpriseScaleError> {
+    u64::try_from(value)
+        .map_err(|_| EnterpriseScaleError::Unavailable(format!("stored {field} is negative")))
+}
+
+fn i64_to_u32(value: i64, field: &str) -> Result<u32, EnterpriseScaleError> {
+    u32::try_from(value)
+        .map_err(|_| EnterpriseScaleError::Unavailable(format!("stored {field} is invalid")))
+}
+
+async fn replay_receipt<T: DeserializeOwned>(
+    connection: &mut PoolConnection<Sqlite>,
+    operation: &str,
+    idempotency_key: &str,
+    request_sha256: &str,
+) -> Result<Option<T>, EnterpriseScaleError> {
+    let row = sqlx::query(
+        "SELECT request_sha256, response_json FROM enterprise_scale_receipts \
+         WHERE operation = ? AND idempotency_key = ?",
+    )
+    .bind(operation)
+    .bind(idempotency_key)
+    .fetch_optional(&mut **connection)
+    .await
+    .map_err(storage_error)?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    if row.get::<String, _>("request_sha256") != request_sha256 {
+        return Err(EnterpriseScaleError::Conflict(format!(
+            "{operation} idempotency key was reused with different input"
+        )));
+    }
+    parse_json(&row.get::<String, _>("response_json")).map(Some)
+}
+
+async fn insert_receipt<T: Serialize>(
+    connection: &mut PoolConnection<Sqlite>,
+    operation: &str,
+    idempotency_key: &str,
+    request_sha256: &str,
+    response: &T,
+    recorded_at: i64,
+) -> Result<(), EnterpriseScaleError> {
+    sqlx::query(
+        "INSERT INTO enterprise_scale_receipts \
+         (operation, idempotency_key, request_sha256, response_json, recorded_at) \
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(operation)
+    .bind(idempotency_key)
+    .bind(request_sha256)
+    .bind(json(response)?)
+    .bind(recorded_at)
+    .execute(&mut **connection)
+    .await
+    .map_err(storage_error)?;
+    Ok(())
+}
+
+fn member_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<ControlPlaneMember, EnterpriseScaleError> {
+    Ok(ControlPlaneMember {
+        instance_id: ControlPlaneInstanceId::from_string(row.get::<String, _>("instance_id")),
+        heartbeat_sequence: i64_to_u64(row.get("heartbeat_sequence"), "heartbeat sequence")?,
+        region: row.get("region"),
+        zone: row.get("zone"),
+        daemon_version: row.get("daemon_version"),
+        endpoint_sha256: row.get("endpoint_sha256"),
+        status: ControlPlaneMemberStatus::try_from(row.get::<String, _>("status").as_str())
+            .map_err(|error| EnterpriseScaleError::Unavailable(error.to_string()))?,
+        started_at: row.get("started_at"),
+        observed_at: row.get("observed_at"),
+    })
+}
+
+fn leadership_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<ControlPlaneLeadershipLease, EnterpriseScaleError> {
+    Ok(ControlPlaneLeadershipLease {
+        instance_id: ControlPlaneInstanceId::from_string(row.get::<String, _>("instance_id")),
+        term: i64_to_u64(row.get("term"), "leadership term")?,
+        fencing_token: i64_to_u64(row.get("fencing_token"), "leadership fencing token")?,
+        acquired_at: row.get("acquired_at"),
+        renewed_at: row.get("renewed_at"),
+        expires_at: row.get("expires_at"),
+    })
+}
+
+fn rollout_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<WorkerImageRollout, EnterpriseScaleError> {
+    Ok(WorkerImageRollout {
+        rollout_id: WorkerImageRolloutId::from_string(row.get::<String, _>("rollout_id")),
+        image_digest: row.get("image_digest"),
+        signature_bundle_sha256: row.get("signature_bundle_sha256"),
+        policy_sha256: row.get("policy_sha256"),
+        required_zones: parse_json(&row.get::<String, _>("required_zones_json"))?,
+        status: WorkerImageRolloutStatus::try_from(row.get::<String, _>("status").as_str())
+            .map_err(|error| EnterpriseScaleError::Unavailable(error.to_string()))?,
+        declared_at: row.get("declared_at"),
+        updated_at: row.get("updated_at"),
+    })
+}
+
+async fn load_rollout(
+    pool: &SqlitePool,
+    rollout_id: &WorkerImageRolloutId,
+) -> Result<WorkerImageRollout, EnterpriseScaleError> {
+    let row = sqlx::query("SELECT * FROM enterprise_worker_image_rollouts WHERE rollout_id = ?")
+        .bind(rollout_id.as_str())
+        .fetch_optional(pool)
+        .await
+        .map_err(storage_error)?
+        .ok_or_else(|| EnterpriseScaleError::NotFound("worker image rollout".to_string()))?;
+    rollout_from_row(&row)
+}
+
+fn zone_policy_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<ZonePoolPolicy, EnterpriseScaleError> {
+    Ok(ZonePoolPolicy {
+        pool_id: ZonePoolId::from_string(row.get::<String, _>("pool_id")),
+        region: row.get("region"),
+        zone: row.get("zone"),
+        resource_class: row.get("resource_class"),
+        trust_domain: row.get("trust_domain"),
+        rollout_id: WorkerImageRolloutId::from_string(row.get::<String, _>("rollout_id")),
+        minimum_replicas: i64_to_u32(row.get("minimum_replicas"), "minimum replicas")?,
+        maximum_replicas: i64_to_u32(row.get("maximum_replicas"), "maximum replicas")?,
+        target_queue_per_slot: i64_to_u32(
+            row.get("target_queue_per_slot"),
+            "target queue per slot",
+        )?,
+        scale_down_cooldown_seconds: i64_to_u32(
+            row.get("scale_down_cooldown_seconds"),
+            "scale down cooldown",
+        )?,
+        enabled: row.get::<i64, _>("enabled") != 0,
+        policy_sha256: row.get("policy_sha256"),
+        updated_at: row.get("updated_at"),
+    })
+}
+
+async fn load_zone_policy(
+    pool: &SqlitePool,
+    pool_id: &ZonePoolId,
+) -> Result<ZonePoolPolicy, EnterpriseScaleError> {
+    let row = sqlx::query("SELECT * FROM enterprise_zone_pool_policies WHERE pool_id = ?")
+        .bind(pool_id.as_str())
+        .fetch_optional(pool)
+        .await
+        .map_err(storage_error)?
+        .ok_or_else(|| EnterpriseScaleError::NotFound("zone pool policy".to_string()))?;
+    zone_policy_from_row(&row)
+}
+
+fn legal_hold_from_row(row: &sqlx::sqlite::SqliteRow) -> LegalHold {
+    LegalHold {
+        legal_hold_id: LegalHoldId::from_string(row.get::<String, _>("legal_hold_id")),
+        tenant_scope_sha256: row.get("tenant_scope_sha256"),
+        subject_kind: row.get("subject_kind"),
+        subject_sha256: row.get("subject_sha256"),
+        reason_sha256: row.get("reason_sha256"),
+        active: row.get::<i64, _>("active") != 0,
+        placed_at: row.get("placed_at"),
+        released_at: row.get("released_at"),
+    }
+}
+
+fn checkpoint_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<DisasterRecoveryCheckpoint, EnterpriseScaleError> {
+    Ok(DisasterRecoveryCheckpoint {
+        checkpoint_id: DisasterRecoveryCheckpointId::from_string(
+            row.get::<String, _>("checkpoint_id"),
+        ),
+        region: row.get("region"),
+        database_sha256: row.get("database_sha256"),
+        artifact_index_sha256: row.get("artifact_index_sha256"),
+        audit_head_sha256: row.get("audit_head_sha256"),
+        matrix_cursor_sha256: row.get("matrix_cursor_sha256"),
+        certification_head_sha256: row.get("certification_head_sha256"),
+        maximum_rpo_seconds: i64_to_u32(row.get("maximum_rpo_seconds"), "maximum RPO")?,
+        maximum_rto_seconds: i64_to_u32(row.get("maximum_rto_seconds"), "maximum RTO")?,
+        created_at: row.get("created_at"),
+    })
+}
+
+fn load_model_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<LoadModelRegistration, EnterpriseScaleError> {
+    Ok(LoadModelRegistration {
+        load_model_id: LoadModelId::from_string(row.get::<String, _>("load_model_id")),
+        version: row.get("version"),
+        content_sha256: row.get("content_sha256"),
+        dimensions: parse_json(&row.get::<String, _>("dimensions_json"))?,
+        test_window_seconds: i64_to_u32(row.get("test_window_seconds"), "test window")?,
+        tenant_count: i64_to_u32(row.get("tenant_count"), "tenant count")?,
+        project_count: i64_to_u32(row.get("project_count"), "project count")?,
+        room_count: i64_to_u32(row.get("room_count"), "room count")?,
+        matrix_events_per_second: i64_to_u32(
+            row.get("matrix_events_per_second"),
+            "Matrix events per second",
+        )?,
+        maximum_queue_depth: i64_to_u64(row.get("maximum_queue_depth"), "maximum queue depth")?,
+        noisy_neighbor_ratio_basis_points: i64_to_u32(
+            row.get("noisy_neighbor_ratio_basis_points"),
+            "noisy-neighbor ratio",
+        )?,
+        registered_at: row.get("registered_at"),
+    })
+}
+
+fn validate_heartbeat(request: &ControlPlaneHeartbeatRequest) -> Result<(), EnterpriseScaleError> {
+    let member = &request.member;
+    if !nonempty(&request.idempotency_key)
+        || member.heartbeat_sequence == 0
+        || !nonempty(&member.region)
+        || !nonempty(&member.zone)
+        || !nonempty(&member.daemon_version)
+        || !valid_sha256(&member.endpoint_sha256)
+        || member.started_at < 0
+        || member.observed_at < member.started_at
+    {
+        return Err(EnterpriseScaleError::Invalid(
+            "control-plane heartbeat fields are invalid".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_leadership_window(
+    idempotency_key: &str,
+    observed_at: i64,
+    expires_at: i64,
+) -> Result<(), EnterpriseScaleError> {
+    if !nonempty(idempotency_key)
+        || observed_at < 0
+        || expires_at <= observed_at
+        || expires_at.saturating_sub(observed_at) > 300
+    {
+        return Err(EnterpriseScaleError::Invalid(
+            "leadership lease must be positive and at most 300 seconds".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_rollout(rollout: &WorkerImageRollout) -> Result<(), EnterpriseScaleError> {
+    if !valid_image_digest(&rollout.image_digest)
+        || !valid_sha256(&rollout.signature_bundle_sha256)
+        || !valid_sha256(&rollout.policy_sha256)
+        || rollout.required_zones.is_empty()
+        || rollout.required_zones.len() > 128
+        || rollout.required_zones.iter().any(|zone| !nonempty(zone))
+        || rollout.declared_at < 0
+        || rollout.updated_at < rollout.declared_at
+    {
+        return Err(EnterpriseScaleError::Invalid(
+            "worker image rollout is invalid".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_zone_policy(policy: &ZonePoolPolicy) -> Result<(), EnterpriseScaleError> {
+    if !nonempty(&policy.region)
+        || !nonempty(&policy.zone)
+        || !nonempty(&policy.resource_class)
+        || !nonempty(&policy.trust_domain)
+        || policy.minimum_replicas == 0
+        || policy.maximum_replicas < policy.minimum_replicas
+        || policy.maximum_replicas > 100_000
+        || policy.target_queue_per_slot == 0
+        || policy.scale_down_cooldown_seconds == 0
+        || policy.scale_down_cooldown_seconds > 86_400
+        || !valid_sha256(&policy.policy_sha256)
+        || policy.updated_at < 0
+    {
+        return Err(EnterpriseScaleError::Invalid(
+            "zone pool policy is invalid".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_replication_plan(plan: &ArtifactReplicationPlan) -> Result<(), EnterpriseScaleError> {
+    if !valid_sha256(&plan.tenant_scope_sha256)
+        || !valid_sha256(&plan.artifact_sha256)
+        || !nonempty(&plan.source_region)
+        || plan.required_regions.is_empty()
+        || plan.required_regions.len() > 32
+        || !plan.required_regions.contains(&plan.source_region)
+        || plan.required_regions.iter().any(|region| !nonempty(region))
+        || plan.created_at < 0
+    {
+        return Err(EnterpriseScaleError::Invalid(
+            "artifact replication plan is invalid".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_tenant_key(key: &TenantKeyVersion) -> Result<(), EnterpriseScaleError> {
+    if !valid_sha256(&key.tenant_scope_sha256)
+        || !nonempty(&key.region)
+        || !valid_sha256(&key.kms_key_ref_sha256)
+        || !valid_sha256(&key.key_version_ref_sha256)
+        || key.activated_at < 0
+        || (key.status == TenantKeyStatus::Retired) != key.retired_at.is_some()
+        || key.retired_at.is_some_and(|retired| retired < key.activated_at)
+    {
+        return Err(EnterpriseScaleError::Invalid(
+            "tenant key reference is invalid".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_retention_policy(policy: &RetentionPolicy) -> Result<(), EnterpriseScaleError> {
+    if !valid_sha256(&policy.tenant_scope_sha256)
+        || !valid_sha256(&policy.policy_version_sha256)
+        || policy.artifact_retention_seconds == 0
+        || policy.transcript_retention_seconds == 0
+        || policy.audit_retention_seconds < policy.artifact_retention_seconds
+        || policy.minimum_replica_regions == 0
+        || policy.minimum_replica_regions > 32
+        || policy.updated_at < 0
+    {
+        return Err(EnterpriseScaleError::Invalid(
+            "retention policy is invalid".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_legal_hold(hold: &LegalHold) -> Result<(), EnterpriseScaleError> {
+    if !valid_sha256(&hold.tenant_scope_sha256)
+        || !nonempty(&hold.subject_kind)
+        || !valid_sha256(&hold.subject_sha256)
+        || !valid_sha256(&hold.reason_sha256)
+        || !hold.active
+        || hold.released_at.is_some()
+        || hold.placed_at < 0
+    {
+        return Err(EnterpriseScaleError::Invalid(
+            "new legal hold must be active and digest-only".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[async_trait::async_trait]
+impl EnterpriseScalePort for SqliteEnterpriseScaleControlPlane {
+    async fn heartbeat_control_plane(
+        &self,
+        request: &ControlPlaneHeartbeatRequest,
+    ) -> Result<ControlPlaneMember, EnterpriseScaleError> {
+        validate_heartbeat(request)?;
+        let request_sha = canonical_sha256(request)?;
+        let mut connection = begin_immediate(&self.pool).await?;
+        if let Some(replayed) = replay_receipt(
+            &mut connection,
+            "control_plane.heartbeat",
+            request.idempotency_key.trim(),
+            &request_sha,
+        )
+        .await?
+        {
+            commit(&mut connection).await?;
+            return Ok(replayed);
+        }
+        let current = sqlx::query(
+            "SELECT heartbeat_sequence FROM enterprise_control_plane_members WHERE instance_id = ?",
+        )
+        .bind(request.member.instance_id.as_str())
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(storage_error)?;
+        if current.is_some_and(|row| {
+            row.get::<i64, _>("heartbeat_sequence")
+                >= i64::try_from(request.member.heartbeat_sequence).unwrap_or(i64::MAX)
+        }) {
+            rollback(&mut connection).await;
+            return Err(EnterpriseScaleError::Conflict(
+                "control-plane heartbeat sequence did not advance".to_string(),
+            ));
+        }
+        let member = &request.member;
+        sqlx::query(
+            "INSERT INTO enterprise_control_plane_members \
+             (instance_id, heartbeat_sequence, region, zone, daemon_version, endpoint_sha256, \
+              status, started_at, observed_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(instance_id) DO UPDATE SET \
+              heartbeat_sequence = excluded.heartbeat_sequence, region = excluded.region, \
+              zone = excluded.zone, daemon_version = excluded.daemon_version, \
+              endpoint_sha256 = excluded.endpoint_sha256, status = excluded.status, \
+              observed_at = excluded.observed_at, updated_at = excluded.updated_at",
+        )
+        .bind(member.instance_id.as_str())
+        .bind(u64_to_i64(member.heartbeat_sequence, "heartbeat sequence")?)
+        .bind(member.region.trim())
+        .bind(member.zone.trim())
+        .bind(member.daemon_version.trim())
+        .bind(&member.endpoint_sha256)
+        .bind(member.status.as_str())
+        .bind(member.started_at)
+        .bind(member.observed_at)
+        .bind(member.observed_at)
+        .execute(&mut *connection)
+        .await
+        .map_err(storage_error)?;
+        insert_receipt(
+            &mut connection,
+            "control_plane.heartbeat",
+            request.idempotency_key.trim(),
+            &request_sha,
+            member,
+            member.observed_at,
+        )
+        .await?;
+        commit(&mut connection).await?;
+        Ok(member.clone())
+    }
+
+    async fn acquire_leadership(
+        &self,
+        request: &ControlPlaneLeadershipRequest,
+    ) -> Result<ControlPlaneLeadershipLease, EnterpriseScaleError> {
+        validate_leadership_window(
+            &request.idempotency_key,
+            request.observed_at,
+            request.expires_at,
+        )?;
+        let request_sha = canonical_sha256(request)?;
+        let mut connection = begin_immediate(&self.pool).await?;
+        if let Some(replayed) = replay_receipt(
+            &mut connection,
+            "leadership.acquire",
+            request.idempotency_key.trim(),
+            &request_sha,
+        )
+        .await?
+        {
+            commit(&mut connection).await?;
+            return Ok(replayed);
+        }
+        let member = sqlx::query(
+            "SELECT status, observed_at FROM enterprise_control_plane_members WHERE instance_id = ?",
+        )
+        .bind(request.instance_id.as_str())
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(storage_error)?
+        .ok_or_else(|| EnterpriseScaleError::Denied("control-plane member is unknown".to_string()))?;
+        let member_observed = member.get::<i64, _>("observed_at");
+        if member.get::<String, _>("status") != "ready"
+            || member_observed > request.observed_at
+            || request.observed_at.saturating_sub(member_observed) > 30
+        {
+            rollback(&mut connection).await;
+            return Err(EnterpriseScaleError::Denied(
+                "control-plane member is not recently ready".to_string(),
+            ));
+        }
+        let current = sqlx::query("SELECT * FROM enterprise_control_plane_leadership WHERE singleton = 1")
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(storage_error)?;
+        let lease = match current {
+            Some(row)
+                if row.get::<i64, _>("expires_at") > request.observed_at
+                    && row.get::<String, _>("instance_id") == request.instance_id.as_str() =>
+            {
+                leadership_from_row(&row)?
+            }
+            Some(row) if row.get::<i64, _>("expires_at") > request.observed_at => {
+                rollback(&mut connection).await;
+                return Err(EnterpriseScaleError::Denied(
+                    "another control-plane instance holds the leadership lease".to_string(),
+                ));
+            }
+            Some(row) => ControlPlaneLeadershipLease {
+                instance_id: request.instance_id.clone(),
+                term: i64_to_u64(row.get("term"), "leadership term")?.saturating_add(1),
+                fencing_token: i64_to_u64(row.get("fencing_token"), "leadership fence")?
+                    .saturating_add(1),
+                acquired_at: request.observed_at,
+                renewed_at: request.observed_at,
+                expires_at: request.expires_at,
+            },
+            None => ControlPlaneLeadershipLease {
+                instance_id: request.instance_id.clone(),
+                term: 1,
+                fencing_token: 1,
+                acquired_at: request.observed_at,
+                renewed_at: request.observed_at,
+                expires_at: request.expires_at,
+            },
+        };
+        sqlx::query(
+            "INSERT INTO enterprise_control_plane_leadership \
+             (singleton, instance_id, term, fencing_token, acquired_at, renewed_at, expires_at) \
+             VALUES (1, ?, ?, ?, ?, ?, ?) ON CONFLICT(singleton) DO UPDATE SET \
+             instance_id = excluded.instance_id, term = excluded.term, \
+             fencing_token = excluded.fencing_token, acquired_at = excluded.acquired_at, \
+             renewed_at = excluded.renewed_at, expires_at = excluded.expires_at",
+        )
+        .bind(lease.instance_id.as_str())
+        .bind(u64_to_i64(lease.term, "leadership term")?)
+        .bind(u64_to_i64(lease.fencing_token, "leadership fencing token")?)
+        .bind(lease.acquired_at)
+        .bind(lease.renewed_at)
+        .bind(lease.expires_at)
+        .execute(&mut *connection)
+        .await
+        .map_err(storage_error)?;
+        insert_receipt(
+            &mut connection,
+            "leadership.acquire",
+            request.idempotency_key.trim(),
+            &request_sha,
+            &lease,
+            request.observed_at,
+        )
+        .await?;
+        commit(&mut connection).await?;
+        Ok(lease)
+    }
+
+    async fn renew_leadership(
+        &self,
+        request: &ControlPlaneLeadershipRenewal,
+    ) -> Result<ControlPlaneLeadershipLease, EnterpriseScaleError> {
+        validate_leadership_window(
+            &request.idempotency_key,
+            request.observed_at,
+            request.expires_at,
+        )?;
+        if request.term == 0 || request.fencing_token == 0 {
+            return Err(EnterpriseScaleError::Invalid(
+                "leadership term and fencing token must be positive".to_string(),
+            ));
+        }
+        let request_sha = canonical_sha256(request)?;
+        let mut connection = begin_immediate(&self.pool).await?;
+        if let Some(replayed) = replay_receipt(
+            &mut connection,
+            "leadership.renew",
+            request.idempotency_key.trim(),
+            &request_sha,
+        )
+        .await?
+        {
+            commit(&mut connection).await?;
+            return Ok(replayed);
+        }
+        let row = sqlx::query("SELECT * FROM enterprise_control_plane_leadership WHERE singleton = 1")
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(storage_error)?
+            .ok_or_else(|| EnterpriseScaleError::Denied("leadership lease does not exist".to_string()))?;
+        let current = leadership_from_row(&row)?;
+        if current.instance_id != request.instance_id
+            || current.term != request.term
+            || current.fencing_token != request.fencing_token
+            || current.expires_at <= request.observed_at
+            || request.observed_at < current.renewed_at
+        {
+            rollback(&mut connection).await;
+            return Err(EnterpriseScaleError::Denied(
+                "stale leadership term, fence, owner, or expiry".to_string(),
+            ));
+        }
+        let lease = ControlPlaneLeadershipLease {
+            renewed_at: request.observed_at,
+            expires_at: request.expires_at,
+            ..current
+        };
+        sqlx::query(
+            "UPDATE enterprise_control_plane_leadership SET renewed_at = ?, expires_at = ? \
+             WHERE singleton = 1 AND instance_id = ? AND term = ? AND fencing_token = ?",
+        )
+        .bind(lease.renewed_at)
+        .bind(lease.expires_at)
+        .bind(lease.instance_id.as_str())
+        .bind(u64_to_i64(lease.term, "leadership term")?)
+        .bind(u64_to_i64(lease.fencing_token, "leadership fencing token")?)
+        .execute(&mut *connection)
+        .await
+        .map_err(storage_error)?;
+        insert_receipt(
+            &mut connection,
+            "leadership.renew",
+            request.idempotency_key.trim(),
+            &request_sha,
+            &lease,
+            request.observed_at,
+        )
+        .await?;
+        commit(&mut connection).await?;
+        Ok(lease)
+    }
+
+    async fn declare_worker_image_rollout(
+        &self,
+        rollout: &WorkerImageRollout,
+    ) -> Result<WorkerImageRollout, EnterpriseScaleError> {
+        validate_rollout(rollout)?;
+        let declaration_sha = canonical_sha256(rollout)?;
+        let existing = sqlx::query(
+            "SELECT declaration_sha256 FROM enterprise_worker_image_rollouts WHERE rollout_id = ?",
+        )
+        .bind(rollout.rollout_id.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        if let Some(row) = existing {
+            if row.get::<String, _>("declaration_sha256") != declaration_sha {
+                return Err(EnterpriseScaleError::Conflict(
+                    "rollout id was reused with a different declaration".to_string(),
+                ));
+            }
+            return load_rollout(&self.pool, &rollout.rollout_id).await;
+        }
+        sqlx::query(
+            "INSERT INTO enterprise_worker_image_rollouts \
+             (rollout_id, image_digest, signature_bundle_sha256, policy_sha256, \
+              required_zones_json, declaration_sha256, status, declared_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(rollout.rollout_id.as_str())
+        .bind(&rollout.image_digest)
+        .bind(&rollout.signature_bundle_sha256)
+        .bind(&rollout.policy_sha256)
+        .bind(json(&rollout.required_zones)?)
+        .bind(&declaration_sha)
+        .bind(rollout.status.as_str())
+        .bind(rollout.declared_at)
+        .bind(rollout.updated_at)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(rollout.clone())
+    }
+
+    async fn observe_worker_image_zone(
+        &self,
+        observation: &WorkerImageZoneObservation,
+    ) -> Result<WorkerImageRollout, EnterpriseScaleError> {
+        if !nonempty(&observation.zone)
+            || !valid_image_digest(&observation.observed_image_digest)
+            || observation.desired_workers == 0
+            || observation.ready_workers > observation.desired_workers
+            || observation.observed_at < 0
+        {
+            return Err(EnterpriseScaleError::Invalid(
+                "worker image zone observation is invalid".to_string(),
+            ));
+        }
+        let rollout = load_rollout(&self.pool, &observation.rollout_id).await?;
+        if !rollout.required_zones.contains(observation.zone.trim())
+            || rollout.status == WorkerImageRolloutStatus::RolledBack
+        {
+            return Err(EnterpriseScaleError::Denied(
+                "zone is not required by an active rollout".to_string(),
+            ));
+        }
+        let observation_sha = canonical_sha256(observation)?;
+        let mut connection = begin_immediate(&self.pool).await?;
+        let existing = sqlx::query(
+            "SELECT observed_at, observation_sha256 FROM enterprise_worker_image_zone_observations \
+             WHERE rollout_id = ? AND zone = ?",
+        )
+        .bind(observation.rollout_id.as_str())
+        .bind(observation.zone.trim())
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(storage_error)?;
+        if let Some(row) = existing {
+            let previous_at = row.get::<i64, _>("observed_at");
+            let previous_sha = row.get::<String, _>("observation_sha256");
+            if previous_sha == observation_sha {
+                commit(&mut connection).await?;
+                return load_rollout(&self.pool, &observation.rollout_id).await;
+            }
+            if previous_at >= observation.observed_at {
+                rollback(&mut connection).await;
+                return Err(EnterpriseScaleError::Conflict(
+                    "zone rollout observation did not advance".to_string(),
+                ));
+            }
+        }
+        sqlx::query(
+            "INSERT INTO enterprise_worker_image_zone_observations \
+             (rollout_id, zone, observed_image_digest, signature_verified, ready_workers, \
+              desired_workers, observed_at, observation_sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(rollout_id, zone) DO UPDATE SET \
+              observed_image_digest = excluded.observed_image_digest, \
+              signature_verified = excluded.signature_verified, ready_workers = excluded.ready_workers, \
+              desired_workers = excluded.desired_workers, observed_at = excluded.observed_at, \
+              observation_sha256 = excluded.observation_sha256",
+        )
+        .bind(observation.rollout_id.as_str())
+        .bind(observation.zone.trim())
+        .bind(&observation.observed_image_digest)
+        .bind(i64::from(observation.signature_verified))
+        .bind(i64::from(observation.ready_workers))
+        .bind(i64::from(observation.desired_workers))
+        .bind(observation.observed_at)
+        .bind(&observation_sha)
+        .execute(&mut *connection)
+        .await
+        .map_err(storage_error)?;
+        let rows = sqlx::query(
+            "SELECT zone, observed_image_digest, signature_verified, ready_workers, desired_workers \
+             FROM enterprise_worker_image_zone_observations WHERE rollout_id = ?",
+        )
+        .bind(observation.rollout_id.as_str())
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(storage_error)?;
+        let by_zone = rows
+            .iter()
+            .map(|row| (row.get::<String, _>("zone"), row))
+            .collect::<BTreeMap<_, _>>();
+        let any_degraded = by_zone.values().any(|row| {
+            row.get::<String, _>("observed_image_digest") != rollout.image_digest
+                || row.get::<i64, _>("signature_verified") == 0
+        });
+        let healthy = rollout.required_zones.iter().all(|zone| {
+            by_zone.get(zone).is_some_and(|row| {
+                row.get::<String, _>("observed_image_digest") == rollout.image_digest
+                    && row.get::<i64, _>("signature_verified") != 0
+                    && row.get::<i64, _>("ready_workers")
+                        >= row.get::<i64, _>("desired_workers")
+            })
+        });
+        let status = if healthy {
+            WorkerImageRolloutStatus::Healthy
+        } else if any_degraded {
+            WorkerImageRolloutStatus::Degraded
+        } else {
+            WorkerImageRolloutStatus::Progressing
+        };
+        sqlx::query(
+            "UPDATE enterprise_worker_image_rollouts SET status = ?, updated_at = ? WHERE rollout_id = ?",
+        )
+        .bind(status.as_str())
+        .bind(observation.observed_at)
+        .bind(observation.rollout_id.as_str())
+        .execute(&mut *connection)
+        .await
+        .map_err(storage_error)?;
+        commit(&mut connection).await?;
+        load_rollout(&self.pool, &observation.rollout_id).await
+    }
+
+    async fn upsert_zone_pool(
+        &self,
+        policy: &ZonePoolPolicy,
+    ) -> Result<ZonePoolPolicy, EnterpriseScaleError> {
+        validate_zone_policy(policy)?;
+        let rollout = load_rollout(&self.pool, &policy.rollout_id).await?;
+        if !rollout.required_zones.contains(policy.zone.trim())
+            || rollout.status == WorkerImageRolloutStatus::RolledBack
+        {
+            return Err(EnterpriseScaleError::Denied(
+                "zone pool must reference an active rollout that includes its zone".to_string(),
+            ));
+        }
+        let existing = sqlx::query("SELECT * FROM enterprise_zone_pool_policies WHERE pool_id = ?")
+            .bind(policy.pool_id.as_str())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage_error)?;
+        if let Some(row) = existing {
+            let current = zone_policy_from_row(&row)?;
+            if current.region != policy.region
+                || current.zone != policy.zone
+                || current.resource_class != policy.resource_class
+                || current.trust_domain != policy.trust_domain
+                || current.updated_at > policy.updated_at
+            {
+                return Err(EnterpriseScaleError::Conflict(
+                    "zone pool identity or version conflicts with durable state".to_string(),
+                ));
+            }
+            if current == *policy {
+                return Ok(current);
+            }
+        }
+        sqlx::query(
+            "INSERT INTO enterprise_zone_pool_policies \
+             (pool_id, region, zone, resource_class, trust_domain, rollout_id, minimum_replicas, \
+              maximum_replicas, target_queue_per_slot, scale_down_cooldown_seconds, enabled, \
+              policy_sha256, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(pool_id) DO UPDATE SET rollout_id = excluded.rollout_id, \
+              minimum_replicas = excluded.minimum_replicas, maximum_replicas = excluded.maximum_replicas, \
+              target_queue_per_slot = excluded.target_queue_per_slot, \
+              scale_down_cooldown_seconds = excluded.scale_down_cooldown_seconds, \
+              enabled = excluded.enabled, policy_sha256 = excluded.policy_sha256, \
+              updated_at = excluded.updated_at",
+        )
+        .bind(policy.pool_id.as_str())
+        .bind(policy.region.trim())
+        .bind(policy.zone.trim())
+        .bind(policy.resource_class.trim())
+        .bind(policy.trust_domain.trim())
+        .bind(policy.rollout_id.as_str())
+        .bind(i64::from(policy.minimum_replicas))
+        .bind(i64::from(policy.maximum_replicas))
+        .bind(i64::from(policy.target_queue_per_slot))
+        .bind(i64::from(policy.scale_down_cooldown_seconds))
+        .bind(i64::from(policy.enabled))
+        .bind(&policy.policy_sha256)
+        .bind(policy.updated_at)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(policy.clone())
+    }
+
+    async fn recommend_capacity(
+        &self,
+        observation: &CapacityObservation,
+    ) -> Result<AutoscalingRecommendation, EnterpriseScaleError> {
+        if observation.observed_at < 0
+            || observation.available_slots > observation.total_slots
+            || observation.last_scale_at.is_some_and(|time| time > observation.observed_at)
+        {
+            return Err(EnterpriseScaleError::Invalid(
+                "capacity observation is invalid".to_string(),
+            ));
+        }
+        let policy = load_zone_policy(&self.pool, &observation.pool_id).await?;
+        let (mut desired, mut reason) = if !policy.enabled {
+            (0, "pool_disabled")
+        } else {
+            let slots_per_replica = if observation.ready_replicas == 0 {
+                1
+            } else {
+                observation
+                    .total_slots
+                    .checked_div(observation.ready_replicas)
+                    .unwrap_or(1)
+                    .max(1)
+            };
+            let target = u64::from(policy.target_queue_per_slot);
+            let queued_slots = observation.queue_depth.saturating_add(target - 1) / target;
+            let demanded_slots = queued_slots.saturating_add(observation.running_tasks);
+            let replicas = demanded_slots
+                .saturating_add(u64::from(slots_per_replica) - 1)
+                / u64::from(slots_per_replica);
+            let replicas = u32::try_from(replicas).unwrap_or(u32::MAX).clamp(
+                policy.minimum_replicas,
+                policy.maximum_replicas,
+            );
+            let reason = if replicas > observation.ready_replicas {
+                "queue_pressure"
+            } else if replicas < observation.ready_replicas {
+                "excess_capacity"
+            } else {
+                "capacity_balanced"
+            };
+            (replicas, reason)
+        };
+        if desired < observation.ready_replicas
+            && observation.last_scale_at.is_some_and(|last| {
+                observation.observed_at.saturating_sub(last)
+                    < i64::from(policy.scale_down_cooldown_seconds)
+            })
+        {
+            desired = observation.ready_replicas;
+            reason = "scale_down_cooldown";
+        }
+        let digest_input = (
+            observation,
+            &policy.policy_sha256,
+            desired,
+            reason,
+        );
+        let recommendation = AutoscalingRecommendation {
+            pool_id: observation.pool_id.clone(),
+            current_replicas: observation.ready_replicas,
+            desired_replicas: desired,
+            queue_depth: observation.queue_depth,
+            reason_code: reason.to_string(),
+            recommendation_sha256: canonical_sha256(&digest_input)?,
+            observed_at: observation.observed_at,
+        };
+        sqlx::query(
+            "INSERT OR IGNORE INTO enterprise_autoscaling_recommendations \
+             (pool_id, current_replicas, desired_replicas, queue_depth, running_tasks, total_slots, \
+              available_slots, reason_code, recommendation_sha256, observed_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(recommendation.pool_id.as_str())
+        .bind(i64::from(recommendation.current_replicas))
+        .bind(i64::from(recommendation.desired_replicas))
+        .bind(u64_to_i64(recommendation.queue_depth, "queue depth")?)
+        .bind(u64_to_i64(observation.running_tasks, "running tasks")?)
+        .bind(i64::from(observation.total_slots))
+        .bind(i64::from(observation.available_slots))
+        .bind(&recommendation.reason_code)
+        .bind(&recommendation.recommendation_sha256)
+        .bind(recommendation.observed_at)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(recommendation)
+    }
+
+    async fn create_replication_plan(
+        &self,
+        plan: &ArtifactReplicationPlan,
+    ) -> Result<ArtifactReplicationPlan, EnterpriseScaleError> {
+        validate_replication_plan(plan)?;
+        let plan_sha = canonical_sha256(plan)?;
+        let existing = sqlx::query(
+            "SELECT plan_sha256 FROM enterprise_artifact_replication_plans WHERE replication_id = ?",
+        )
+        .bind(plan.replication_id.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        if let Some(row) = existing {
+            if row.get::<String, _>("plan_sha256") != plan_sha {
+                return Err(EnterpriseScaleError::Conflict(
+                    "replication id was reused with a different plan".to_string(),
+                ));
+            }
+            return Ok(plan.clone());
+        }
+        sqlx::query(
+            "INSERT INTO enterprise_artifact_replication_plans \
+             (replication_id, execution_artifact_id, tenant_scope_sha256, artifact_sha256, \
+              source_region, required_regions_json, plan_sha256, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(plan.replication_id.as_str())
+        .bind(plan.execution_artifact_id.as_str())
+        .bind(&plan.tenant_scope_sha256)
+        .bind(&plan.artifact_sha256)
+        .bind(plan.source_region.trim())
+        .bind(json(&plan.required_regions)?)
+        .bind(&plan_sha)
+        .bind(plan.created_at)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(plan.clone())
+    }
+
+    async fn acknowledge_artifact_replica(
+        &self,
+        acknowledgement: &ArtifactReplicaAcknowledgement,
+    ) -> Result<ArtifactReplicaAcknowledgement, EnterpriseScaleError> {
+        if !nonempty(&acknowledgement.region)
+            || !valid_sha256(&acknowledgement.artifact_sha256)
+            || !valid_sha256(&acknowledgement.object_ref_sha256)
+            || acknowledgement.acknowledged_at < 0
+        {
+            return Err(EnterpriseScaleError::Invalid(
+                "artifact replica acknowledgement is invalid".to_string(),
+            ));
+        }
+        let plan_row = sqlx::query(
+            "SELECT tenant_scope_sha256, artifact_sha256, required_regions_json \
+             FROM enterprise_artifact_replication_plans WHERE replication_id = ?",
+        )
+        .bind(acknowledgement.replication_id.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?
+        .ok_or_else(|| EnterpriseScaleError::NotFound("artifact replication plan".to_string()))?;
+        let required_regions: BTreeSet<String> =
+            parse_json(&plan_row.get::<String, _>("required_regions_json"))?;
+        if plan_row.get::<String, _>("artifact_sha256") != acknowledgement.artifact_sha256
+            || !required_regions.contains(acknowledgement.region.trim())
+        {
+            return Err(EnterpriseScaleError::Denied(
+                "replica digest or region does not match its immutable plan".to_string(),
+            ));
+        }
+        let key_row = sqlx::query(
+            "SELECT tenant_scope_sha256, region, status FROM enterprise_tenant_keys WHERE tenant_key_id = ?",
+        )
+        .bind(acknowledgement.tenant_key_id.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?
+        .ok_or_else(|| EnterpriseScaleError::NotFound("tenant key version".to_string()))?;
+        if key_row.get::<String, _>("tenant_scope_sha256")
+            != plan_row.get::<String, _>("tenant_scope_sha256")
+            || key_row.get::<String, _>("region") != acknowledgement.region
+            || key_row.get::<String, _>("status") != "active"
+        {
+            return Err(EnterpriseScaleError::Denied(
+                "replica is not encrypted with the active tenant key for its region".to_string(),
+            ));
+        }
+        let acknowledgement_sha = canonical_sha256(acknowledgement)?;
+        let existing = sqlx::query(
+            "SELECT acknowledgement_sha256 FROM enterprise_artifact_replica_acknowledgements \
+             WHERE replication_id = ? AND region = ?",
+        )
+        .bind(acknowledgement.replication_id.as_str())
+        .bind(acknowledgement.region.trim())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        if let Some(row) = existing {
+            if row.get::<String, _>("acknowledgement_sha256") != acknowledgement_sha {
+                return Err(EnterpriseScaleError::Conflict(
+                    "replica region already has a different acknowledgement".to_string(),
+                ));
+            }
+            return Ok(acknowledgement.clone());
+        }
+        sqlx::query(
+            "INSERT INTO enterprise_artifact_replica_acknowledgements \
+             (replication_id, region, artifact_sha256, object_ref_sha256, tenant_key_id, \
+              status, acknowledgement_sha256, acknowledged_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(acknowledgement.replication_id.as_str())
+        .bind(acknowledgement.region.trim())
+        .bind(&acknowledgement.artifact_sha256)
+        .bind(&acknowledgement.object_ref_sha256)
+        .bind(acknowledgement.tenant_key_id.as_str())
+        .bind(acknowledgement.status.as_str())
+        .bind(&acknowledgement_sha)
+        .bind(acknowledgement.acknowledged_at)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(acknowledgement.clone())
+    }
+
+    async fn register_tenant_key(
+        &self,
+        key: &TenantKeyVersion,
+    ) -> Result<TenantKeyVersion, EnterpriseScaleError> {
+        validate_tenant_key(key)?;
+        let registration_sha = canonical_sha256(key)?;
+        let existing = sqlx::query(
+            "SELECT registration_sha256 FROM enterprise_tenant_keys WHERE tenant_key_id = ?",
+        )
+        .bind(key.tenant_key_id.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        if let Some(row) = existing {
+            if row.get::<String, _>("registration_sha256") != registration_sha {
+                return Err(EnterpriseScaleError::Conflict(
+                    "tenant key id was reused with different metadata".to_string(),
+                ));
+            }
+            return Ok(key.clone());
+        }
+        sqlx::query(
+            "INSERT INTO enterprise_tenant_keys \
+             (tenant_key_id, tenant_scope_sha256, region, kms_key_ref_sha256, \
+              key_version_ref_sha256, status, registration_sha256, activated_at, retired_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(key.tenant_key_id.as_str())
+        .bind(&key.tenant_scope_sha256)
+        .bind(key.region.trim())
+        .bind(&key.kms_key_ref_sha256)
+        .bind(&key.key_version_ref_sha256)
+        .bind(key.status.as_str())
+        .bind(&registration_sha)
+        .bind(key.activated_at)
+        .bind(key.retired_at)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(key.clone())
+    }
+
+    async fn set_retention_policy(
+        &self,
+        policy: &RetentionPolicy,
+    ) -> Result<RetentionPolicy, EnterpriseScaleError> {
+        validate_retention_policy(policy)?;
+        let existing = sqlx::query(
+            "SELECT policy_version_sha256, updated_at FROM enterprise_retention_policies \
+             WHERE tenant_scope_sha256 = ?",
+        )
+        .bind(&policy.tenant_scope_sha256)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        if let Some(row) = existing {
+            let current_version = row.get::<String, _>("policy_version_sha256");
+            let current_time = row.get::<i64, _>("updated_at");
+            if current_version == policy.policy_version_sha256 && current_time == policy.updated_at {
+                return Ok(policy.clone());
+            }
+            if current_time >= policy.updated_at {
+                return Err(EnterpriseScaleError::Conflict(
+                    "retention policy version did not advance".to_string(),
+                ));
+            }
+        }
+        sqlx::query(
+            "INSERT INTO enterprise_retention_policies \
+             (tenant_scope_sha256, policy_version_sha256, artifact_retention_seconds, \
+              transcript_retention_seconds, audit_retention_seconds, minimum_replica_regions, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(tenant_scope_sha256) DO UPDATE SET \
+              policy_version_sha256 = excluded.policy_version_sha256, \
+              artifact_retention_seconds = excluded.artifact_retention_seconds, \
+              transcript_retention_seconds = excluded.transcript_retention_seconds, \
+              audit_retention_seconds = excluded.audit_retention_seconds, \
+              minimum_replica_regions = excluded.minimum_replica_regions, updated_at = excluded.updated_at",
+        )
+        .bind(&policy.tenant_scope_sha256)
+        .bind(&policy.policy_version_sha256)
+        .bind(u64_to_i64(policy.artifact_retention_seconds, "artifact retention")?)
+        .bind(u64_to_i64(policy.transcript_retention_seconds, "transcript retention")?)
+        .bind(u64_to_i64(policy.audit_retention_seconds, "audit retention")?)
+        .bind(i64::from(policy.minimum_replica_regions))
+        .bind(policy.updated_at)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(policy.clone())
+    }
+
+    async fn place_legal_hold(&self, hold: &LegalHold) -> Result<LegalHold, EnterpriseScaleError> {
+        validate_legal_hold(hold)?;
+        let hold_sha = canonical_sha256(hold)?;
+        let existing = sqlx::query(
+            "SELECT hold_sha256 FROM enterprise_legal_holds WHERE legal_hold_id = ?",
+        )
+        .bind(hold.legal_hold_id.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        if let Some(row) = existing {
+            if row.get::<String, _>("hold_sha256") != hold_sha {
+                return Err(EnterpriseScaleError::Conflict(
+                    "legal hold id was reused with different scope".to_string(),
+                ));
+            }
+            return Ok(hold.clone());
+        }
+        sqlx::query(
+            "INSERT INTO enterprise_legal_holds \
+             (legal_hold_id, tenant_scope_sha256, subject_kind, subject_sha256, reason_sha256, \
+              hold_sha256, active, placed_at, released_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL)",
+        )
+        .bind(hold.legal_hold_id.as_str())
+        .bind(&hold.tenant_scope_sha256)
+        .bind(hold.subject_kind.trim())
+        .bind(&hold.subject_sha256)
+        .bind(&hold.reason_sha256)
+        .bind(&hold_sha)
+        .bind(hold.placed_at)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(hold.clone())
+    }
+
+    async fn release_legal_hold(
+        &self,
+        legal_hold_id: &LegalHoldId,
+        released_at: i64,
+    ) -> Result<LegalHold, EnterpriseScaleError> {
+        let row = sqlx::query("SELECT * FROM enterprise_legal_holds WHERE legal_hold_id = ?")
+            .bind(legal_hold_id.as_str())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage_error)?
+            .ok_or_else(|| EnterpriseScaleError::NotFound("legal hold".to_string()))?;
+        let current = legal_hold_from_row(&row);
+        if !current.active {
+            if current.released_at == Some(released_at) {
+                return Ok(current);
+            }
+            return Err(EnterpriseScaleError::Conflict(
+                "legal hold is already released at a different time".to_string(),
+            ));
+        }
+        if released_at < current.placed_at {
+            return Err(EnterpriseScaleError::Invalid(
+                "legal hold release predates placement".to_string(),
+            ));
+        }
+        sqlx::query(
+            "UPDATE enterprise_legal_holds SET active = 0, released_at = ? \
+             WHERE legal_hold_id = ? AND active = 1",
+        )
+        .bind(released_at)
+        .bind(legal_hold_id.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(LegalHold {
+            active: false,
+            released_at: Some(released_at),
+            ..current
+        })
+    }
+
+    async fn decide_retention(
+        &self,
+        tenant_scope_sha256: &str,
+        subject_kind: &str,
+        subject_sha256: &str,
+        created_at: i64,
+        observed_at: i64,
+    ) -> Result<RetentionDecision, EnterpriseScaleError> {
+        if !valid_sha256(tenant_scope_sha256)
+            || !nonempty(subject_kind)
+            || !valid_sha256(subject_sha256)
+            || created_at < 0
+            || observed_at < created_at
+        {
+            return Err(EnterpriseScaleError::Invalid(
+                "retention decision input is invalid".to_string(),
+            ));
+        }
+        let policy_row = sqlx::query(
+            "SELECT * FROM enterprise_retention_policies WHERE tenant_scope_sha256 = ?",
+        )
+        .bind(tenant_scope_sha256)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?
+        .ok_or_else(|| EnterpriseScaleError::Denied("retention policy is unavailable".to_string()))?;
+        let retention_seconds = match subject_kind.trim() {
+            "artifact" => policy_row.get::<i64, _>("artifact_retention_seconds"),
+            "transcript" => policy_row.get::<i64, _>("transcript_retention_seconds"),
+            "audit" => policy_row.get::<i64, _>("audit_retention_seconds"),
+            _ => {
+                return Err(EnterpriseScaleError::Invalid(
+                    "retention subject kind must be artifact, transcript, or audit".to_string(),
+                ));
+            }
+        };
+        let delete_after = created_at.checked_add(retention_seconds).ok_or_else(|| {
+            EnterpriseScaleError::Invalid("retention deadline overflow".to_string())
+        })?;
+        let hold_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM enterprise_legal_holds WHERE tenant_scope_sha256 = ? \
+             AND subject_kind = ? AND subject_sha256 = ? AND active = 1",
+        )
+        .bind(tenant_scope_sha256)
+        .bind(subject_kind.trim())
+        .bind(subject_sha256)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        let replica_count = if subject_kind.trim() == "artifact" {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(DISTINCT ack.region) FROM enterprise_artifact_replica_acknowledgements AS ack \
+                 JOIN enterprise_artifact_replication_plans AS plan ON plan.replication_id = ack.replication_id \
+                 WHERE plan.tenant_scope_sha256 = ? AND plan.artifact_sha256 = ? AND ack.status = 'available'",
+            )
+            .bind(tenant_scope_sha256)
+            .bind(subject_sha256)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(storage_error)?
+        } else {
+            policy_row.get::<i64, _>("minimum_replica_regions")
+        };
+        let required = policy_row.get::<i64, _>("minimum_replica_regions");
+        let disposition = if hold_count > 0 {
+            RetentionDisposition::LegalHold
+        } else if observed_at < delete_after {
+            RetentionDisposition::Retain
+        } else if replica_count < required {
+            RetentionDisposition::ReplicationPending
+        } else {
+            RetentionDisposition::DeleteEligible
+        };
+        Ok(RetentionDecision {
+            tenant_scope_sha256: tenant_scope_sha256.to_string(),
+            subject_kind: subject_kind.trim().to_string(),
+            subject_sha256: subject_sha256.to_string(),
+            disposition,
+            policy_version_sha256: policy_row.get("policy_version_sha256"),
+            delete_after,
+            active_legal_holds: i64_to_u32(hold_count, "active legal holds")?,
+            available_replica_regions: i64_to_u32(replica_count, "replica regions")?,
+            required_replica_regions: i64_to_u32(required, "required replica regions")?,
+            observed_at,
+        })
+    }
+
+    async fn record_dr_checkpoint(
+        &self,
+        checkpoint: &DisasterRecoveryCheckpoint,
+    ) -> Result<DisasterRecoveryCheckpoint, EnterpriseScaleError> {
+        let digests = [
+            &checkpoint.database_sha256,
+            &checkpoint.artifact_index_sha256,
+            &checkpoint.audit_head_sha256,
+            &checkpoint.matrix_cursor_sha256,
+            &checkpoint.certification_head_sha256,
+        ];
+        if !nonempty(&checkpoint.region)
+            || digests.into_iter().any(|digest| !valid_sha256(digest))
+            || checkpoint.maximum_rpo_seconds == 0
+            || checkpoint.maximum_rto_seconds == 0
+            || checkpoint.created_at < 0
+        {
+            return Err(EnterpriseScaleError::Invalid(
+                "disaster recovery checkpoint is invalid".to_string(),
+            ));
+        }
+        let checkpoint_sha = canonical_sha256(checkpoint)?;
+        let existing = sqlx::query(
+            "SELECT checkpoint_sha256 FROM enterprise_dr_checkpoints WHERE checkpoint_id = ?",
+        )
+        .bind(checkpoint.checkpoint_id.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        if let Some(row) = existing {
+            if row.get::<String, _>("checkpoint_sha256") != checkpoint_sha {
+                return Err(EnterpriseScaleError::Conflict(
+                    "DR checkpoint id was reused with different state".to_string(),
+                ));
+            }
+            return Ok(checkpoint.clone());
+        }
+        sqlx::query(
+            "INSERT INTO enterprise_dr_checkpoints \
+             (checkpoint_id, region, database_sha256, artifact_index_sha256, audit_head_sha256, \
+              matrix_cursor_sha256, certification_head_sha256, checkpoint_sha256, \
+              maximum_rpo_seconds, maximum_rto_seconds, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(checkpoint.checkpoint_id.as_str())
+        .bind(checkpoint.region.trim())
+        .bind(&checkpoint.database_sha256)
+        .bind(&checkpoint.artifact_index_sha256)
+        .bind(&checkpoint.audit_head_sha256)
+        .bind(&checkpoint.matrix_cursor_sha256)
+        .bind(&checkpoint.certification_head_sha256)
+        .bind(&checkpoint_sha)
+        .bind(i64::from(checkpoint.maximum_rpo_seconds))
+        .bind(i64::from(checkpoint.maximum_rto_seconds))
+        .bind(checkpoint.created_at)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(checkpoint.clone())
+    }
+
+    async fn record_dr_drill(
+        &self,
+        drill: &DisasterRecoveryDrill,
+    ) -> Result<DisasterRecoveryDrill, EnterpriseScaleError> {
+        if !nonempty(&drill.recovery_region)
+            || !valid_sha256(&drill.evidence_sha256)
+            || drill.completed_at < 0
+            || (drill.status == DisasterRecoveryDrillStatus::Passed
+                && (!drill.lease_fencing_verified || !drill.accepted_state_verified))
+        {
+            return Err(EnterpriseScaleError::Invalid(
+                "disaster recovery drill is invalid".to_string(),
+            ));
+        }
+        let checkpoint = sqlx::query(
+            "SELECT maximum_rpo_seconds, maximum_rto_seconds FROM enterprise_dr_checkpoints \
+             WHERE checkpoint_id = ?",
+        )
+        .bind(drill.checkpoint_id.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?
+        .ok_or_else(|| EnterpriseScaleError::NotFound("DR checkpoint".to_string()))?;
+        let within_objective = i64::from(drill.measured_rpo_seconds)
+            <= checkpoint.get::<i64, _>("maximum_rpo_seconds")
+            && i64::from(drill.measured_rto_seconds)
+                <= checkpoint.get::<i64, _>("maximum_rto_seconds");
+        if (drill.status == DisasterRecoveryDrillStatus::Passed) != within_objective {
+            return Err(EnterpriseScaleError::Invalid(
+                "DR drill status does not match its RPO/RTO measurements".to_string(),
+            ));
+        }
+        let drill_sha = canonical_sha256(drill)?;
+        let existing = sqlx::query("SELECT drill_sha256 FROM enterprise_dr_drills WHERE drill_id = ?")
+            .bind(drill.drill_id.as_str())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage_error)?;
+        if let Some(row) = existing {
+            if row.get::<String, _>("drill_sha256") != drill_sha {
+                return Err(EnterpriseScaleError::Conflict(
+                    "DR drill id was reused with different evidence".to_string(),
+                ));
+            }
+            return Ok(drill.clone());
+        }
+        sqlx::query(
+            "INSERT INTO enterprise_dr_drills \
+             (drill_id, checkpoint_id, recovery_region, measured_rpo_seconds, measured_rto_seconds, \
+              lease_fencing_verified, accepted_state_verified, status, evidence_sha256, \
+              drill_sha256, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(drill.drill_id.as_str())
+        .bind(drill.checkpoint_id.as_str())
+        .bind(drill.recovery_region.trim())
+        .bind(i64::from(drill.measured_rpo_seconds))
+        .bind(i64::from(drill.measured_rto_seconds))
+        .bind(i64::from(drill.lease_fencing_verified))
+        .bind(i64::from(drill.accepted_state_verified))
+        .bind(drill.status.as_str())
+        .bind(&drill.evidence_sha256)
+        .bind(&drill_sha)
+        .bind(drill.completed_at)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(drill.clone())
+    }
+
+    async fn register_load_model(
+        &self,
+        model: &LoadModelRegistration,
+    ) -> Result<LoadModelRegistration, EnterpriseScaleError> {
+        let has_dimensions = REQUIRED_LOAD_DIMENSIONS
+            .iter()
+            .all(|required| model.dimensions.contains(*required));
+        if !nonempty(&model.version)
+            || !valid_sha256(&model.content_sha256)
+            || !has_dimensions
+            || model.dimensions.len() > 64
+            || model.test_window_seconds == 0
+            || model.tenant_count == 0
+            || model.project_count == 0
+            || model.room_count == 0
+            || model.matrix_events_per_second == 0
+            || model.maximum_queue_depth == 0
+            || model.noisy_neighbor_ratio_basis_points > 10_000
+            || model.registered_at < 0
+        {
+            return Err(EnterpriseScaleError::Invalid(
+                "factory load model is incomplete or invalid".to_string(),
+            ));
+        }
+        let registration_sha = canonical_sha256(model)?;
+        let existing = sqlx::query(
+            "SELECT registration_sha256 FROM enterprise_load_models \
+             WHERE load_model_id = ? OR version = ?",
+        )
+        .bind(model.load_model_id.as_str())
+        .bind(model.version.trim())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        if let Some(row) = existing {
+            if row.get::<String, _>("registration_sha256") != registration_sha {
+                return Err(EnterpriseScaleError::Conflict(
+                    "load model id or version was reused with different content".to_string(),
+                ));
+            }
+            return Ok(model.clone());
+        }
+        sqlx::query(
+            "INSERT INTO enterprise_load_models \
+             (load_model_id, version, content_sha256, dimensions_json, test_window_seconds, \
+              tenant_count, project_count, room_count, matrix_events_per_second, \
+              maximum_queue_depth, noisy_neighbor_ratio_basis_points, registration_sha256, registered_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(model.load_model_id.as_str())
+        .bind(model.version.trim())
+        .bind(&model.content_sha256)
+        .bind(json(&model.dimensions)?)
+        .bind(i64::from(model.test_window_seconds))
+        .bind(i64::from(model.tenant_count))
+        .bind(i64::from(model.project_count))
+        .bind(i64::from(model.room_count))
+        .bind(i64::from(model.matrix_events_per_second))
+        .bind(u64_to_i64(model.maximum_queue_depth, "maximum queue depth")?)
+        .bind(i64::from(model.noisy_neighbor_ratio_basis_points))
+        .bind(&registration_sha)
+        .bind(model.registered_at)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(model.clone())
+    }
+
+    async fn record_service_level(
+        &self,
+        measurement: &ServiceLevelMeasurement,
+    ) -> Result<ServiceLevelMeasurement, EnterpriseScaleError> {
+        if !nonempty(&measurement.idempotency_key)
+            || !valid_sha256(&measurement.tenant_scope_sha256)
+            || !nonempty(&measurement.metric)
+            || measurement.target_units == 0
+            || measurement.window_started_at < 0
+            || measurement.window_ends_at <= measurement.window_started_at
+            || measurement.measured_at < measurement.window_started_at
+            || measurement.measured_at > measurement.window_ends_at
+        {
+            return Err(EnterpriseScaleError::Invalid(
+                "service-level measurement is invalid".to_string(),
+            ));
+        }
+        let measurement_sha = canonical_sha256(measurement)?;
+        let existing = sqlx::query(
+            "SELECT measurement_sha256 FROM enterprise_service_level_measurements \
+             WHERE idempotency_key = ?",
+        )
+        .bind(measurement.idempotency_key.trim())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        if let Some(row) = existing {
+            if row.get::<String, _>("measurement_sha256") != measurement_sha {
+                return Err(EnterpriseScaleError::Conflict(
+                    "service-level idempotency key was reused".to_string(),
+                ));
+            }
+            return Ok(measurement.clone());
+        }
+        sqlx::query(
+            "INSERT INTO enterprise_service_level_measurements \
+             (idempotency_key, tenant_scope_sha256, metric, target_units, observed_units, \
+              error_budget_units, consumed_budget_units, window_started_at, window_ends_at, \
+              measured_at, status, measurement_sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(measurement.idempotency_key.trim())
+        .bind(&measurement.tenant_scope_sha256)
+        .bind(measurement.metric.trim())
+        .bind(u64_to_i64(measurement.target_units, "SLO target")?)
+        .bind(u64_to_i64(measurement.observed_units, "SLO observation")?)
+        .bind(u64_to_i64(measurement.error_budget_units, "error budget")?)
+        .bind(u64_to_i64(measurement.consumed_budget_units, "consumed budget")?)
+        .bind(measurement.window_started_at)
+        .bind(measurement.window_ends_at)
+        .bind(measurement.measured_at)
+        .bind(measurement.status().as_str())
+        .bind(&measurement_sha)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(measurement.clone())
+    }
+
+    async fn operational_snapshot(
+        &self,
+        observed_at: i64,
+    ) -> Result<EnterpriseOperationalSnapshot, EnterpriseScaleError> {
+        if observed_at < 0 {
+            return Err(EnterpriseScaleError::Invalid(
+                "snapshot observation time is invalid".to_string(),
+            ));
+        }
+        let leadership = sqlx::query("SELECT * FROM enterprise_control_plane_leadership WHERE singleton = 1")
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage_error)?
+            .map(|row| leadership_from_row(&row))
+            .transpose()?;
+        let member_rows = sqlx::query(
+            "SELECT * FROM enterprise_control_plane_members ORDER BY region, zone, instance_id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        let members = member_rows
+            .iter()
+            .map(member_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        let pool_rows = sqlx::query(
+            "SELECT policy.*, \
+              COALESCE((SELECT COUNT(*) FROM enterprise_worker_availability AS worker \
+                WHERE worker.region = policy.region AND worker.zone = policy.zone \
+                  AND worker.resource_class = policy.resource_class AND worker.worker_status = 'online'), 0) AS ready_workers, \
+              COALESCE((SELECT SUM(available_slots) FROM enterprise_worker_availability AS worker \
+                WHERE worker.region = policy.region AND worker.zone = policy.zone \
+                  AND worker.resource_class = policy.resource_class AND worker.worker_status = 'online'), 0) AS available_slots, \
+              COALESCE((SELECT COUNT(*) FROM enterprise_fleet_queue AS queue \
+                WHERE queue.resource_class = policy.resource_class AND queue.status IN ('queued','retry_wait')), 0) AS queued_tasks, \
+              (SELECT desired_replicas FROM enterprise_autoscaling_recommendations AS scale \
+                WHERE scale.pool_id = policy.pool_id ORDER BY scale.observed_at DESC, scale.sequence DESC LIMIT 1) AS desired_replicas \
+             FROM enterprise_zone_pool_policies AS policy WHERE policy.enabled = 1 \
+             ORDER BY policy.region, policy.zone, policy.pool_id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        let zones = pool_rows
+            .iter()
+            .map(|row| {
+                Ok(EnterpriseZoneStatus {
+                    pool_id: ZonePoolId::from_string(row.get::<String, _>("pool_id")),
+                    region: row.get("region"),
+                    zone: row.get("zone"),
+                    ready_workers: i64_to_u32(row.get("ready_workers"), "ready workers")?,
+                    available_slots: i64_to_u32(row.get("available_slots"), "available slots")?,
+                    queued_tasks: i64_to_u64(row.get("queued_tasks"), "queued tasks")?,
+                    last_desired_replicas: row
+                        .get::<Option<i64>, _>("desired_replicas")
+                        .map(|value| i64_to_u32(value, "desired replicas"))
+                        .transpose()?,
+                })
+            })
+            .collect::<Result<Vec<_>, EnterpriseScaleError>>()?;
+        let queue_counts = sqlx::query(
+            "SELECT \
+              SUM(CASE WHEN status IN ('queued','retry_wait') THEN 1 ELSE 0 END) AS queued, \
+              SUM(CASE WHEN status = 'acquired' THEN 1 ELSE 0 END) AS acquired, \
+              SUM(CASE WHEN status = 'dead_letter' THEN 1 ELSE 0 END) AS dead_letter \
+             FROM enterprise_fleet_queue",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        let rollout_counts = sqlx::query(
+            "SELECT \
+              SUM(CASE WHEN status IN ('declared','progressing','healthy','degraded') THEN 1 ELSE 0 END) AS active, \
+              SUM(CASE WHEN status = 'degraded' THEN 1 ELSE 0 END) AS degraded \
+             FROM enterprise_worker_image_rollouts",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        let pending_replica_regions = sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(SUM(json_array_length(plan.required_regions_json) - \
+              (SELECT COUNT(*) FROM enterprise_artifact_replica_acknowledgements AS ack \
+               WHERE ack.replication_id = plan.replication_id AND ack.status = 'available')), 0) \
+             FROM enterprise_artifact_replication_plans AS plan",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        let active_legal_holds = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM enterprise_legal_holds WHERE active = 1",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        let slo_rows = sqlx::query(
+            "SELECT \
+              SUM(CASE WHEN status = 'budget_warning' THEN 1 ELSE 0 END) AS warnings, \
+              SUM(CASE WHEN status = 'breached' THEN 1 ELSE 0 END) AS breaches \
+             FROM enterprise_service_level_measurements WHERE window_ends_at >= ?",
+        )
+        .bind(observed_at)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        let latest_dr_checkpoint = sqlx::query(
+            "SELECT * FROM enterprise_dr_checkpoints ORDER BY created_at DESC, checkpoint_id DESC LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?
+        .map(|row| checkpoint_from_row(&row))
+        .transpose()?;
+        let load_model = sqlx::query(
+            "SELECT * FROM enterprise_load_models ORDER BY registered_at DESC, load_model_id DESC LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?
+        .map(|row| load_model_from_row(&row))
+        .transpose()?;
+        let count = |row: &sqlx::sqlite::SqliteRow, name: &str| -> Result<u64, EnterpriseScaleError> {
+            i64_to_u64(row.get::<Option<i64>, _>(name).unwrap_or(0), name)
+        };
+        Ok(EnterpriseOperationalSnapshot {
+            observed_at,
+            leadership,
+            members,
+            zones,
+            queued_tasks: count(&queue_counts, "queued")?,
+            acquired_tasks: count(&queue_counts, "acquired")?,
+            dead_letter_tasks: count(&queue_counts, "dead_letter")?,
+            active_rollouts: count(&rollout_counts, "active")?,
+            degraded_rollouts: count(&rollout_counts, "degraded")?,
+            pending_replica_regions: i64_to_u64(
+                pending_replica_regions.max(0),
+                "pending replica regions",
+            )?,
+            active_legal_holds: i64_to_u64(active_legal_holds, "active legal holds")?,
+            service_level_warnings: count(&slo_rows, "warnings")?,
+            service_level_breaches: count(&slo_rows, "breaches")?,
+            latest_dr_checkpoint,
+            load_model,
+        })
+    }
+}

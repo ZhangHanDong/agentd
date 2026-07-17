@@ -9,6 +9,7 @@ pub mod certification;
 pub mod clock;
 pub mod command_runner;
 pub mod cutover;
+pub mod enterprise_scale;
 pub mod execution_evidence;
 pub mod fleet_scheduler;
 pub mod matrix_gateway;
@@ -46,6 +47,17 @@ pub use cutover::{
     BackupManifest, CursorHandoff, CutoverError, CutoverLedgerPort, CutoverPlan, CutoverRun,
     CutoverSourceManifest, CutoverState, CutoverStepReceipt, CutoverSurface, CutoverTransition,
     LegacyIdMapping, ServiceInstallation, ServiceModel, ShadowDecision,
+};
+pub use enterprise_scale::{
+    ArtifactReplicaAcknowledgement, ArtifactReplicationPlan, AutoscalingRecommendation,
+    CapacityObservation, ControlPlaneHeartbeatRequest, ControlPlaneLeadershipLease,
+    ControlPlaneLeadershipRequest, ControlPlaneLeadershipRenewal, ControlPlaneMember,
+    ControlPlaneMemberStatus, DisasterRecoveryCheckpoint, DisasterRecoveryDrill,
+    DisasterRecoveryDrillStatus, EnterpriseOperationalSnapshot, EnterpriseScaleError,
+    EnterpriseScalePort, EnterpriseZoneStatus, LegalHold, LoadModelRegistration, ReplicaStatus,
+    RetentionDecision, RetentionDisposition, RetentionPolicy, ServiceLevelMeasurement,
+    ServiceLevelStatus, TenantKeyStatus, TenantKeyVersion, WorkerImageRollout,
+    WorkerImageRolloutStatus, WorkerImageZoneObservation, ZonePoolPolicy,
 };
 pub use execution_evidence::{
     ArtifactCursor, ArtifactIndexPort, ArtifactListRequest, ArtifactPage, AuditActorKind,

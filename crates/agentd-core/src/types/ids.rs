@@ -70,6 +70,15 @@ id_newtype!(CutoverReceiptId, "ct");
 id_newtype!(CutoverSourceId, "sx");
 id_newtype!(BackupManifestId, "bm");
 id_newtype!(ServiceInstallationId, "sv");
+id_newtype!(ControlPlaneInstanceId, "ci");
+id_newtype!(WorkerImageRolloutId, "ir");
+id_newtype!(ZonePoolId, "zp");
+id_newtype!(ArtifactReplicationId, "rp");
+id_newtype!(TenantKeyId, "tk");
+id_newtype!(LegalHoldId, "lh");
+id_newtype!(DisasterRecoveryCheckpointId, "dr");
+id_newtype!(DisasterRecoveryDrillId, "dd");
+id_newtype!(LoadModelId, "lm");
 
 impl NodeId {
     /// `NodeId`s in DOT files are operator-authored; preserve as-is.

@@ -21,6 +21,7 @@ pub mod certification_control_plane;
 pub mod checkpoint_repo;
 pub mod cutover;
 pub mod cutover_service;
+pub mod enterprise_scale;
 pub mod error;
 pub mod event_repo;
 pub mod execution_artifact_repo;
@@ -58,6 +59,7 @@ pub use cutover_service::{
     CutoverActivationReport, CutoverDrainReport, CutoverImportReport, CutoverService,
     CutoverShadowMismatch, CutoverShadowReport,
 };
+pub use enterprise_scale::SqliteEnterpriseScaleControlPlane;
 pub use operator::{DoctorCheck, DoctorReport, DoctorStatus, run_doctor};
 pub use error::StoreError;
 pub use native_runtime_control_plane::SqliteNativeRuntimeControlPlane;
