@@ -119,10 +119,14 @@ and `agentctl agent` commands for the same surfaces. p214 adds launch-env,
 Codex-testable start through `AgentBackend::spawn`, and minimal runtime
 observation updates. p215 adds the first API auth boundary baseline: configured
 bearer checks for operator routes, per-agent token checks with hard/audit modes,
-and local-only launch-env/start protection. Phase C is still incomplete because
-dashboard/browser auth, bridge and relay secrets, import-time token provisioning,
-token rotation, kill/rebind/session recovery, and dashboard agent views are not
-covered yet.
+and local-only launch-env/start protection. Update 2026-07-17: the AD-E7
+candidate adds enterprise composition-layer operator auth and an HttpOnly,
+Secure, SameSite=Strict dashboard session limited to reads; bearer credentials
+are not stored by dashboard script and remain mandatory for mutations. Phase C
+is still incomplete because this browser path awaits final TLS/browser evidence,
+and bridge/relay secrets, import-time token provisioning, token rotation, and
+dashboard agent views remain open. The earlier p234 candidate covers the local
+kill/rebind/session-recovery baseline but not its final cutover acceptance.
 
 Deliverables:
 
@@ -309,6 +313,12 @@ Exit criteria:
 ## 7. Phase F — dashboard and CLI operator parity
 
 Purpose: make agentd usable without raw curl/log inspection.
+
+Update 2026-07-17: the AD-E7 candidate closes the enterprise dashboard login
+mechanism at the code-contract level with a read-only HttpOnly browser session
+and a bearer-only mutation boundary. Phase F remains partial because the
+dashboard still lacks the broader agents, queue, messages, blockers, relay, and
+service-status views and the browser path has not completed final acceptance.
 
 Deliverables:
 

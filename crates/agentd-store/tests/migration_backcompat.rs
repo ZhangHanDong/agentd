@@ -9,6 +9,8 @@ use std::path::PathBuf;
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{Row, SqlitePool};
 
+use agentd_store::operator::{DoctorStatus, run_doctor};
+
 fn migrations_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("migrations")
 }
@@ -479,4 +481,137 @@ async fn task_lease_migration_preserves_enterprise_and_compatibility_rows() {
         .await
         .expect("schema version");
     assert_eq!(version, "15");
+}
+
+#[tokio::test]
+async fn enterprise_audit_history_preserves_legacy_retention_and_flags_it() {
+    let pool = raw_pool().await;
+    for migration in [
+        "0001_init.sql",
+        "0002_review_runs_round.sql",
+        "0003_agent_registry_lifecycle.sql",
+        "0004_agent_runtime_lifecycle.sql",
+        "0005_direct_messages.sql",
+        "0006_group_messages.sql",
+        "0007_message_attachments.sql",
+        "0008_agent_chat_task_import.sql",
+        "0009_direct_message_schema_and_live_task_graph.sql",
+        "0010_agent_scheduler.sql",
+        "0011_remote_relay_backend.sql",
+        "0012_matrix_bridge_contract.sql",
+        "0013_enterprise_agent_worker_runtime.sql",
+        "0014_enterprise_artifact_audit.sql",
+        "0015_enterprise_task_leases.sql",
+        "0016_execution_security.sql",
+        "0017_enterprise_principals.sql",
+        "0018_enterprise_fleet_scheduler.sql",
+        "0019_matrix_gateway_cutover.sql",
+        "0020_openfab_evidence_skill.sql",
+        "0021_native_runtime.sql",
+        "0022_final_cutover.sql",
+        "0023_native_agent_authority.sql",
+        "0024_enterprise_scale.sql",
+        "0025_enterprise_scale_transitions.sql",
+        "0026_enterprise_mutation_fencing.sql",
+    ] {
+        apply(&pool, migration).await;
+    }
+    let tenant = "a".repeat(64);
+    let version = "b".repeat(64);
+    sqlx::query(
+        "INSERT INTO enterprise_retention_policies \
+         (tenant_scope_sha256, policy_version_sha256, artifact_retention_seconds, \
+          transcript_retention_seconds, audit_retention_seconds, \
+          minimum_replica_regions, updated_at) VALUES (?, ?, 10, 30, 20, 1, 100)",
+    )
+    .bind(&tenant)
+    .bind(&version)
+    .execute(&pool)
+    .await
+    .expect("schema 24 legacy retention policy");
+    sqlx::query(
+        "INSERT INTO enterprise_artifact_replication_plans \
+         (replication_id, execution_artifact_id, tenant_scope_sha256, artifact_sha256, \
+          source_region, required_regions_json, plan_sha256, created_at) \
+         VALUES ('rp_01ARZ3NDEKTSV4RRFFQ69G5FAV', \
+                 'ar_01ARZ3NDEKTSV4RRFFQ69G5FAV', ?, ?, 'cn-east', \
+                 '[\"cn-east\"]', ?, 100)",
+    )
+    .bind("f".repeat(64))
+    .bind("1".repeat(64))
+    .bind("2".repeat(64))
+    .execute(&pool)
+    .await
+    .expect("schema 24 orphan replication plan");
+
+    apply(&pool, "0027_enterprise_audit_history.sql").await;
+
+    let history = sqlx::query(
+        "SELECT transcript_retention_seconds, audit_retention_seconds \
+         FROM enterprise_retention_policy_versions \
+         WHERE tenant_scope_sha256 = ? AND policy_version_sha256 = ?",
+    )
+    .bind(&tenant)
+    .bind(&version)
+    .fetch_one(&pool)
+    .await
+    .expect("legacy retention history");
+    assert_eq!(history.get::<i64, _>("transcript_retention_seconds"), 30);
+    assert_eq!(history.get::<i64, _>("audit_retention_seconds"), 20);
+
+    let report = run_doctor(&pool, 101).await.expect("doctor");
+    let audit = report
+        .checks
+        .iter()
+        .find(|check| check.name == "enterprise_audit_history")
+        .expect("enterprise audit check");
+    assert_eq!(audit.status, DoctorStatus::Fail);
+    assert_eq!(audit.count, Some(1));
+    let replication = report
+        .checks
+        .iter()
+        .find(|check| check.name == "enterprise_replication_integrity")
+        .expect("enterprise replication integrity check");
+    assert_eq!(replication.status, DoctorStatus::Fail);
+    assert_eq!(replication.count, Some(1));
+    let preserved_plan: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM enterprise_artifact_replication_plans \
+         WHERE replication_id = 'rp_01ARZ3NDEKTSV4RRFFQ69G5FAV'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("legacy replication plan");
+    assert_eq!(preserved_plan, 1);
+
+    let rejected = sqlx::query(
+        "INSERT INTO enterprise_retention_policy_versions \
+         (tenant_scope_sha256, policy_version_sha256, policy_record_sha256, \
+          artifact_retention_seconds, transcript_retention_seconds, \
+          audit_retention_seconds, minimum_replica_regions, updated_at) \
+         VALUES (?, ?, ?, 10, 30, 20, 1, 101)",
+    )
+    .bind("c".repeat(64))
+    .bind("d".repeat(64))
+    .bind("e".repeat(64))
+    .execute(&pool)
+    .await;
+    assert!(rejected.is_err(), "new non-compliant history must fail");
+
+    let rejected_plan = sqlx::query(
+        "INSERT INTO enterprise_artifact_replication_plans \
+         (replication_id, execution_artifact_id, tenant_scope_sha256, artifact_sha256, \
+          source_region, required_regions_json, plan_sha256, created_at) \
+         VALUES ('rp_01ARZ3NDEKTSV4RRFFQ69G5FAW', \
+                 'ar_01ARZ3NDEKTSV4RRFFQ69G5FAW', ?, ?, 'cn-east', \
+                 '[\"cn-east\"]', ?, 101)",
+    )
+    .bind("3".repeat(64))
+    .bind("4".repeat(64))
+    .bind("5".repeat(64))
+    .execute(&pool)
+    .await;
+    assert!(
+        rejected_plan.is_err(),
+        "new orphan replication plan must fail"
+    );
 }

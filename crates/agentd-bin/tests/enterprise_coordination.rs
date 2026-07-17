@@ -27,9 +27,10 @@ fn daemon_config(root: &std::path::Path, specify_url: String) -> DaemonConfig {
         enterprise: EnterpriseDaemonConfig {
             enterprise_control_plane_only: true,
             enterprise_bind_address: None,
-            control_plane_instance_id: Some(
-                "ci_01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string(),
-            ),
+            workload_trust_root_der_files: Vec::new(),
+            workload_trust_domain: None,
+            workload_proxy_authorization_file: None,
+            control_plane_instance_id: Some("ci_01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string()),
             enterprise_region: Some("cn-east".to_string()),
             enterprise_zone: Some("cn-east-a".to_string()),
             control_plane_endpoint: Some("https://agentd.example".to_string()),
@@ -72,10 +73,67 @@ async fn enterprise_startup_checks_specify_and_acquires_fenced_leadership() {
     handle.shutdown().await;
 }
 
+#[tokio::test]
+async fn enterprise_coordination_resumes_a_stable_instance_after_restart() {
+    let server = MockServer::start().await;
+    let health = ProjectAuthorityHealth {
+        authority_key: AuthorityKey::new("specify:corp").unwrap(),
+        mode: ProjectAuthorityMode::Specify,
+        availability: ProjectAuthorityAvailability::Available,
+        checked_at: 200,
+        authority_revision: Some(9),
+    };
+    Mock::given(method("GET"))
+        .and(path("/v1/project-authority/health"))
+        .and(header("authorization", "Bearer workload-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(health))
+        .mount(&server)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    let config = daemon_config(directory.path(), server.uri());
+    let store = SqliteStore::connect(&config.db_path).await.unwrap();
+
+    let first = start_enterprise_coordination(&config, &store)
+        .await
+        .unwrap()
+        .unwrap();
+    first.shutdown().await;
+    let first_sequence: i64 = sqlx::query_scalar(
+        "SELECT heartbeat_sequence FROM enterprise_control_plane_members WHERE instance_id = ?",
+    )
+    .bind("ci_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+
+    let second = start_enterprise_coordination(&config, &store)
+        .await
+        .unwrap()
+        .unwrap();
+    second.shutdown().await;
+    let second_sequence: i64 = sqlx::query_scalar(
+        "SELECT heartbeat_sequence FROM enterprise_control_plane_members WHERE instance_id = ?",
+    )
+    .bind("ci_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+
+    assert!(second_sequence > first_sequence);
+}
+
 #[test]
 fn enterprise_startup_rejects_missing_explicit_authority_configuration() {
     let directory = tempfile::tempdir().unwrap();
     let mut config = daemon_config(directory.path(), "https://specify.example".to_string());
     config.enterprise.specify_authority_key = None;
+    assert!(EnterpriseControlPlaneConfig::from_daemon(&config).is_err());
+}
+
+#[test]
+fn enterprise_startup_requires_stable_control_plane_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = daemon_config(directory.path(), "https://specify.example".to_string());
+    config.enterprise.control_plane_instance_id = None;
     assert!(EnterpriseControlPlaneConfig::from_daemon(&config).is_err());
 }

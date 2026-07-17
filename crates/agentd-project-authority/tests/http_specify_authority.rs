@@ -58,7 +58,10 @@ async fn http_specify_transport_authenticates_and_bounds_all_operations() {
     .unwrap();
     assert_eq!(
         expected,
-        transport.resolve(&resolve_request(&expected)).await.unwrap()
+        transport
+            .resolve(&resolve_request(&expected))
+            .await
+            .unwrap()
     );
     assert_eq!(
         expected,

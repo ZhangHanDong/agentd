@@ -390,6 +390,8 @@ run_execute() {
         return 2
     fi
 
+    unset ANTHROPIC_API_KEY CLAUDE_API_KEY
+
     mkdir -p "$STATE_DIR"
     preflight | tee "$PREFLIGHT_LOG"
     prepare_runtime_spec_and_plan

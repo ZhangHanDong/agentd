@@ -84,13 +84,30 @@
 
 ## AD-E7
 
-- Candidate inventory: migration `0024`, `EnterpriseScalePort`, SQLite reference
-  adapter, Specify HTTPS transport, enterprise coordination/profile,
-  `/api/enterprise`, `agentctl enterprise`, dashboard/doctor, Kubernetes profile,
-  factory load/retention inputs, runbooks, and guarded load harness.
+- Candidate inventory: migrations `0024`-`0027`, `EnterpriseScalePort`, SQLite
+  reference adapter, Specify HTTPS transport, enterprise coordination/profile,
+  native fleet HTTP and outbound worker, atomic certificate enrollment,
+  `/api/enterprise`, enterprise operator route gate and read-only browser
+  session, `agentctl enterprise`, dashboard/doctor, Envoy dual-listener and
+  Kubernetes profiles, factory load/retention inputs, runbooks, and guarded load
+  harness.
 - [ ] Record `git rev-parse HEAD`, `rustc -Vv`, `cargo -V`, Codex version, Kubernetes version, policy-controller version, image digests, provider revisions, and the replicated durable-store adapter/version. Refuse multi-replica acceptance if the target uses one shared SQLite file.
-- [ ] Run `cargo test -p agentd-store --test enterprise_scale`, `cargo test -p agentd-project-authority --test http_specify_authority`, `cargo test -p agentd-bin --test enterprise_coordination`, `cargo test -p agentd-surface --test enterprise --features test-support`, and `cargo test -p agentctl --test enterprise_cli`; retain output.
+- [ ] Render the checked-in reference profile with `bash scripts/agentd_enterprise_deploy_preflight.sh --allow-reference-placeholders --output "$AGENTD_ACCEPTANCE_DIR/ad-e7-kubernetes/reference.yaml"`; retain its read-only SHA-256 sidecar as non-production topology evidence only.
+- [ ] Render the production overlay with `bash scripts/agentd_enterprise_deploy_preflight.sh --kustomization "$AGENTD_ENTERPRISE_KUSTOMIZATION" --server-dry-run --output "$AGENTD_ACCEPTANCE_DIR/ad-e7-kubernetes/rendered.yaml"`; prove strict placeholder rejection, API-server admission, fixed non-root identities, end-to-end TLS health probes, exact six worker/HPA mappings, region/zone node placement, hard hostname spreading, and immutable digest evidence.
+- [ ] Confirm the SQLite reference renders exactly one control-plane replica with one RWO PVC. For HA acceptance, replace the complete durable-store composition and prove queue, lease, outbox, audit, runtime, Matrix, certification, and scale state share the replicated authority before increasing replicas.
+- [ ] Run `cargo test -p agentd-store --test enterprise_scale`, `cargo test -p agentd-store --test worker_enrollment`, `cargo test -p agentd-store --test enterprise_fleet_scheduler`, `cargo test -p agentd-security --test workload_identity`, `cargo test -p agentd-project-authority --test http_specify_authority`, `cargo test -p agentd-bin --test enterprise_coordination`, `cargo test -p agentd-bin --test enterprise_fleet`, `cargo test -p agentd-bin --test daemon_http`, `cargo test -p agentd-surface --test enterprise --features test-support`, `cargo test -p agentd-surface --test http --features test-support`, and `cargo test -p agentctl --test enterprise_cli`; retain output.
 - [ ] Run `kubectl kustomize deploy/enterprise`, policy/schema validation, server-side dry-run, and Sigstore admission against the exact digest-pinned images. Reject placeholder digests, keys, endpoints, KMS refs, or state-adapter configuration.
+- [ ] Verify the Envoy configuration validates, the server certificate covers both service DNS names, worker port `8443` requires a trusted client certificate, operator port `9443` preserves bearer auth, app port `8787` is unreachable externally, and only exact worker methods route through the mTLS listener.
+- [ ] Through operator TLS, prove `/healthz` and the dashboard shell load without credentials while `/runs`, runtime/SSE, enterprise, Matrix, task, agent, and tool routes return `401` without an operator credential. Prove the login exchange sets only `__Host-agentd_operator_read` with `Secure`, `HttpOnly`, `SameSite=Strict`, path `/`, no `Domain`, and no persistent lifetime; the response must not contain the bearer.
+- [ ] Prove the dashboard stores no bearer in URLs, `localStorage`, or `sessionStorage`; same-origin SSE works with the HttpOnly session. Prove the cookie authorizes only `GET`/`HEAD`, every `POST`/`PATCH`/`DELETE` still returns `401` without a bearer, and the fleet mTLS routes remain governed by worker identity rather than the operator cookie.
+- [ ] Run `agentctl enterprise status --server-ca-pem ...` against the private operator CA; reject a foreign CA, a hostname/SAN mismatch, redirects, and loopback HTTP combined with a CA file.
+- [ ] Send caller-controlled XFCC, `x-agentd-peer-certificate-chain`, and proxy-authorization headers through both listeners. Prove Envoy replaces/removes them and a worker cannot authenticate as another enrolled public certificate chain.
+- [ ] Enroll a leaf-first certificate chain with the operator API and prove worker/incarnation/binding/attestation commit atomically. Replay it exactly, reject changed fingerprint reuse, rotate to a new incarnation/image attestation, then revoke the old certificate using server time.
+- [ ] Roll back a live rollout through `agentctl enterprise rollout-rollback`; prove the rollback reason/history and leadership fence are immutable, every bound worker is immediately offline, old heartbeat/pull fails, and a new signed rollout plus incarnation is required for recovery.
+- [ ] Start the real `enterprise-worker` with the CSI identity descriptor and pinned server CA. Exercise heartbeat, pull, renewal, completion, retryable failure, malformed/oversized executor output, lease loss, SIGTERM, offline heartbeat, and whole executor process-group cleanup using the Codex-only executor provider.
+- [ ] Seed stale files and a symlink under the dedicated executor work root, then run two assignments for different tenants. Prove each provider receives only its lease-specific `executor_work_dir`, stale entries are removed without following the symlink, and no work directory survives completion, failure, or cancellation.
+- [ ] Prove worker network policy permits only control-plane mTLS, DNS, and the labelled HTTPS egress gateway; prove direct arbitrary internet egress and worker ingress remain denied while the Codex provider can reach its approved model endpoint through the gateway.
+- [ ] Inspect executor stdin/stdout, process environment, SQLite, logs, and acceptance artifacts; prove input contains immutable refs, exact admission URLs, transport mode, and TLS file paths but no raw prompt, credentials, certificate/private-key bytes, transcript, or object bytes. Exercise artifact and side-effect calls and prove each is admitted against the current lease and epoch.
 - [ ] Register the exact factory model and retention policy through `agentctl enterprise`; retain content SHA-256 values and redacted responses.
 - [ ] Run `AGENTD_ENTERPRISE_LOAD_PROFILE=1 bash scripts/agentd_enterprise_load_profile.sh --execute --driver "$AGENTD_LOAD_DRIVER" --evidence-dir "$AGENTD_ACCEPTANCE_DIR/ad-e7-load"`; cover tenant, project, room, Matrix event, queue, artifact/log, certification throughput, failure injection, test window, noisy neighbor, and budget dimensions.
 - [ ] Run Palpo/Matrix ingress/replay and Robrix projections throughout the load profile; compare canonical project, task, lease, artifact, evidence, denial, capacity, and SLO ids without exposing prompt/transcript bytes.
@@ -99,6 +116,9 @@
 - [ ] Lose one entire zone; prove placement is not weakened, no accepted state is lost, replica/key policies hold, and recovery meets declared RPO/RTO.
 - [ ] Block and restore Specify, KMS, object store, Matrix, and OpenFab independently; retain fail-closed admission, durable retry/replay, and no-fallback evidence.
 - [ ] Execute a signed canary/zone rollout and forward rollback, queue/policy autoscaling, multi-region replica acknowledgement, tenant key rotation, retention expiry, legal-hold deletion denial/release, DR restore, and failback.
+- [ ] Replay an old exact key transition after the key reaches `retired`, and an old exact replica acknowledgement after the replica reaches `available`; prove both return current state without regression. Reuse either identity with changed input and prove conflict.
+- [ ] Race leader replacement against every enterprise mutation. Prove migration `0026` records the same term/fence in the mutation transaction and no stale leader writes after expiry or takeover.
+- [ ] Replay old rollout observations, zone policies, retention policies, key transitions, and replica acknowledgements after newer state exists. Prove schema `27` returns current state for exact historical replay, rejects changed version reuse, and blocks direct update/delete of all audit histories.
 - [ ] Compare `agentctl enterprise status`, exact task explain, dashboard, doctor, metrics, and immutable ledgers for leadership, zones, backlog, rollout, replicas, budget, failures, and SLOs.
 - [ ] FSF-7 operator sign-off recorded.
 

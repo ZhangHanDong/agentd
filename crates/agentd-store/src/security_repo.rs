@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
 use subtle::ConstantTimeEq;
 
+use crate::util::SqliteImmediateTransaction;
 use crate::worker_repo;
 
 const DENIAL_EVENT_TYPE: &str = "execution.security_denied";
@@ -111,33 +112,107 @@ pub async fn revoke_workload_identity(
     revoked_at: i64,
     reason: &str,
 ) -> Result<WorkloadIdentityBindingRecord, SecurityError> {
-    if revoked_at < 0 || reason.trim().is_empty() {
+    if !is_sha256(certificate_sha256)
+        || revoked_at < 0
+        || reason != reason.trim()
+        || reason.is_empty()
+        || reason.len() > 512
+        || reason.chars().any(char::is_control)
+    {
         return Err(SecurityError::Invalid(
             "identity revocation requires a non-negative time and reason".to_string(),
         ));
     }
+    let reason = reason.trim();
+    let mut transaction = SqliteImmediateTransaction::begin(pool)
+        .await
+        .map_err(storage_unavailable)?;
+    let row = sqlx::query(
+        "SELECT certificate_sha256, spiffe_uri, role, trust_domain, worker_id, \
+                worker_incarnation_id, not_before, not_after, revoked_at, \
+                revocation_reason, created_at \
+         FROM workload_identity_bindings WHERE certificate_sha256 = ?",
+    )
+    .bind(certificate_sha256)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(storage_unavailable)?;
+    let mut record = match row.as_ref().map(identity_binding_from_row).transpose()? {
+        Some(record) => record,
+        None => {
+            transaction.rollback().await.map_err(storage_unavailable)?;
+            return Err(SecurityError::Denied(
+                SecurityDenialReason::IdentityUntrusted,
+            ));
+        }
+    };
+    if revoked_at < record.binding.created_at {
+        transaction.rollback().await.map_err(storage_unavailable)?;
+        return Err(SecurityError::Invalid(
+            "identity revocation cannot predate the binding".to_string(),
+        ));
+    }
+    if record.revoked_at.is_some() {
+        if record.revocation_reason.as_deref() == Some(reason) {
+            transaction.commit().await.map_err(storage_unavailable)?;
+            return Ok(record);
+        }
+        transaction.rollback().await.map_err(storage_unavailable)?;
+        return Err(SecurityError::Invalid(
+            "identity revocation was replayed with a different reason".to_string(),
+        ));
+    }
     let result = sqlx::query(
         "UPDATE workload_identity_bindings \
-         SET revoked_at = COALESCE(revoked_at, ?), \
-             revocation_reason = COALESCE(revocation_reason, ?) \
-         WHERE certificate_sha256 = ?",
+         SET revoked_at = ?, revocation_reason = ? \
+         WHERE certificate_sha256 = ? AND revoked_at IS NULL",
     )
     .bind(revoked_at)
     .bind(reason)
     .bind(certificate_sha256)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(storage_unavailable)?;
     if result.rows_affected() != 1 {
-        return Err(SecurityError::Denied(
-            SecurityDenialReason::IdentityUntrusted,
+        transaction.rollback().await.map_err(storage_unavailable)?;
+        return Err(SecurityError::Invalid(
+            "identity revocation did not update the active binding".to_string(),
         ));
     }
-    get_workload_identity_binding(pool, certificate_sha256)
-        .await?
-        .ok_or_else(|| {
-            SecurityError::Unavailable("identity binding disappeared after revocation".to_string())
-        })
+    if let (Some(worker_id), Some(incarnation_id)) = (
+        record.binding.worker_id.as_ref(),
+        record.binding.worker_incarnation_id.as_ref(),
+    ) {
+        sqlx::query(
+            "UPDATE enterprise_worker_availability \
+             SET worker_status = 'offline', available_slots = 0, \
+                 updated_at = MAX(updated_at, ?) \
+             WHERE worker_incarnation_id = ?",
+        )
+        .bind(revoked_at)
+        .bind(incarnation_id.as_str())
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_unavailable)?;
+        sqlx::query(
+            "UPDATE workers SET status = 'offline', updated_at = MAX(updated_at, ?), \
+                    record_version = record_version + 1 \
+             WHERE id = ? AND status <> 'retired' AND EXISTS (\
+                 SELECT 1 FROM worker_incarnations \
+                 WHERE id = ? AND worker_id = workers.id AND is_current = 1\
+             )",
+        )
+        .bind(revoked_at)
+        .bind(worker_id.as_str())
+        .bind(incarnation_id.as_str())
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_unavailable)?;
+    }
+    record.revoked_at = Some(revoked_at);
+    record.revocation_reason = Some(reason.to_string());
+    transaction.commit().await.map_err(storage_unavailable)?;
+    Ok(record)
 }
 
 #[derive(Debug, Clone)]
@@ -829,16 +904,13 @@ async fn validate_identity_binding(
     pool: &SqlitePool,
     request: &WorkloadIdentityBindingCreate,
 ) -> Result<(), SecurityError> {
-    if request.certificate_sha256.len() != 64
-        || !request
-            .certificate_sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    if !is_sha256(&request.certificate_sha256)
         || request.spiffe_uri.trim().is_empty()
-        || request.trust_domain.trim().is_empty()
+        || !valid_trust_domain(&request.trust_domain)
         || request.not_before < 0
         || request.not_after <= request.not_before
-        || request.created_at < 0
+        || request.created_at < request.not_before
+        || request.created_at >= request.not_after
     {
         return Err(SecurityError::Invalid(
             "invalid workload identity binding".to_string(),
@@ -862,7 +934,21 @@ async fn validate_identity_binding(
                 .ok_or(SecurityError::Denied(
                     SecurityDenialReason::IncarnationStale,
                 ))?;
-            if !incarnation.is_current || &incarnation.worker_id != worker_id {
+            let worker = worker_repo::get_worker(pool, worker_id)
+                .await
+                .map_err(storage_unavailable)?
+                .ok_or(SecurityError::Denied(
+                    SecurityDenialReason::IncarnationStale,
+                ))?;
+            let expected_spiffe =
+                format!("spiffe://{}/worker/{incarnation_id}", request.trust_domain);
+            if !valid_typed_id(worker_id.as_str(), "wk_")
+                || !valid_typed_id(incarnation_id.as_str(), "wi_")
+                || !incarnation.is_current
+                || &incarnation.worker_id != worker_id
+                || worker.trust_domain != request.trust_domain
+                || request.spiffe_uri != expected_spiffe
+            {
                 return Err(SecurityError::Denied(
                     SecurityDenialReason::IncarnationStale,
                 ));
@@ -877,6 +963,36 @@ async fn validate_identity_binding(
         }
     }
     Ok(())
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn valid_typed_id(value: &str, prefix: &str) -> bool {
+    value.strip_prefix(prefix).is_some_and(|payload| {
+        payload.len() == 26
+            && payload
+                .parse::<ulid::Ulid>()
+                .is_ok_and(|parsed| parsed.to_string() == payload)
+    })
+}
+
+fn valid_trust_domain(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 253
+        && value.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        })
 }
 
 fn identity_binding_from_row(

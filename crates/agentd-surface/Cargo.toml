@@ -26,6 +26,9 @@ tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 base64 = { workspace = true }
+hex = { workspace = true }
+sha2 = "0.10"
+subtle = { workspace = true }
 async-trait = "0.1"
 # HTTP+SSE surface (7b). axum is workspace-pinned at 0.7 (`:id` path params);
 # futures::stream::iter builds the finite SSE replay stream.

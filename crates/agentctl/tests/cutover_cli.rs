@@ -103,8 +103,11 @@ fn backup_manifest_and_offline_restore_are_digest_verified() {
         .output()
         .expect("run backup");
     let manifest = stdout_json(&backup_output);
-    assert_eq!(manifest["schema_version"], 23);
-    assert_eq!(manifest["size_bytes"], fs::metadata(&backup).expect("backup").len());
+    assert_eq!(manifest["schema_version"], 27);
+    assert_eq!(
+        manifest["size_bytes"],
+        fs::metadata(&backup).expect("backup").len()
+    );
     let manifest_path = PathBuf::from(format!("{}.manifest.json", backup.display()));
 
     let restored = directory.path().join("restored/agentd.db");
@@ -124,7 +127,10 @@ fn backup_manifest_and_offline_restore_are_digest_verified() {
         .output()
         .expect("run restore");
     let restored_report = stdout_json(&restore_output);
-    assert_eq!(restored_report["database_sha256"], manifest["database_sha256"]);
+    assert_eq!(
+        restored_report["database_sha256"],
+        manifest["database_sha256"]
+    );
     assert!(restored.is_file());
 }
 
@@ -157,7 +163,11 @@ fn restore_rejects_bytes_that_do_not_match_the_manifest() {
             "cutover",
             "restore",
             "--db-path",
-            directory.path().join("restore.db").to_str().expect("restore path"),
+            directory
+                .path()
+                .join("restore.db")
+                .to_str()
+                .expect("restore path"),
             "--backup",
             backup.to_str().expect("backup path"),
             "--manifest",

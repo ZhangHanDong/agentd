@@ -17,11 +17,11 @@ use agentd_core::handler::{HandlerRegistry, Ports};
 use agentd_core::handler::{agent_allocation_json, append_agent_allocation_prompt_context};
 use agentd_core::ports::{
     AgentAllocation, AgentAllocationRequest, AgentAllocationStatus, AgentAllocator, AgentBackend,
-    Clock, CommandRunner, DirectAgentAllocator, EnterpriseOperationalSnapshot, EnterpriseScalePort,
-    FleetExplain, FleetSchedulerPort, MempalClient, NativeRuntimeError, RunStatus, RuntimeEvent,
-    RuntimeInputAck, RuntimeKeyInput, RuntimeResizeRequest, RuntimeShutdownReport,
-    RuntimeShutdownRequest, RuntimeSnapshot, RuntimeTextInput, RuntimeView, RuntimeWaitRequest,
-    Store, WorktreeAllocator,
+    Clock, CommandRunner, DirectAgentAllocator, EnterpriseMutationFence,
+    EnterpriseOperationalSnapshot, EnterpriseScalePort, FleetExplain, FleetSchedulerPort,
+    MempalClient, NativeRuntimeError, RunStatus, RuntimeEvent, RuntimeInputAck, RuntimeKeyInput,
+    RuntimeResizeRequest, RuntimeShutdownReport, RuntimeShutdownRequest, RuntimeSnapshot,
+    RuntimeTextInput, RuntimeView, RuntimeWaitRequest, Store, WorktreeAllocator,
 };
 use agentd_core::types::{
     AgentHandle, AgentId, BackendKind, CapabilityAdmission, CliKind, LaunchStrategy, NodeId,
@@ -53,14 +53,14 @@ use agentd_surface::host::{
     AgentStartHandle as SurfaceAgentStartHandle, AgentStartResult as SurfaceAgentStartResult,
     DeliveryEventInput as SurfaceDeliveryEventInput,
     DeliveryEventRecord as SurfaceDeliveryEventRecord,
-    DirectMessageInput as SurfaceDirectMessageInput, EventRecord,
+    DirectMessageInput as SurfaceDirectMessageInput,
+    EnterpriseMutation as SurfaceEnterpriseMutation, EventRecord,
     GroupCreateInput as SurfaceGroupCreateInput, GroupMemberUpdate as SurfaceGroupMemberUpdate,
     GroupMessageInput as SurfaceGroupMessageInput, GroupReadAdvance as SurfaceGroupReadAdvance,
     GroupReadRequest as SurfaceGroupReadRequest, GroupReadResult as SurfaceGroupReadResult,
     GroupRecord as SurfaceGroupRecord, InboxMessage as SurfaceInboxMessage, LiveEvent,
     MatrixBridgeRoomInput as SurfaceMatrixBridgeRoomInput,
     MatrixBridgeRoomRecord as SurfaceMatrixBridgeRoomRecord,
-    EnterpriseMutation as SurfaceEnterpriseMutation,
     MatrixInboundMessageInput as SurfaceMatrixInboundMessageInput,
     MatrixInboundMessageResult as SurfaceMatrixInboundMessageResult,
     RelayServerHeartbeat as SurfaceRelayServerHeartbeat,
@@ -79,8 +79,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 
-use crate::runtime::NativeRuntimeService;
 use crate::enterprise::EnterpriseLeadershipGate;
+use crate::runtime::NativeRuntimeService;
 
 /// Capacity of the live-event broadcast: a subscriber more than this many events
 /// behind lags and is realigned with a snapshot (P1).
@@ -1455,58 +1455,116 @@ impl RunHost for ProductionRunHost {
         let leadership = self.enterprise_leadership.as_ref().ok_or_else(|| {
             CoreError::Backend("enterprise mutation authority is not configured".to_string())
         })?;
-        leadership
-            .authorize_mutation(self.clock.now_unix())
+        let observed_at = self.clock.now_unix();
+        let lease = leadership
+            .authorize_mutation(observed_at)
             .await
             .map_err(|error| CoreError::Backend(error.to_string()))?;
+        let fence = EnterpriseMutationFence {
+            instance_id: lease.instance_id,
+            term: lease.term,
+            fencing_token: lease.fencing_token,
+            observed_at,
+        };
         let value = match mutation {
             SurfaceEnterpriseMutation::DeclareRollout(value) => serde_json::to_value(
-                scale.declare_worker_image_rollout(&value).await.map_err(scale_error)?,
+                scale
+                    .declare_worker_image_rollout(&fence, &value)
+                    .await
+                    .map_err(scale_error)?,
             ),
             SurfaceEnterpriseMutation::ObserveRollout(value) => serde_json::to_value(
-                scale.observe_worker_image_zone(&value).await.map_err(scale_error)?,
+                scale
+                    .observe_worker_image_zone(&fence, &value)
+                    .await
+                    .map_err(scale_error)?,
+            ),
+            SurfaceEnterpriseMutation::RollbackRollout(value) => serde_json::to_value(
+                scale
+                    .rollback_worker_image_rollout(&fence, &value)
+                    .await
+                    .map_err(scale_error)?,
             ),
             SurfaceEnterpriseMutation::UpsertZonePool(value) => serde_json::to_value(
-                scale.upsert_zone_pool(&value).await.map_err(scale_error)?,
+                scale
+                    .upsert_zone_pool(&fence, &value)
+                    .await
+                    .map_err(scale_error)?,
             ),
             SurfaceEnterpriseMutation::RecommendCapacity(value) => serde_json::to_value(
-                scale.recommend_capacity(&value).await.map_err(scale_error)?,
+                scale
+                    .recommend_capacity(&fence, &value)
+                    .await
+                    .map_err(scale_error)?,
             ),
             SurfaceEnterpriseMutation::CreateReplicationPlan(value) => serde_json::to_value(
-                scale.create_replication_plan(&value).await.map_err(scale_error)?,
+                scale
+                    .create_replication_plan(&fence, &value)
+                    .await
+                    .map_err(scale_error)?,
             ),
             SurfaceEnterpriseMutation::AcknowledgeReplica(value) => serde_json::to_value(
-                scale.acknowledge_artifact_replica(&value).await.map_err(scale_error)?,
+                scale
+                    .acknowledge_artifact_replica(&fence, &value)
+                    .await
+                    .map_err(scale_error)?,
             ),
             SurfaceEnterpriseMutation::RegisterTenantKey(value) => serde_json::to_value(
-                scale.register_tenant_key(&value).await.map_err(scale_error)?,
+                scale
+                    .register_tenant_key(&fence, &value)
+                    .await
+                    .map_err(scale_error)?,
+            ),
+            SurfaceEnterpriseMutation::TransitionTenantKey(value) => serde_json::to_value(
+                scale
+                    .transition_tenant_key(&fence, &value)
+                    .await
+                    .map_err(scale_error)?,
             ),
             SurfaceEnterpriseMutation::SetRetentionPolicy(value) => serde_json::to_value(
-                scale.set_retention_policy(&value).await.map_err(scale_error)?,
+                scale
+                    .set_retention_policy(&fence, &value)
+                    .await
+                    .map_err(scale_error)?,
             ),
             SurfaceEnterpriseMutation::PlaceLegalHold(value) => serde_json::to_value(
-                scale.place_legal_hold(&value).await.map_err(scale_error)?,
+                scale
+                    .place_legal_hold(&fence, &value)
+                    .await
+                    .map_err(scale_error)?,
             ),
             SurfaceEnterpriseMutation::ReleaseLegalHold {
                 legal_hold_id,
                 released_at,
             } => serde_json::to_value(
                 scale
-                    .release_legal_hold(&legal_hold_id, released_at)
+                    .release_legal_hold(&fence, &legal_hold_id, released_at)
                     .await
                     .map_err(scale_error)?,
             ),
             SurfaceEnterpriseMutation::RecordDrCheckpoint(value) => serde_json::to_value(
-                scale.record_dr_checkpoint(&value).await.map_err(scale_error)?,
+                scale
+                    .record_dr_checkpoint(&fence, &value)
+                    .await
+                    .map_err(scale_error)?,
             ),
             SurfaceEnterpriseMutation::RecordDrDrill(value) => serde_json::to_value(
-                scale.record_dr_drill(&value).await.map_err(scale_error)?,
+                scale
+                    .record_dr_drill(&fence, &value)
+                    .await
+                    .map_err(scale_error)?,
             ),
             SurfaceEnterpriseMutation::RegisterLoadModel(value) => serde_json::to_value(
-                scale.register_load_model(&value).await.map_err(scale_error)?,
+                scale
+                    .register_load_model(&fence, &value)
+                    .await
+                    .map_err(scale_error)?,
             ),
             SurfaceEnterpriseMutation::RecordServiceLevel(value) => serde_json::to_value(
-                scale.record_service_level(&value).await.map_err(scale_error)?,
+                scale
+                    .record_service_level(&fence, &value)
+                    .await
+                    .map_err(scale_error)?,
             ),
         };
         value.map_err(|error| CoreError::Backend(error.to_string()))

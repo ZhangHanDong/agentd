@@ -26,6 +26,9 @@
 - Modify: `crates/agentd-core/src/types/ids.rs`
 - Modify: `crates/agentd-core/src/types/mod.rs`
 - Create: `crates/agentd-store/migrations/0024_enterprise_scale.sql`
+- Create: `crates/agentd-store/migrations/0025_enterprise_scale_transitions.sql`
+- Create: `crates/agentd-store/migrations/0026_enterprise_mutation_fencing.sql`
+- Create: `crates/agentd-store/migrations/0027_enterprise_audit_history.sql`
 - Create: `crates/agentd-store/src/enterprise_scale.rs`
 - Modify: `crates/agentd-store/src/lib.rs`
 - Create: `crates/agentd-store/tests/enterprise_scale.rs`
@@ -34,7 +37,7 @@
 - Produces `EnterpriseScalePort`, `SqliteEnterpriseScaleControlPlane`, leadership, rollout, zone-pool, replication, tenant-key, compliance, DR, load-model, and snapshot contracts.
 
 - [x] Define bounded typed resources, transitions, denials, and idempotency rules.
-- [x] Add additive schema `0024` with immutable history and monotonic leadership fencing.
+- [x] Add additive schemas `0024`-`0027` with immutable transition/policy history and transactional leadership fencing.
 - [x] Implement transactionally fenced mutations and bounded read models.
 - [x] Author focused tests for conflicting replay, stale leadership, rollout health, scaling bounds, legal hold, replicas, and DR.
 - [x] Commit without executing tests.
@@ -76,12 +79,33 @@
 - Consumes the fleet handoff and enterprise scale contracts.
 - Produces digest-only signed-image deployment, per-zone pull pools, HPA, workload identity, and region/retention inputs.
 
-- [x] Add three-replica control-plane and disruption/health policy.
+- [x] Add an honest single-replica SQLite reference control plane and retain the replicated-store requirement for multi-replica HA.
 - [x] Add zone-labelled outbound-only workers and deny-by-default network policy.
 - [x] Add signed image admission and audited rollout annotations.
 - [x] Add queue-driven HPA and multi-region/tenant-key configuration contracts.
 - [x] Add a versioned load model covering every roadmap dimension.
 - [x] Commit without executing validation.
+
+### Task 4.5: Native Fleet Transport, Enrollment, And Worker Runtime
+
+**Files:**
+- Create: `crates/agentd-bin/src/fleet_http.rs`
+- Create: `crates/agentd-bin/src/fleet_worker.rs`
+- Create: `crates/agentd-store/src/enrollment_repo.rs`
+- Create: `deploy/enterprise/workload-proxy.yaml`
+- Modify: `deploy/enterprise/control-plane.yaml`
+- Modify: `deploy/enterprise/worker-pools.yaml`
+
+**Interfaces:**
+- Produces operator-authenticated worker enrollment/revocation, Envoy mTLS
+  certificate forwarding, outbound heartbeat/pull/renew/result transport, and
+  a bounded external Codex executor contract.
+
+- [x] Verify and atomically bind worker certificate, worker, incarnation, and operator-controlled image attestation.
+- [x] Strip spoofable proxy headers and expose only exact worker paths on the mTLS listener.
+- [x] Add direct rustls client identity/CA verification and per-pod CSI identity configuration.
+- [x] Add outbound worker execution, lease renewal, SIGTERM cleanup, bounded executor I/O, and fenced result reporting.
+- [x] Author focused identity, enrollment, transition, and attestation tests without executing them.
 
 ### Task 4: Enterprise HTTP, CLI, Dashboard, And Doctor
 
@@ -102,6 +126,7 @@
 - Produces `/api/enterprise/status`, `/api/enterprise/tasks/:id/explain`, `agentctl enterprise status|explain|...`, dashboard scale view, and AD-E7 doctor checks.
 
 - [x] Add bounded operator reads and authenticated mutations.
+- [x] Add an enterprise composition-layer operator gate and read-only HttpOnly browser session without changing standalone or fleet mTLS auth.
 - [x] Expose leadership, zones, backlog, rollout, replica, budget, failure, and SLO state.
 - [x] Add exact task/policy denial explanation using existing scheduler records.
 - [x] Add CLI mutation/import commands for rollout, zone policy, replicas, keys, holds, DR, and load model.
@@ -114,6 +139,7 @@
 - Create: `docs/operations/enterprise-scale-runbook.md`
 - Create: `docs/operations/disaster-recovery-runbook.md`
 - Create: `scripts/agentd_enterprise_load_profile.sh`
+- Create: `scripts/agentd_enterprise_deploy_preflight.sh`
 - Modify: `docs/plans/2026-07-09-agentd-native-runtime-roadmap.md`
 - Modify: `docs/parity/agent-chat-capability-map.md`
 - Modify: `docs/acceptance/ad-e-roadmap-manual-checklist.md`
@@ -123,6 +149,7 @@
 
 - [x] Document instance/worker/zone loss, Specify outage, rollout, scaling, replication, key rotation, legal hold, and RPO/RTO drills.
 - [x] Add a guarded load-profile harness that records immutable result digests.
+- [x] Add a structural Kubernetes preflight that rejects placeholders and records immutable rendered-manifest digests.
 - [x] Mark code candidate status without changing any gate to accepted.
 - [x] Record every final command and Codex-only real smoke in the manual checklist.
-- [x] Commit, then begin the unified verification pass.
+- [x] Commit the completed candidate, then begin the unified verification pass.

@@ -39,11 +39,12 @@ async fn production_host_composes_native_runtime_and_runs_startup_recovery() {
     };
     std::fs::create_dir_all(&config.workflows_dir).expect("workflows");
 
-    let host = build_production_host(&config).await.expect("production host");
+    let host = build_production_host(&config)
+        .await
+        .expect("production host");
     assert!(host.native_runtime_service().is_some());
-    let manifest = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
-    )
-    .expect("agentd-bin manifest");
+    let manifest =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
+            .expect("agentd-bin manifest");
     assert!(!manifest.contains("agentd-tmux"));
 }

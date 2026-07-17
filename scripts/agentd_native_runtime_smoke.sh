@@ -19,6 +19,8 @@ if ! command -v "${AGENTD_CODEX_BIN:-codex}" >/dev/null 2>&1; then
     exit 2
 fi
 
+unset ANTHROPIC_API_KEY CLAUDE_API_KEY
+
 cd "$ROOT"
 exec cargo test -p agentd-runtime --test real_codex_native_runtime \
     real_codex_runs_through_native_pty_and_archives_transcript -- --exact --nocapture

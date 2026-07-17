@@ -17,11 +17,13 @@ fn enterprise_help_exposes_scale_compliance_and_recovery_commands() {
         "explain",
         "rollout",
         "rollout-observe",
+        "rollout-rollback",
         "zone-policy",
         "capacity",
         "replication-plan",
         "replica-ack",
         "tenant-key",
+        "tenant-key-transition",
         "retention",
         "legal-hold",
         "legal-hold-release",
@@ -29,8 +31,13 @@ fn enterprise_help_exposes_scale_compliance_and_recovery_commands() {
         "dr-drill",
         "load-model",
         "service-level",
+        "worker-enroll",
+        "worker-identity-revoke",
     ] {
-        assert!(help.contains(command), "missing enterprise command {command}");
+        assert!(
+            help.contains(command),
+            "missing enterprise command {command}"
+        );
     }
 }
 

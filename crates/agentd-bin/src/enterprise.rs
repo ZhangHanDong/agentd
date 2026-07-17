@@ -5,14 +5,16 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agentd_core::ports::{
-    ControlPlaneHeartbeatRequest, ControlPlaneLeadershipLease, ControlPlaneLeadershipRequest,
-    ControlPlaneLeadershipRenewal, ControlPlaneMember, ControlPlaneMemberStatus,
-    EnterpriseScaleError, EnterpriseScalePort, ProjectAuthorityAvailability, ProjectAuthorityPort,
+    ControlPlaneHeartbeatRequest, ControlPlaneLeadershipLease, ControlPlaneLeadershipRenewal,
+    ControlPlaneLeadershipRequest, ControlPlaneMember, ControlPlaneMemberStatus,
+    EnterpriseScaleError, EnterpriseScalePort, PolicyRevocationPort, ProjectAuthorityAvailability,
+    ProjectAuthorityPort, SecurityError,
 };
-use agentd_core::types::{AuthorityKey, ControlPlaneInstanceId};
-use agentd_project_authority::{
-    HttpSpecifyAuthorityTransport, SpecifyProjectAuthority,
+use agentd_core::types::{
+    AuthorityKey, ControlPlaneInstanceId, SecurityDenialReason, SecurityEpochRequest,
+    SecurityEpochStatus,
 };
+use agentd_project_authority::{HttpSpecifyAuthorityTransport, SpecifyProjectAuthority};
 use agentd_store::{SqliteEnterpriseScaleControlPlane, SqliteStore};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -50,7 +52,10 @@ impl std::fmt::Debug for EnterpriseControlPlaneConfig {
             .field("specify_url", &self.specify_url)
             .field("specify_authority_key", &self.specify_authority_key)
             .field("specify_authorization", &"[REDACTED]")
-            .field("allow_loopback_specify_http", &self.allow_loopback_specify_http)
+            .field(
+                "allow_loopback_specify_http",
+                &self.allow_loopback_specify_http,
+            )
             .field("heartbeat_interval", &self.heartbeat_interval)
             .field("leadership_lease", &self.leadership_lease)
             .finish()
@@ -73,12 +78,28 @@ impl EnterpriseControlPlaneConfig {
             return Ok(None);
         }
         let enterprise = &config.enterprise;
-        let instance_id = enterprise
-            .control_plane_instance_id
-            .as_ref()
-            .map(|value| value.trim().to_string())
-            .unwrap_or_else(|| ControlPlaneInstanceId::new().to_string());
-        if instance_id.len() != 29 || !instance_id.starts_with("ci_") {
+        let instance_id = required(
+            &enterprise.control_plane_instance_id,
+            "control-plane instance id",
+        )?;
+        if instance_id.len() != 29
+            || !instance_id.starts_with("ci_")
+            || !instance_id
+                .as_bytes()
+                .get(3)
+                .is_some_and(|byte| matches!(byte, b'0'..=b'7'))
+            || instance_id[3..].bytes().any(|byte| {
+                !matches!(
+                    byte,
+                    b'0'..=b'9'
+                        | b'A'..=b'H'
+                        | b'J'..=b'K'
+                        | b'M'..=b'N'
+                        | b'P'..=b'T'
+                        | b'V'..=b'Z'
+                )
+            })
+        {
             return Err(EnterpriseStartupError::Invalid(
                 "control-plane instance id must be ci_<26-character ULID>".to_string(),
             ));
@@ -88,20 +109,23 @@ impl EnterpriseControlPlaneConfig {
         let endpoint = required(&enterprise.control_plane_endpoint, "control-plane endpoint")?;
         let specify_url = required(&enterprise.specify_url, "Specify URL")?;
         let authority = required(&enterprise.specify_authority_key, "Specify authority key")?;
-        let authorization_file = enterprise.specify_authorization_file.as_deref().ok_or_else(|| {
-            EnterpriseStartupError::Invalid(
-                "Specify workload authorization file is required".to_string(),
-            )
-        })?;
+        let authorization_file = enterprise
+            .specify_authorization_file
+            .as_deref()
+            .ok_or_else(|| {
+                EnterpriseStartupError::Invalid(
+                    "Specify workload authorization file is required".to_string(),
+                )
+            })?;
         let specify_authorization = read_authorization(authorization_file)?;
         if enterprise.control_plane_heartbeat_seconds == 0
             || enterprise.control_plane_heartbeat_seconds > 60
-            || enterprise.control_plane_lease_seconds <= enterprise.control_plane_heartbeat_seconds * 2
+            || enterprise.control_plane_lease_seconds
+                <= enterprise.control_plane_heartbeat_seconds * 2
             || enterprise.control_plane_lease_seconds > 300
         {
             return Err(EnterpriseStartupError::Invalid(
-                "heartbeat must be 1..=60s and lease must be >2x heartbeat and <=300s"
-                    .to_string(),
+                "heartbeat must be 1..=60s and lease must be >2x heartbeat and <=300s".to_string(),
             ));
         }
         Ok(Some(Self {
@@ -216,13 +240,27 @@ pub async fn start_enterprise_coordination(
             "Specify health did not confirm the configured authority".to_string(),
         ));
     }
-    let scale = Arc::new(SqliteEnterpriseScaleControlPlane::new(
-        store.pool().clone(),
-    ));
+    let scale = Arc::new(SqliteEnterpriseScaleControlPlane::new(store.pool().clone()));
     let now = now_unix()?;
     let started_at = now;
-    heartbeat(&scale, &config, 1, started_at, now).await?;
-    let leadership = match acquire(&scale, &config, now, 1).await {
+    let snapshot = scale
+        .operational_snapshot(now)
+        .await
+        .map_err(|error| EnterpriseStartupError::Coordination(error.to_string()))?;
+    let previous_sequence = snapshot
+        .members
+        .iter()
+        .find(|member| member.instance_id == config.instance_id)
+        .map(|member| member.heartbeat_sequence);
+    let initial_sequence = previous_sequence.map_or(Ok(1), |sequence| {
+        sequence.checked_add(1).ok_or_else(|| {
+            EnterpriseStartupError::Coordination(
+                "control-plane heartbeat sequence is exhausted".to_string(),
+            )
+        })
+    })?;
+    heartbeat(&scale, &config, initial_sequence, started_at, now).await?;
+    let leadership = match acquire(&scale, &config, now, initial_sequence).await {
         Ok(lease) => Some(lease),
         Err(EnterpriseScaleError::Denied(_)) => None,
         Err(error) => {
@@ -237,7 +275,7 @@ pub async fn start_enterprise_coordination(
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let task_leadership = Arc::clone(&leadership);
     let task = tokio::spawn(async move {
-        let mut sequence = 1_u64;
+        let mut sequence = initial_sequence;
         let mut interval = tokio::time::interval(config.heartbeat_interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -285,6 +323,69 @@ pub async fn start_enterprise_coordination(
         shutdown_tx,
         task,
     }))
+}
+
+pub struct SpecifyPolicyRevocation {
+    authority: SpecifyProjectAuthority<HttpSpecifyAuthorityTransport>,
+}
+
+impl std::fmt::Debug for SpecifyPolicyRevocation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SpecifyPolicyRevocation")
+            .field("authority", &"[AUTHENTICATED]")
+            .finish()
+    }
+}
+
+impl SpecifyPolicyRevocation {
+    pub fn from_config(
+        config: &EnterpriseControlPlaneConfig,
+    ) -> Result<Self, EnterpriseStartupError> {
+        let transport = HttpSpecifyAuthorityTransport::new(
+            &config.specify_url,
+            config.specify_authorization.as_str(),
+            Duration::from_secs(10),
+            config.allow_loopback_specify_http,
+        )
+        .map_err(|error| EnterpriseStartupError::Specify(error.to_string()))?;
+        Ok(Self {
+            authority: SpecifyProjectAuthority::new(
+                config.specify_authority_key.clone(),
+                transport,
+            ),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl PolicyRevocationPort for SpecifyPolicyRevocation {
+    async fn check_security_epoch(
+        &self,
+        request: &SecurityEpochRequest,
+    ) -> Result<SecurityEpochStatus, SecurityError> {
+        let snapshot = self
+            .authority
+            .refresh(&request.execution_snapshot_ref)
+            .await
+            .map_err(|error| SecurityError::Unavailable(error.to_string()))?;
+        if snapshot.organization_ref != request.organization_ref
+            || snapshot.project_ref != request.project_ref
+            || snapshot.snapshot_ref != request.execution_snapshot_ref
+        {
+            return Err(SecurityError::Denied(
+                SecurityDenialReason::SnapshotMismatch,
+            ));
+        }
+        Ok(SecurityEpochStatus {
+            checkpoint: request.checkpoint,
+            organization_ref: snapshot.organization_ref,
+            project_ref: snapshot.project_ref,
+            execution_snapshot_ref: snapshot.snapshot_ref,
+            current_epoch: snapshot.policy_revocation_epoch,
+            observed_at: request.observed_at,
+        })
+    }
 }
 
 async fn heartbeat(
@@ -374,8 +475,12 @@ async fn renew(
 fn required(value: &Option<String>, field: &str) -> Result<String, EnterpriseStartupError> {
     value
         .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && value.len() <= 512)
+        .filter(|value| {
+            *value == value.trim()
+                && !value.is_empty()
+                && value.len() <= 512
+                && !value.chars().any(char::is_control)
+        })
         .map(str::to_string)
         .ok_or_else(|| EnterpriseStartupError::Invalid(format!("{field} is required")))
 }
@@ -391,7 +496,11 @@ fn read_authorization(path: &Path) -> Result<String, EnterpriseStartupError> {
     let value = std::fs::read_to_string(path)
         .map_err(|error| EnterpriseStartupError::Invalid(format!("authorization file: {error}")))?;
     let value = value.trim();
-    if value.is_empty() || value.chars().any(|character| matches!(character, '\r' | '\n')) {
+    if value.is_empty()
+        || value
+            .chars()
+            .any(|character| matches!(character, '\r' | '\n'))
+    {
         return Err(EnterpriseStartupError::Invalid(
             "Specify authorization value is invalid".to_string(),
         ));

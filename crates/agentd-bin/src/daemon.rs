@@ -6,33 +6,43 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agentd_core::CoreError;
-use agentd_core::ports::{
-    AgentBackend, PolicyRevocationPort, SecurityError, WorktreeAllocator,
-};
-use agentd_core::types::{AgentHandle, SecurityEpochRequest, SecurityEpochStatus, SpawnRequest};
+use agentd_core::ports::{AgentBackend, WorktreeAllocator};
+use agentd_core::types::{AgentHandle, SpawnRequest};
+use agentd_security::{ContentRedactor, RedactionLimits};
 use agentd_store::fleet_scheduler::SqliteFleetScheduler;
 use agentd_store::{
     FailedWorktreeCleanupCandidate, SqliteEnterpriseScaleControlPlane, SqliteStore,
 };
 use agentd_surface::host::RunHost;
-use agentd_surface::http::{AppState, AuthConfig, MediaConfig, SchedulerConfig, router};
-use agentd_security::{ContentRedactor, RedactionLimits};
+use agentd_surface::http::{
+    AppState, AuthConfig, MediaConfig, OPERATOR_READ_COOKIE_NAME, SchedulerConfig,
+    operator_read_cookie_value, router,
+};
 use agentd_worktree::{GitWorktreeProvider, WorktreePool};
 use axum::Router;
+use axum::extract::{Request, State};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Json, Response};
+use axum::routing::post;
+use serde_json::json;
+use subtle::ConstantTimeEq;
+use zeroize::Zeroizing;
 
 use crate::agent_mcp_context::{McpStdioContextBackend, mcp_stdio_command_from_current_process};
 use crate::cli::DaemonConfig;
 use crate::clock::SystemClock;
 use crate::command_runner::TokioCommandRunner;
-use crate::host::ProductionRunHost;
 use crate::enterprise::{
-    EnterpriseControlPlaneConfig, EnterpriseLeadershipGate, start_enterprise_coordination,
+    EnterpriseControlPlaneConfig, EnterpriseLeadershipGate, SpecifyPolicyRevocation,
+    start_enterprise_coordination,
 };
-use crate::native_backend::{
-    LocalInteractiveSandbox, NativeAgentBackend, NativeAgentLifecycle,
-    StandalonePolicyRevocation,
-};
+use crate::fleet_http::{FleetHttpState, compose as compose_fleet_http};
+use crate::host::ProductionRunHost;
 use crate::mempal::OfflineMempal;
+use crate::native_backend::{
+    LocalInteractiveSandbox, NativeAgentBackend, NativeAgentLifecycle, StandalonePolicyRevocation,
+};
 use crate::runtime::{NativeRuntimeCompositionConfig, compose_native_runtime};
 use crate::security::{
     SecurityRuntimeMode, build_security_runtime, validate_enterprise_control_plane_auth,
@@ -46,21 +56,6 @@ impl AgentBackend for ControlPlaneOnlyBackend {
     async fn spawn(&self, _request: SpawnRequest) -> Result<AgentHandle, CoreError> {
         Err(CoreError::Backend(
             "enterprise control-plane-only process cannot execute local agents".to_string(),
-        ))
-    }
-}
-
-#[derive(Debug)]
-struct FailClosedPolicyRevocation;
-
-#[async_trait::async_trait]
-impl PolicyRevocationPort for FailClosedPolicyRevocation {
-    async fn check_security_epoch(
-        &self,
-        _request: &SecurityEpochRequest,
-    ) -> Result<SecurityEpochStatus, SecurityError> {
-        Err(SecurityError::Unavailable(
-            "enterprise policy revocation provider is not configured".to_string(),
         ))
     }
 }
@@ -95,6 +90,148 @@ pub fn build_router_with_auth_and_media(
         media,
         scheduler: SchedulerConfig::default(),
     })
+}
+
+#[derive(Clone)]
+struct EnterpriseOperatorGate {
+    bearer: Arc<Zeroizing<String>>,
+    read_cookie: Arc<Zeroizing<String>>,
+    set_cookie: Arc<HeaderValue>,
+}
+
+impl std::fmt::Debug for EnterpriseOperatorGate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnterpriseOperatorGate")
+            .finish_non_exhaustive()
+    }
+}
+
+impl EnterpriseOperatorGate {
+    fn from_auth(auth: &AuthConfig) -> Result<Self, CoreError> {
+        let bearer = auth
+            .api_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| {
+                CoreError::Invariant(
+                    "enterprise operator router requires a non-empty API token".to_string(),
+                )
+            })?;
+        let read_cookie = operator_read_cookie_value(auth).ok_or_else(|| {
+            CoreError::Invariant(
+                "enterprise operator read credential could not be derived".to_string(),
+            )
+        })?;
+        let set_cookie = HeaderValue::from_str(&format!(
+            "{OPERATOR_READ_COOKIE_NAME}={read_cookie}; Path=/; Secure; HttpOnly; SameSite=Strict"
+        ))
+        .map_err(|error| {
+            CoreError::Invariant(format!(
+                "enterprise operator read cookie is not a valid header value: {error}"
+            ))
+        })?;
+        Ok(Self {
+            bearer: Arc::new(Zeroizing::new(bearer.to_string())),
+            read_cookie: Arc::new(Zeroizing::new(read_cookie)),
+            set_cookie: Arc::new(set_cookie),
+        })
+    }
+
+    fn bearer_authorized(&self, headers: &HeaderMap) -> bool {
+        let Some(provided) = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .and_then(|value| value.split_once(' '))
+            .filter(|(scheme, token)| {
+                scheme.eq_ignore_ascii_case("bearer") && !token.trim().is_empty()
+            })
+            .map(|(_, token)| token.trim())
+        else {
+            return false;
+        };
+        provided.len() == self.bearer.len()
+            && bool::from(provided.as_bytes().ct_eq(self.bearer.as_bytes()))
+    }
+
+    fn read_cookie_authorized(&self, headers: &HeaderMap) -> bool {
+        headers
+            .get_all(header::COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(';'))
+            .filter_map(|pair| pair.trim().split_once('='))
+            .filter(|(name, _)| *name == OPERATOR_READ_COOKIE_NAME)
+            .any(|(_, value)| {
+                let provided = value.trim().as_bytes();
+                provided.len() == self.read_cookie.len()
+                    && bool::from(provided.ct_eq(self.read_cookie.as_bytes()))
+            })
+    }
+}
+
+/// Build the enterprise operator surface with a hard composition-layer auth
+/// boundary and an HttpOnly dashboard session limited to read requests.
+///
+/// # Errors
+/// [`CoreError`] when no operator bearer credential is configured.
+pub fn build_enterprise_operator_router(
+    host: Arc<dyn RunHost>,
+    auth: AuthConfig,
+    media: MediaConfig,
+) -> Result<Router, CoreError> {
+    let gate = EnterpriseOperatorGate::from_auth(&auth)?;
+    let session = Router::new()
+        .route("/api/operator/session", post(establish_operator_session))
+        .with_state(gate.clone());
+    Ok(build_router_with_auth_and_media(host, auth, media)
+        .merge(session)
+        .layer(middleware::from_fn_with_state(
+            gate,
+            enterprise_operator_gate,
+        )))
+}
+
+async fn enterprise_operator_gate(
+    State(gate): State<EnterpriseOperatorGate>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let public_shell = matches!(
+        request.uri().path(),
+        "/healthz" | "/dashboard" | "/dashboard/"
+    );
+    let bearer = gate.bearer_authorized(request.headers());
+    let read_session = (request.method() == Method::GET || request.method() == Method::HEAD)
+        && gate.read_cookie_authorized(request.headers());
+    if public_shell || bearer || read_session {
+        return next.run(request).await;
+    }
+    let mut response = (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({ "error": "operator bearer token required" })),
+    )
+        .into_response();
+    response.headers_mut().insert(
+        header::WWW_AUTHENTICATE,
+        HeaderValue::from_static("Bearer realm=\"agentd-operator\""),
+    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+async fn establish_operator_session(State(gate): State<EnterpriseOperatorGate>) -> Response {
+    let mut response = Json(json!({ "ok": true })).into_response();
+    response
+        .headers_mut()
+        .insert(header::SET_COOKIE, (*gate.set_cookie).clone());
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 /// Production media root colocated with the daemon database.
@@ -164,17 +301,18 @@ pub async fn build_production_host(config: &DaemonConfig) -> Result<ProductionRu
         .recover_startup(1_000)
         .await
         .map_err(|error| CoreError::Backend(error.to_string()))?;
-    tracing::info!(sessions = recovered.len(), "native runtime startup recovery complete");
+    tracing::info!(
+        sessions = recovered.len(),
+        "native runtime startup recovery complete"
+    );
     let native_backend = Arc::new(NativeAgentBackend::new(
         store.clone(),
         Arc::clone(&runtime_service),
         format!("agentd-{}", std::process::id()),
     ));
     let mcp_stdio_command = mcp_stdio_command_from_current_process(config)?;
-    let backend = McpStdioContextBackend::new(
-        Box::new((*native_backend).clone()),
-        mcp_stdio_command,
-    );
+    let backend =
+        McpStdioContextBackend::new(Box::new((*native_backend).clone()), mcp_stdio_command);
     Ok(ProductionRunHost::new(
         store,
         Box::new(backend),
@@ -193,13 +331,17 @@ async fn build_enterprise_control_plane_host(
     config: &DaemonConfig,
     store: SqliteStore,
     leadership: EnterpriseLeadershipGate,
-) -> Result<ProductionRunHost, CoreError> {
+    auth: AuthConfig,
+) -> Result<(ProductionRunHost, FleetHttpState), Box<dyn std::error::Error>> {
+    let enterprise_config = EnterpriseControlPlaneConfig::from_daemon(config)?
+        .ok_or_else(|| std::io::Error::other("enterprise configuration is unavailable"))?;
     let scale = Arc::new(SqliteEnterpriseScaleControlPlane::new(store.pool().clone()));
     let fleet = Arc::new(SqliteFleetScheduler::new(
         store.pool().clone(),
-        Arc::new(FailClosedPolicyRevocation),
+        Arc::new(SpecifyPolicyRevocation::from_config(&enterprise_config)?),
     ));
-    Ok(ProductionRunHost::new(
+    let fleet_http = compose_fleet_http(config, &store, fleet.clone(), auth)?;
+    let host = ProductionRunHost::new(
         store,
         Box::new(ControlPlaneOnlyBackend),
         Box::new(TokioCommandRunner::new()),
@@ -208,7 +350,8 @@ async fn build_enterprise_control_plane_host(
         config.workflows_dir.clone(),
     )
     .with_enterprise_control_plane(scale, fleet, leadership)
-    .with_tool_cwd(config.repo_dir.clone()))
+    .with_tool_cwd(config.repo_dir.clone());
+    Ok((host, fleet_http))
 }
 
 /// Run daemon boot-GC over the worktree pool while preserving worktrees that
@@ -367,14 +510,16 @@ async fn serve_enterprise_control_plane(
     let coordinator = start_enterprise_coordination(&config, &store)
         .await?
         .ok_or_else(|| std::io::Error::other("enterprise coordinator was not constructed"))?;
-    let host = build_enterprise_control_plane_host(
+    let (host, fleet_http) = build_enterprise_control_plane_host(
         &config,
         store,
         coordinator.leadership_gate(),
+        auth.clone(),
     )
     .await?;
     let media_dir = media_dir_for_db(&config.db_path);
-    let app = build_router_with_auth_and_media(Arc::new(host), auth, MediaConfig::new(media_dir));
+    let app = build_enterprise_operator_router(Arc::new(host), auth, MediaConfig::new(media_dir))?
+        .merge(crate::fleet_http::router(fleet_http));
     tracing::info!(%addr, "enterprise agentd control plane listening");
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())

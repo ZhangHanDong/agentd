@@ -7,6 +7,7 @@ use agentd_bin::security::{
     EnterpriseSecretRequest, EnterpriseSecurityProviders, EnterpriseWorkerOperation,
     ExecutionScopeResolveRequest, ExecutionSecurityScopePort, SecurityProviderKind,
     SecurityRuntime, SecurityRuntimeMode, build_security_runtime,
+    validate_enterprise_control_plane_auth,
 };
 use agentd_bin::{AgentdCli, DaemonConfig, daemon};
 use agentd_core::ports::{
@@ -1152,6 +1153,18 @@ async fn enterprise_security_mode_rejects_missing_providers_and_open_auth() {
     .expect_err("enterprise mode rejects open auth before composition");
     assert!(open_error.to_string().contains("open_auth"));
     assert!(open_ports.calls().is_empty());
+
+    let agent_only_auth = AuthConfig {
+        api_token: None,
+        agent_token_mode: AgentTokenMode::Hard,
+        agent_tokens: BTreeMap::from([("worker-a".to_string(), "worker-token".to_string())]),
+    };
+    assert!(
+        validate_enterprise_control_plane_auth(&agent_only_auth)
+            .expect_err("enterprise control plane requires an operator bearer token")
+            .to_string()
+            .contains("open_auth")
+    );
 
     let audit_only_auth = AuthConfig {
         api_token: Some("operator-token".to_string()),

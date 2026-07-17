@@ -1,0 +1,135 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentd-workload-proxy
+  annotations:
+    agentd.dev/proxy-contract: envoy-mtls-xfcc-v1
+data:
+  envoy.yaml: |
+    static_resources:
+      listeners:
+        - name: workload_mtls
+          address:
+            socket_address: { address: 0.0.0.0, port_value: 8443 }
+          filter_chains:
+            - transport_socket:
+                name: envoy.transport_sockets.tls
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+                  require_client_certificate: true
+                  common_tls_context:
+                    tls_certificates:
+                      - certificate_chain: { filename: /var/run/secrets/agentd/workload-pki/server.crt }
+                        private_key: { filename: /var/run/secrets/agentd/workload-pki/server.key }
+                    validation_context:
+                      trusted_ca: { filename: /var/run/secrets/agentd/workload-pki/client-ca.pem }
+              filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: workload_mtls
+                    use_remote_address: true
+                    normalize_path: true
+                    merge_slashes: true
+                    path_with_escaped_slashes_action: REJECT_REQUEST
+                    forward_client_cert_details: SANITIZE_SET
+                    set_current_client_cert_details:
+                      chain: true
+                      uri: true
+                    route_config:
+                      name: workload_routes
+                      virtual_hosts:
+                        - name: agentd
+                          domains: ["*"]
+                          request_headers_to_remove:
+                            - x-agentd-peer-certificate-chain
+                          request_headers_to_add:
+                            - header:
+                                key: x-agentd-workload-proxy-authorization
+                                value: __AGENTD_PROXY_AUTHORIZATION__
+                              append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                          routes:
+                            - match:
+                                path: /api/enterprise/fleet/heartbeat
+                                headers: [{ name: ":method", string_match: { exact: POST } }]
+                              route: { cluster: agentd }
+                            - match:
+                                path: /api/enterprise/fleet/pull
+                                headers: [{ name: ":method", string_match: { exact: POST } }]
+                              route: { cluster: agentd }
+                            - match:
+                                path: /api/enterprise/fleet/renew
+                                headers: [{ name: ":method", string_match: { exact: POST } }]
+                              route: { cluster: agentd }
+                            - match:
+                                path: /api/enterprise/fleet/complete
+                                headers: [{ name: ":method", string_match: { exact: POST } }]
+                              route: { cluster: agentd }
+                            - match:
+                                path: /api/enterprise/fleet/fail
+                                headers: [{ name: ":method", string_match: { exact: POST } }]
+                              route: { cluster: agentd }
+                            - match:
+                                path: /api/enterprise/fleet/cancel
+                                headers: [{ name: ":method", string_match: { exact: POST } }]
+                              route: { cluster: agentd }
+                            - match:
+                                path: /api/enterprise/fleet/artifacts/ack
+                                headers: [{ name: ":method", string_match: { exact: POST } }]
+                              route: { cluster: agentd }
+                            - match:
+                                path: /api/enterprise/fleet/side-effects/admit
+                                headers: [{ name: ":method", string_match: { exact: POST } }]
+                              route: { cluster: agentd }
+                    http_filters:
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+        - name: operator_tls
+          address:
+            socket_address: { address: 0.0.0.0, port_value: 9443 }
+          filter_chains:
+            - transport_socket:
+                name: envoy.transport_sockets.tls
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+                  common_tls_context:
+                    tls_certificates:
+                      - certificate_chain: { filename: /var/run/secrets/agentd/workload-pki/server.crt }
+                        private_key: { filename: /var/run/secrets/agentd/workload-pki/server.key }
+              filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: operator_tls
+                    use_remote_address: true
+                    normalize_path: true
+                    merge_slashes: true
+                    path_with_escaped_slashes_action: REJECT_REQUEST
+                    route_config:
+                      name: operator_routes
+                      virtual_hosts:
+                        - name: agentd
+                          domains: ["*"]
+                          request_headers_to_remove:
+                            - x-agentd-workload-proxy-authorization
+                            - x-agentd-peer-certificate-chain
+                            - x-forwarded-client-cert
+                          routes:
+                            - match: { prefix: / }
+                              route: { cluster: agentd }
+                    http_filters:
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+      clusters:
+        - name: agentd
+          type: STATIC
+          connect_timeout: 2s
+          load_assignment:
+            cluster_name: agentd
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address: { address: 127.0.0.1, port_value: 8787 }

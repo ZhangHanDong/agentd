@@ -8,6 +8,8 @@ MODEL="$ROOT/config/enterprise/factory-load-model-v1.json"
 DRIVER=""
 EVIDENCE_DIR=""
 DRIVER_ARGS=()
+MAX_DRIVER_STREAM_BYTES=$((2 * 1024 * 1024))
+SCRATCH_DIR=""
 
 usage() {
     cat <<'EOF'
@@ -22,7 +24,13 @@ Options:
 Execution requires AGENTD_ENTERPRISE_LOAD_PROFILE=1 and --execute. Claude
 credentials are removed from the driver environment. Prompts, transcripts,
 credentials, secret bytes, tenant keys, and artifact bytes are forbidden in
-driver output.
+driver output. The driver receives a cleared environment with only documented
+AGENTD connection variables, PATH, HOME, and TMPDIR forwarded.
+
+Metrics stdout must be one agentd.enterprise-load-metrics/v1 JSON object with
+the exact loadModelSha256 and a dimensions object containing tenant, project,
+room, matrixEvent, queue, artifactLog, certificationThroughput,
+failureInjection, testWindow, noisyNeighbor, and budget results.
 EOF
 }
 
@@ -73,25 +81,80 @@ if [[ "${AGENTD_ENTERPRISE_LOAD_PROFILE:-}" != "1" ]]; then
     echo "refusing load execution: set AGENTD_ENTERPRISE_LOAD_PROFILE=1" >&2
     exit 2
 fi
+if ! command -v jq >/dev/null 2>&1; then
+    echo "refusing load execution: jq is required for bounded metrics validation" >&2
+    exit 2
+fi
 
 mkdir -m 0700 -p "$EVIDENCE_DIR"
-cp "$MODEL" "$EVIDENCE_DIR/load-model.json"
+SCRATCH_DIR="$(mktemp -d "${TMPDIR:-/tmp}/agentd-enterprise-load.XXXXXX")"
+cp "$MODEL" "$SCRATCH_DIR/load-model.json"
+chmod 0400 "$SCRATCH_DIR/load-model.json"
+cleanup() {
+    if [[ -n "$SCRATCH_DIR" && -d "$SCRATCH_DIR" ]]; then
+        rm -rf "$SCRATCH_DIR"
+    fi
+}
+trap cleanup EXIT
 STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 set +e
-env -u ANTHROPIC_API_KEY -u CLAUDE_API_KEY \
-    AGENTD_FACTORY_LOAD_MODEL="$EVIDENCE_DIR/load-model.json" \
-    AGENTD_FACTORY_LOAD_MODEL_SHA256="$MODEL_SHA" \
-    AGENTD_LOAD_EVIDENCE_DIR="$EVIDENCE_DIR" \
-    "$DRIVER" "${DRIVER_ARGS[@]}" >"$EVIDENCE_DIR/metrics.json" 2>"$EVIDENCE_DIR/driver.stderr"
+(
+    ulimit -f 4096
+    env -i \
+        PATH="${PATH:-/usr/bin:/bin}" \
+        HOME="${HOME:-/nonexistent}" \
+        TMPDIR="${TMPDIR:-/tmp}" \
+        AGENTD_ENTERPRISE_URL="${AGENTD_ENTERPRISE_URL:-}" \
+        AGENTD_API_TOKEN="${AGENTD_API_TOKEN:-}" \
+        AGENTD_OPERATOR_CA_PEM="${AGENTD_OPERATOR_CA_PEM:-}" \
+        AGENTD_FACTORY_LOAD_MODEL="$SCRATCH_DIR/load-model.json" \
+        AGENTD_FACTORY_LOAD_MODEL_SHA256="$MODEL_SHA" \
+        AGENTD_LOAD_SCRATCH_DIR="$SCRATCH_DIR" \
+        KUBECONFIG="${KUBECONFIG:-}" \
+        "$DRIVER" "${DRIVER_ARGS[@]}" \
+        >"$SCRATCH_DIR/metrics.json" 2>"$SCRATCH_DIR/driver.stderr"
+)
 DRIVER_STATUS=$?
 set -e
 COMPLETED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-if [[ ! -s "$EVIDENCE_DIR/metrics.json" ]]; then
-    echo '{"error":"driver produced no metrics"}' >"$EVIDENCE_DIR/metrics.json"
+METRICS_VALID=1
+for stream in metrics.json driver.stderr; do
+    if [[ ! -f "$SCRATCH_DIR/$stream" ]] || \
+       [[ "$(wc -c <"$SCRATCH_DIR/$stream")" -gt "$MAX_DRIVER_STREAM_BYTES" ]]; then
+        METRICS_VALID=0
+    fi
+done
+if [[ ! -s "$SCRATCH_DIR/metrics.json" ]] || ! jq -e --arg model "$MODEL_SHA" '
+    . as $root |
+    ["tenant", "project", "room", "matrixEvent", "queue", "artifactLog",
+     "certificationThroughput", "failureInjection", "testWindow",
+     "noisyNeighbor", "budget"] as $required |
+    type == "object" and
+    $root.schemaVersion == "agentd.enterprise-load-metrics/v1" and
+    $root.loadModelSha256 == $model and
+    ($root.dimensions | type == "object") and
+    all($required[]; ($root.dimensions[.] | type == "object")) and
+    ([$root | .. | objects | keys[]] | all(
+      test("(^|_)(prompt|transcript|credential|secret|private_?key|certificate|artifact_?bytes|raw_?content|stdout|stderr)($|_)"; "i") | not
+    ))
+' "$SCRATCH_DIR/metrics.json" >/dev/null 2>&1; then
+    METRICS_VALID=0
 fi
+if [[ "$METRICS_VALID" != "1" ]]; then
+    DRIVER_STATUS=2
+    printf '%s\n' '{"error":"driver metrics rejected by evidence policy"}' \
+        >"$EVIDENCE_DIR/metrics.json"
+else
+    cp "$SCRATCH_DIR/metrics.json" "$EVIDENCE_DIR/metrics.json"
+fi
+cp "$MODEL" "$EVIDENCE_DIR/load-model.json"
 METRICS_SHA="$(sha256_file "$EVIDENCE_DIR/metrics.json")"
-STDERR_SHA="$(sha256_file "$EVIDENCE_DIR/driver.stderr")"
+if [[ -f "$SCRATCH_DIR/driver.stderr" ]]; then
+    STDERR_SHA="$(sha256_file "$SCRATCH_DIR/driver.stderr")"
+else
+    STDERR_SHA="$(printf '' | shasum -a 256 | awk '{print $1}')"
+fi
 SOURCE_REV="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || printf 'unknown')"
 cat >"$EVIDENCE_DIR/manifest.json" <<EOF
 {
@@ -101,6 +164,8 @@ cat >"$EVIDENCE_DIR/manifest.json" <<EOF
   "driverSha256": "$DRIVER_SHA",
   "metricsSha256": "$METRICS_SHA",
   "stderrSha256": "$STDERR_SHA",
+  "stderrRetained": false,
+  "metricsPolicyAccepted": $([[ "$METRICS_VALID" == "1" ]] && printf true || printf false),
   "driverExitStatus": $DRIVER_STATUS,
   "startedAt": "$STARTED_AT",
   "completedAt": "$COMPLETED_AT"

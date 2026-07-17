@@ -4,6 +4,7 @@ namespace: agentd-enterprise
 resources:
   - regions.yaml
   - control-plane.yaml
+  - workload-proxy.yaml
   - worker-pools.yaml
   - network-policy.yaml
   - autoscaling.yaml
@@ -17,4 +18,3 @@ generatorOptions:
   disableNameSuffixHash: false
 commonLabels:
   app.kubernetes.io/part-of: agentd-enterprise
-

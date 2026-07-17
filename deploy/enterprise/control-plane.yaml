@@ -4,13 +4,43 @@ metadata:
   name: agentd-control-plane
   labels:
     app.kubernetes.io/name: agentd-control-plane
+  annotations:
+    agentd.dev/endpoint-role: operator-api
 spec:
   selector:
     app.kubernetes.io/name: agentd-control-plane
   ports:
     - name: https
       port: 443
-      targetPort: http
+      targetPort: operator-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentd-worker-gateway
+  labels:
+    app.kubernetes.io/name: agentd-control-plane
+  annotations:
+    agentd.dev/endpoint-role: workload-mtls
+spec:
+  selector:
+    app.kubernetes.io/name: agentd-control-plane
+  ports:
+    - name: workload-mtls
+      port: 443
+      targetPort: workload-mtls
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agentd-control-plane-reference-state
+  annotations:
+    agentd.dev/storage-profile: sqlite-single-authority-reference-only
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 100Gi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -20,14 +50,14 @@ metadata:
     app.kubernetes.io/name: agentd-control-plane
   annotations:
     agentd.dev/rollout-policy: digest-and-signature-required
+    agentd.dev/ha-status: external-replicated-store-required
 spec:
-  replicas: 3
+  # The checked-in binary uses SQLite as a reference adapter. Increasing this
+  # value before replacing the full durable-store composition is unsafe.
+  replicas: 1
   revisionHistoryLimit: 5
   strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 1
-      maxSurge: 1
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: agentd-control-plane
@@ -39,27 +69,50 @@ spec:
       annotations:
         agentd.dev/image-signature-policy: agentd-signed-images
         agentd.dev/rollout-receipt-required: "true"
+        agentd.dev/rollout-id: ir_replace_with_ulid
+        agentd.dev/state-authority: sqlite-reference
+        agentd.dev/signature-bundle-sha256: replace-with-64-lowercase-hex
+        agentd.dev/policy-sha256: replace-with-64-lowercase-hex
     spec:
       serviceAccountName: agentd-control-plane
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 45
       securityContext:
         runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
-      topologySpreadConstraints:
-        - maxSkew: 1
-          topologyKey: topology.kubernetes.io/zone
-          whenUnsatisfiable: DoNotSchedule
-          labelSelector:
-            matchLabels:
-              app.kubernetes.io/name: agentd-control-plane
-        - maxSkew: 1
-          topologyKey: kubernetes.io/hostname
-          whenUnsatisfiable: ScheduleAnyway
-          labelSelector:
-            matchLabels:
-              app.kubernetes.io/name: agentd-control-plane
+      initContainers:
+        - name: render-workload-proxy
+          image: registry.example.invalid/busybox@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-eu", "-c"]
+          args:
+            - |
+              token="$(cat /var/run/secrets/agentd/proxy/authorization)"
+              case "$token" in
+                ''|*[!A-Za-z0-9_-]*) echo "invalid proxy authorization" >&2; exit 1 ;;
+              esac
+              sed "s|__AGENTD_PROXY_AUTHORIZATION__|$token|g" \
+                /etc/agentd/envoy-template/envoy.yaml \
+                > /var/run/agentd/envoy/envoy.yaml
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: envoy-template
+              mountPath: /etc/agentd/envoy-template
+              readOnly: true
+            - name: workload-proxy-authorization
+              mountPath: /var/run/secrets/agentd/proxy
+              readOnly: true
+            - name: envoy-runtime
+              mountPath: /var/run/agentd/envoy
       containers:
         - name: agentd
           image: registry.example.invalid/agentd@sha256:0000000000000000000000000000000000000000000000000000000000000000
@@ -68,10 +121,16 @@ spec:
             - --security-mode
             - enterprise
             - --enterprise-control-plane-only
+            - --agent-token-mode
+            - hard
             - --enterprise-bind-address
-            - 0.0.0.0
+            - 127.0.0.1
+            - --db-path
+            - /var/lib/agentd/agentd.db
             - --port
             - "8787"
+            - --control-plane-instance-id
+            - $(AGENTD_CONTROL_PLANE_INSTANCE_ID)
             - --enterprise-region
             - $(AGENTD_REGION)
             - --enterprise-zone
@@ -84,13 +143,27 @@ spec:
             - $(AGENTD_SPECIFY_AUTHORITY_KEY)
             - --specify-authorization-file
             - /var/run/secrets/agentd/specify/authorization
+            - --workload-trust-root-der
+            - /var/run/secrets/agentd/workload-trust/client-ca.der
+            - --workload-trust-domain
+            - factory.example
+            - --workload-proxy-authorization-file
+            - /var/run/secrets/agentd/proxy/authorization
           env:
             - name: AGENTD_REGION
               value: cn-east-1
             - name: AGENTD_ZONE
-              value: cn-east-1-multizone
-            - name: AGENTD_ENTERPRISE_STATE_ADAPTER_FILE
-              value: /var/run/agentd/state/adapter.json
+              value: cn-east-1a
+            - name: AGENTD_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: agentd-operator-api
+                  key: authorization
+            - name: AGENTD_CONTROL_PLANE_INSTANCE_ID
+              valueFrom:
+                secretKeyRef:
+                  name: agentd-control-plane-identity
+                  key: instance-id
             - name: AGENTD_SPECIFY_URL
               valueFrom:
                 secretKeyRef:
@@ -101,21 +174,6 @@ spec:
                 secretKeyRef:
                   name: agentd-enterprise-endpoints
                   key: specify-authority-key
-          ports:
-            - name: http
-              containerPort: 8787
-          readinessProbe:
-            httpGet:
-              path: /healthz
-              port: http
-            periodSeconds: 5
-            failureThreshold: 3
-          livenessProbe:
-            httpGet:
-              path: /healthz
-              port: http
-            periodSeconds: 15
-            failureThreshold: 4
           resources:
             requests:
               cpu: "500m"
@@ -129,38 +187,94 @@ spec:
               drop: ["ALL"]
             readOnlyRootFilesystem: true
           volumeMounts:
-            - name: state-adapter
-              mountPath: /var/run/agentd/state
-              readOnly: true
+            - name: state
+              mountPath: /var/lib/agentd
             - name: specify-authorization
               mountPath: /var/run/secrets/agentd/specify
+              readOnly: true
+            - name: workload-trust-roots
+              mountPath: /var/run/secrets/agentd/workload-trust
+              readOnly: true
+            - name: workload-proxy-authorization
+              mountPath: /var/run/secrets/agentd/proxy
               readOnly: true
             - name: policies
               mountPath: /etc/agentd/policies
               readOnly: true
             - name: tmp
               mountPath: /tmp
+        - name: envoy
+          image: registry.example.invalid/envoy@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          args: ["-c", "/var/run/agentd/envoy/envoy.yaml", "--log-level", "warning"]
+          ports:
+            - name: workload-mtls
+              containerPort: 8443
+            - name: operator-tls
+              containerPort: 9443
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: operator-tls
+              scheme: HTTPS
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: operator-tls
+              scheme: HTTPS
+            periodSeconds: 15
+            failureThreshold: 4
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: envoy-runtime
+              mountPath: /var/run/agentd/envoy
+              readOnly: true
+            - name: workload-pki
+              mountPath: /var/run/secrets/agentd/workload-pki
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
       volumes:
-        - name: state-adapter
-          secret:
-            secretName: agentd-enterprise-state-adapter
+        - name: state
+          persistentVolumeClaim:
+            claimName: agentd-control-plane-reference-state
         - name: specify-authorization
           secret:
             secretName: agentd-specify-authorization
+        - name: workload-pki
+          secret:
+            secretName: agentd-workload-pki
+        - name: workload-trust-roots
+          secret:
+            secretName: agentd-workload-pki
+            items:
+              - key: client-ca.der
+                path: client-ca.der
+        - name: workload-proxy-authorization
+          secret:
+            secretName: agentd-workload-proxy
+        - name: envoy-template
+          configMap:
+            name: agentd-workload-proxy
+        - name: envoy-runtime
+          emptyDir:
+            sizeLimit: 16Mi
         - name: policies
           configMap:
             name: agentd-enterprise-policies
         - name: tmp
           emptyDir:
             sizeLimit: 1Gi
----
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: agentd-control-plane
-spec:
-  minAvailable: 2
-  unhealthyPodEvictionPolicy: AlwaysAllow
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: agentd-control-plane

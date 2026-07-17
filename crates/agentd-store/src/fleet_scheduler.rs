@@ -12,20 +12,24 @@ use agentd_core::ports::{
     FleetTaskRequirements, PolicyRevocationPort, TaskLeaseDispatchRequest, WorkerAvailability,
 };
 use agentd_core::types::{
-    ArtifactUploadId, AuthorityKey, ExecutionArtifactId, FencingToken, FleetOutboxId, LeaseId,
-    LeaseStatus, OrganizationRef, PlacementCandidate, PlacementPolicy, ProjectExecutionSnapshotRef,
-    ProjectRef, ProtectedAction, SecurityCheckpoint, SecurityEpochRequest, TaskLeaseClaim,
-    TaskLeaseGrant, TaskRunId, WorkerId, WorkerIncarnationId, WorkerStatus, WorkloadRole,
+    ArtifactUploadId, AuthenticatedWorkload, AuthorityKey, ExecutionArtifactId, FencingToken,
+    FleetOutboxId, LeaseId, LeaseStatus, OrganizationRef, PlacementCandidate, PlacementPolicy,
+    ProjectExecutionSnapshotRef, ProjectRef, ProtectedAction, SecurityCheckpoint,
+    SecurityEpochRequest, TaskLeaseClaim, TaskLeaseGrant, TaskRunId, WorkerId, WorkerIncarnationId,
+    WorkerStatus, WorkloadRole,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use sqlx::pool::PoolConnection;
-use sqlx::{Row, Sqlite, SqliteConnection, SqlitePool};
+use sqlx::{Row, SqliteConnection, SqlitePool};
 
 use crate::task_lease_control_plane::{
     ClaimAuthorization, Decision, authorize_claim, close_in_transaction, dispatch_in_transaction,
     renew_in_transaction, terminalize_active,
 };
+use crate::util::SqliteImmediateTransaction;
+
+const MAX_FLEET_SET_VALUES: usize = 128;
+const MAX_WORKER_SLOTS: u32 = 10_000;
 
 const TASK_SELECT: &str = "SELECT queue.execution_task_id, queue.idempotency_key, queue.status, \
      queue.snapshot_authority_key, queue.snapshot_resource_id, queue.snapshot_resource_version, \
@@ -193,8 +197,9 @@ impl FleetSchedulerPort for SqliteFleetScheduler {
         validate_heartbeat(request)?;
         let availability = &request.availability;
         let mut connection = begin_immediate(&self.pool).await?;
+        validate_current_identity(&mut connection, &request.workload).await?;
         let worker = sqlx::query(
-            "SELECT worker.status, worker.trust_domain, incarnation.is_current \
+            "SELECT worker.status, worker.trust_domain, worker.labels_json, incarnation.is_current \
              FROM worker_incarnations AS incarnation \
              JOIN workers AS worker ON worker.id = incarnation.worker_id \
              WHERE incarnation.id = ? AND incarnation.worker_id = ?",
@@ -224,6 +229,13 @@ impl FleetSchedulerPort for SqliteFleetScheduler {
                 FleetDenialReason::IdentityMismatch,
             ));
         }
+        validate_enrollment_attestation(
+            &mut connection,
+            &worker.get::<String, _>("labels_json"),
+            availability,
+            &request.workload.trust_domain,
+        )
+        .await?;
 
         if let Some(row) = sqlx::query(
             "SELECT heartbeat_sequence, worker_id FROM enterprise_worker_availability \
@@ -409,7 +421,14 @@ impl FleetSchedulerPort for SqliteFleetScheduler {
                         }
                     }
                 };
-            record_block(&self.pool, &task_id, block, request.observed_at).await?;
+            record_block(
+                &self.pool,
+                &request.workload,
+                &task_id,
+                block,
+                request.observed_at,
+            )
+            .await?;
         }
         Ok(None)
     }
@@ -419,9 +438,11 @@ impl FleetSchedulerPort for SqliteFleetScheduler {
         request: &FleetRenewRequest,
     ) -> Result<TaskLeaseGrant, FleetSchedulerError> {
         validate_report_workload(&request.workload, &request.claim, request.observed_at)?;
-        if request.expires_at <= request.observed_at {
+        if request.expires_at <= request.observed_at
+            || request.expires_at.saturating_sub(request.observed_at) > 300
+        {
             return Err(FleetSchedulerError::Invalid(
-                "renewal expiry must be in the future".to_string(),
+                "renewal expiry must be in the future and at most 300 seconds".to_string(),
             ));
         }
         let scope = queue_epoch_scope(&self.pool, &request.claim.execution_task_id).await?;
@@ -435,6 +456,7 @@ impl FleetSchedulerPort for SqliteFleetScheduler {
         self.check_epoch(&scope.request(SecurityCheckpoint::LeaseRenewal, request.observed_at))
             .await?;
         let mut connection = begin_immediate(&self.pool).await?;
+        validate_current_identity(&mut connection, &request.workload).await?;
         let lease_request = agentd_core::ports::TaskLeaseRenewRequest {
             claim: request.claim.clone(),
             observed_at: request.observed_at,
@@ -487,6 +509,7 @@ impl FleetSchedulerPort for SqliteFleetScheduler {
         validate_sha256(&request.outcome_sha256, "outcome sha256")?;
         let request_sha256 = sha256(request)?;
         let mut connection = begin_immediate(&self.pool).await?;
+        validate_current_identity(&mut connection, &request.workload).await?;
         if receipt_matches(
             &mut connection,
             "complete",
@@ -568,6 +591,7 @@ impl FleetSchedulerPort for SqliteFleetScheduler {
         validate_code(&request.failure_code, "failure code")?;
         let request_sha256 = sha256(request)?;
         let mut connection = begin_immediate(&self.pool).await?;
+        validate_current_identity(&mut connection, &request.workload).await?;
         if receipt_matches(
             &mut connection,
             "fail",
@@ -668,6 +692,7 @@ impl FleetSchedulerPort for SqliteFleetScheduler {
         validate_code(&request.reason_code, "cancel reason code")?;
         let request_sha256 = sha256(request)?;
         let mut connection = begin_immediate(&self.pool).await?;
+        validate_current_identity(&mut connection, &request.workload).await?;
         if receipt_matches(
             &mut connection,
             "cancel",
@@ -748,6 +773,7 @@ impl FleetSchedulerPort for SqliteFleetScheduler {
         .await?;
         let request_sha256 = sha256(request)?;
         let mut connection = begin_immediate(&self.pool).await?;
+        validate_current_identity(&mut connection, &request.workload).await?;
         if receipt_matches(
             &mut connection,
             "artifact",
@@ -838,6 +864,7 @@ impl FleetSchedulerPort for SqliteFleetScheduler {
             admitted_at: request.observed_at,
         };
         let mut connection = begin_immediate(&self.pool).await?;
+        validate_current_identity(&mut connection, &request.workload).await?;
         if receipt_matches(
             &mut connection,
             "side_effect",
@@ -1024,6 +1051,7 @@ impl FleetSchedulerPort for SqliteFleetScheduler {
             ));
         }
         let after_sequence = if let Some(after) = after {
+            validate_id(after.as_str(), "fo_", "outbox event id")?;
             sqlx::query_scalar::<_, i64>(
                 "SELECT sequence FROM enterprise_scheduler_outbox WHERE id = ?",
             )
@@ -1052,6 +1080,7 @@ impl FleetSchedulerPort for SqliteFleetScheduler {
         &self,
         execution_task_id: &TaskRunId,
     ) -> Result<Option<FleetExplain>, FleetSchedulerError> {
+        validate_id(execution_task_id.as_str(), "tr_", "execution task id")?;
         Ok(get_task(&self.pool, execution_task_id)
             .await?
             .map(|task| FleetExplain {
@@ -1088,6 +1117,7 @@ impl SqliteFleetScheduler {
                     FleetDenialReason::IdentityMismatch,
                 ))?;
         let mut connection = begin_immediate(&self.pool).await?;
+        validate_current_identity(&mut connection, &request.workload).await?;
         let queue = sqlx::query(
             "SELECT status, next_eligible_at, project_authority_key, project_resource_id, \
                     project_resource_version, quota_max_active \
@@ -1303,6 +1333,81 @@ fn candidate_block(
         return Ok(Some(FleetDenialReason::PlacementDenied));
     }
     Ok(None)
+}
+
+async fn validate_enrollment_attestation(
+    connection: &mut SqliteConnection,
+    labels_json: &str,
+    availability: &WorkerAvailability,
+    trust_domain: &str,
+) -> Result<(), FleetSchedulerError> {
+    let labels: serde_json::Value = serde_json::from_str(labels_json)
+        .map_err(|error| FleetSchedulerError::Unavailable(error.to_string()))?;
+    let Some(attestation) = labels.get("agentd_attestation") else {
+        return Err(FleetSchedulerError::Denied(
+            FleetDenialReason::PlacementDenied,
+        ));
+    };
+    let expected = |field: &str| attestation.get(field).and_then(serde_json::Value::as_str);
+    let digest = |field: &str| expected(field).is_some_and(is_sha256);
+    let Some(rollout_id) = expected("rollout_id") else {
+        return Err(FleetSchedulerError::Denied(
+            FleetDenialReason::PlacementDenied,
+        ));
+    };
+    validate_id(rollout_id, "ir_", "worker rollout id")?;
+    let rollout = sqlx::query(
+        "SELECT image_digest, signature_bundle_sha256, policy_sha256, \
+                required_zones_json, status \
+         FROM enterprise_worker_image_rollouts WHERE rollout_id = ?",
+    )
+    .bind(rollout_id)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(storage_error)?
+    .ok_or(FleetSchedulerError::Denied(
+        FleetDenialReason::PlacementDenied,
+    ))?;
+    let required_zones: BTreeSet<String> =
+        serde_json::from_str(&rollout.get::<String, _>("required_zones_json"))
+            .map_err(|error| FleetSchedulerError::Unavailable(error.to_string()))?;
+    let policy_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM enterprise_zone_pool_policies \
+         WHERE rollout_id = ? AND region = ? AND zone = ? AND resource_class = ? \
+           AND trust_domain = ? AND enabled = 1",
+    )
+    .bind(rollout_id)
+    .bind(&availability.region)
+    .bind(&availability.zone)
+    .bind(&availability.resource_class)
+    .bind(trust_domain)
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(storage_error)?;
+    let rollout_status = rollout.get::<String, _>("status");
+    let rollout_image = rollout.get::<String, _>("image_digest");
+    let rollout_signature = rollout.get::<String, _>("signature_bundle_sha256");
+    let rollout_policy = rollout.get::<String, _>("policy_sha256");
+    let valid = availability.image_signature_verified
+        && rollout_status != "rolled_back"
+        && rollout_image.as_str() == availability.image_digest.as_str()
+        && expected("signature_bundle_sha256") == Some(rollout_signature.as_str())
+        && expected("signature_policy_sha256") == Some(rollout_policy.as_str())
+        && expected("image_digest") == Some(availability.image_digest.as_str())
+        && expected("region") == Some(availability.region.as_str())
+        && expected("zone") == Some(availability.zone.as_str())
+        && expected("resource_class") == Some(availability.resource_class.as_str())
+        && digest("signature_bundle_sha256")
+        && digest("signature_policy_sha256")
+        && required_zones.contains(&availability.zone)
+        && policy_count == 1;
+    if valid {
+        Ok(())
+    } else {
+        Err(FleetSchedulerError::Denied(
+            FleetDenialReason::PlacementDenied,
+        ))
+    }
 }
 
 async fn quota_available(
@@ -1576,12 +1681,12 @@ async fn insert_receipt(
 }
 
 async fn authorize_or_reject(
-    connection: &mut SqliteConnection,
+    connection: &mut SqliteImmediateTransaction,
     kind: &str,
     claim: &TaskLeaseClaim,
     observed_at: i64,
 ) -> Result<TaskLeaseGrant, FleetSchedulerError> {
-    match authorize_claim(connection, claim, observed_at)
+    match authorize_claim(&mut **connection, claim, observed_at)
         .await
         .map_err(lease_error)?
     {
@@ -1593,14 +1698,21 @@ async fn authorize_or_reject(
 }
 
 async fn reject_report<T>(
-    connection: &mut SqliteConnection,
+    connection: &mut SqliteImmediateTransaction,
     kind: &str,
     claim: &TaskLeaseClaim,
     error: agentd_core::ports::TaskLeaseError,
     observed_at: i64,
 ) -> Result<T, FleetSchedulerError> {
-    record_fencing_rejection(connection, kind, claim, &error.to_string(), observed_at).await?;
-    commit_connection(connection).await?;
+    record_fencing_rejection(
+        &mut **connection,
+        kind,
+        claim,
+        &error.to_string(),
+        observed_at,
+    )
+    .await?;
+    commit(connection).await?;
     Err(lease_error(error))
 }
 
@@ -1751,10 +1863,13 @@ async fn release_slot(
 
 async fn record_block(
     pool: &SqlitePool,
+    workload: &AuthenticatedWorkload,
     task_id: &TaskRunId,
     reason: FleetDenialReason,
     observed_at: i64,
 ) -> Result<(), FleetSchedulerError> {
+    let mut connection = begin_immediate(pool).await?;
+    validate_current_identity(&mut connection, workload).await?;
     sqlx::query(
         "UPDATE enterprise_fleet_queue SET block_code = ?, updated_at = ? \
          WHERE execution_task_id = ? AND status IN ('queued', 'retry_wait')",
@@ -1762,9 +1877,58 @@ async fn record_block(
     .bind(reason.as_str())
     .bind(observed_at)
     .bind(task_id.as_str())
-    .execute(pool)
+    .execute(&mut *connection)
     .await
     .map_err(storage_error)?;
+    commit(&mut connection).await?;
+    Ok(())
+}
+
+async fn validate_current_identity(
+    connection: &mut SqliteConnection,
+    workload: &AuthenticatedWorkload,
+) -> Result<(), FleetSchedulerError> {
+    let worker_id = workload
+        .worker_id
+        .as_ref()
+        .ok_or(FleetSchedulerError::Denied(
+            FleetDenialReason::IdentityMismatch,
+        ))?;
+    let incarnation_id =
+        workload
+            .worker_incarnation_id
+            .as_ref()
+            .ok_or(FleetSchedulerError::Denied(
+                FleetDenialReason::IdentityMismatch,
+            ))?;
+    let active: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM workload_identity_bindings AS binding \
+         JOIN worker_incarnations AS incarnation \
+           ON incarnation.id = binding.worker_incarnation_id \
+          AND incarnation.worker_id = binding.worker_id \
+         JOIN workers AS worker ON worker.id = binding.worker_id \
+         WHERE binding.certificate_sha256 = ? AND binding.spiffe_uri = ? \
+           AND binding.role = 'worker' AND binding.trust_domain = ? \
+           AND binding.worker_id = ? AND binding.worker_incarnation_id = ? \
+           AND binding.not_before = ? AND binding.not_after = ? \
+           AND binding.revoked_at IS NULL AND incarnation.is_current = 1 \
+           AND worker.trust_domain = binding.trust_domain",
+    )
+    .bind(&workload.certificate_sha256)
+    .bind(&workload.spiffe_uri)
+    .bind(&workload.trust_domain)
+    .bind(worker_id.as_str())
+    .bind(incarnation_id.as_str())
+    .bind(workload.not_before)
+    .bind(workload.not_after)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(storage_error)?;
+    if active.is_none() {
+        return Err(FleetSchedulerError::Denied(
+            FleetDenialReason::IdentityMismatch,
+        ));
+    }
     Ok(())
 }
 
@@ -1787,9 +1951,14 @@ fn validate_submit(request: &FleetSubmitRequest) -> Result<(), FleetSchedulerErr
         ));
     }
     validate_key(&request.requirements.resource_class, "resource class")?;
-    if request.requirements.max_attempts == 0 || request.requirements.quota_max_active == 0 {
+    if request.requirements.max_attempts == 0
+        || request.requirements.max_attempts > 10_000
+        || request.requirements.quota_max_active == 0
+        || request.requirements.quota_max_active > 100_000
+        || request.requirements.required_capabilities.len() > MAX_FLEET_SET_VALUES
+    {
         return Err(FleetSchedulerError::Invalid(
-            "max attempts and quota must be positive".to_string(),
+            "max attempts, quota, or capability count is outside protocol bounds".to_string(),
         ));
     }
     for capability in &request.requirements.required_capabilities {
@@ -1810,8 +1979,13 @@ fn validate_heartbeat(request: &FleetHeartbeatRequest) -> Result<(), FleetSchedu
         || availability.protocol_min == 0
         || availability.protocol_max < availability.protocol_min
         || availability.total_slots == 0
+        || availability.total_slots > MAX_WORKER_SLOTS
         || availability.available_slots > availability.total_slots
         || availability.data_classifications.is_empty()
+        || availability.capabilities.len() > MAX_FLEET_SET_VALUES
+        || availability.egress_profile_ids.len() > MAX_FLEET_SET_VALUES
+        || availability.tenant_cache_namespaces.len() > MAX_FLEET_SET_VALUES
+        || (availability.worker_status != WorkerStatus::Online && availability.available_slots != 0)
         || !matches!(
             availability.worker_status,
             WorkerStatus::Online | WorkerStatus::Draining | WorkerStatus::Offline
@@ -1862,6 +2036,7 @@ fn validate_pull(request: &FleetPullRequest) -> Result<(), FleetSchedulerError> 
         || request.heartbeat_max_age_seconds == 0
         || request.heartbeat_max_age_seconds > 300
         || request.lease_expires_at <= request.observed_at
+        || request.lease_expires_at.saturating_sub(request.observed_at) > 300
     {
         return Err(FleetSchedulerError::Invalid(
             "invalid pull protocol, heartbeat age, or lease expiry".to_string(),
@@ -1931,6 +2106,18 @@ fn validate_report_workload(
     claim: &TaskLeaseClaim,
     observed_at: i64,
 ) -> Result<(), FleetSchedulerError> {
+    validate_id(claim.execution_task_id.as_str(), "tr_", "execution task id")?;
+    validate_id(
+        claim.worker_incarnation_id.as_str(),
+        "wi_",
+        "worker incarnation id",
+    )?;
+    validate_id(claim.lease_id.as_str(), "ls_", "lease id")?;
+    if claim.fencing_token == 0 {
+        return Err(FleetSchedulerError::Invalid(
+            "lease fencing token must be positive".to_string(),
+        ));
+    }
     let worker_id = workload
         .worker_id
         .as_ref()
@@ -1951,9 +2138,18 @@ fn validate_workload(
     incarnation: &WorkerIncarnationId,
     observed_at: i64,
 ) -> Result<(), FleetSchedulerError> {
+    let valid_ids = validate_id(worker_id.as_str(), "wk_", "worker id").is_ok()
+        && validate_id(incarnation.as_str(), "wi_", "worker incarnation id").is_ok();
+    let expected_spiffe = format!("spiffe://{}/worker/{}", workload.trust_domain, incarnation);
     if workload.role != WorkloadRole::Worker
+        || !valid_ids
         || workload.worker_id.as_ref() != Some(worker_id)
         || workload.worker_incarnation_id.as_ref() != Some(incarnation)
+        || !valid_trust_domain(&workload.trust_domain)
+        || workload.spiffe_uri != expected_spiffe
+        || !is_sha256(&workload.certificate_sha256)
+        || workload.not_before < 0
+        || workload.not_after <= workload.not_before
         || observed_at < workload.not_before
         || observed_at >= workload.not_after
     {
@@ -1965,7 +2161,11 @@ fn validate_workload(
 }
 
 fn validate_key(value: &str, field: &str) -> Result<(), FleetSchedulerError> {
-    if value.trim().is_empty() || value.len() > 256 {
+    if value != value.trim()
+        || value.is_empty()
+        || value.len() > 256
+        || value.chars().any(char::is_control)
+    {
         return Err(FleetSchedulerError::Invalid(format!(
             "{field} must be within 1..=256 bytes"
         )));
@@ -1998,6 +2198,27 @@ fn validate_sha256(value: &str, field: &str) -> Result<(), FleetSchedulerError> 
     Ok(())
 }
 
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn valid_trust_domain(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 253
+        && value.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        })
+}
+
 fn validate_sha256_digest(value: &str) -> Result<(), FleetSchedulerError> {
     let digest = value
         .strip_prefix("sha256:")
@@ -2009,7 +2230,11 @@ fn validate_id(value: &str, prefix: &str, field: &str) -> Result<(), FleetSchedu
     let payload = value
         .strip_prefix(prefix)
         .ok_or_else(|| FleetSchedulerError::Invalid(format!("invalid {field} prefix")))?;
-    if payload.len() != 26 || payload.parse::<ulid::Ulid>().is_err() {
+    if payload.len() != 26
+        || !payload
+            .parse::<ulid::Ulid>()
+            .is_ok_and(|parsed| parsed.to_string() == payload)
+    {
         return Err(FleetSchedulerError::Invalid(format!("invalid {field}")));
     }
     Ok(())
@@ -2022,33 +2247,20 @@ fn retry_delay_seconds(attempt_count: i64) -> i64 {
         .min(300)
 }
 
-async fn begin_immediate(pool: &SqlitePool) -> Result<PoolConnection<Sqlite>, FleetSchedulerError> {
-    let mut connection = pool.acquire().await.map_err(storage_error)?;
-    sqlx::query("BEGIN IMMEDIATE")
-        .execute(&mut *connection)
+async fn begin_immediate(
+    pool: &SqlitePool,
+) -> Result<SqliteImmediateTransaction, FleetSchedulerError> {
+    SqliteImmediateTransaction::begin(pool)
         .await
-        .map_err(storage_error)?;
-    Ok(connection)
+        .map_err(storage_error)
 }
 
-async fn commit(connection: &mut PoolConnection<Sqlite>) -> Result<(), FleetSchedulerError> {
-    commit_connection(&mut *connection).await
+async fn commit(connection: &mut SqliteImmediateTransaction) -> Result<(), FleetSchedulerError> {
+    connection.commit().await.map_err(storage_error)
 }
 
-async fn commit_connection(connection: &mut SqliteConnection) -> Result<(), FleetSchedulerError> {
-    sqlx::query("COMMIT")
-        .execute(&mut *connection)
-        .await
-        .map_err(storage_error)?;
-    Ok(())
-}
-
-async fn rollback(connection: &mut PoolConnection<Sqlite>) -> Result<(), FleetSchedulerError> {
-    sqlx::query("ROLLBACK")
-        .execute(&mut **connection)
-        .await
-        .map_err(storage_error)?;
-    Ok(())
+async fn rollback(connection: &mut SqliteImmediateTransaction) -> Result<(), FleetSchedulerError> {
+    connection.rollback().await.map_err(storage_error)
 }
 
 fn storage_error(error: sqlx::Error) -> FleetSchedulerError {

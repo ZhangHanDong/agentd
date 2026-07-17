@@ -88,7 +88,28 @@ async fn migration_is_idempotent_on_reopen() {
         .fetch_one(s2.pool())
         .await
         .expect("schema version row");
-    assert_eq!(version, "20");
+    assert_eq!(version, "27");
+    let triggers: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='trigger' ORDER BY name")
+            .fetch_all(s2.pool())
+            .await
+            .expect("enterprise scale triggers");
+    for expected in [
+        "trg_enterprise_tenant_key_transitions_no_update",
+        "trg_enterprise_tenant_key_transitions_no_delete",
+        "trg_enterprise_artifact_replica_transitions_no_update",
+        "trg_enterprise_artifact_replica_transitions_no_delete",
+        "trg_enterprise_mutation_fences_no_update",
+        "trg_enterprise_mutation_fences_no_delete",
+        "trg_enterprise_replication_plans_no_update",
+        "trg_enterprise_dr_checkpoints_no_update",
+        "trg_enterprise_dr_drills_no_update",
+    ] {
+        assert!(
+            triggers.iter().any(|trigger| trigger == expected),
+            "missing enterprise scale immutability trigger {expected}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -145,7 +166,7 @@ async fn migration_adds_message_attachment_columns() {
         .fetch_one(store.pool())
         .await
         .expect("schema version row");
-    assert_eq!(version, "19");
+    assert_eq!(version, "27");
 }
 
 #[tokio::test]
@@ -236,7 +257,7 @@ async fn migration_creates_remote_relay_backend_tables() {
         .fetch_one(store.pool())
         .await
         .expect("schema version row");
-    assert_eq!(version, "19");
+    assert_eq!(version, "27");
 }
 
 #[tokio::test]
@@ -305,7 +326,7 @@ async fn migration_creates_matrix_bridge_contract_tables() {
         .fetch_one(store.pool())
         .await
         .expect("schema version row");
-    assert_eq!(version, "19");
+    assert_eq!(version, "27");
 }
 
 #[tokio::test]
@@ -357,7 +378,7 @@ async fn migration_creates_agent_chat_task_import_tables() {
         .fetch_one(store.pool())
         .await
         .expect("schema version row");
-    assert_eq!(version, "19");
+    assert_eq!(version, "27");
 }
 
 #[tokio::test]
@@ -377,7 +398,7 @@ async fn migration_adds_direct_message_schema_column() {
         .fetch_one(store.pool())
         .await
         .expect("schema version row");
-    assert_eq!(version, "19");
+    assert_eq!(version, "27");
 }
 
 #[tokio::test]
@@ -487,7 +508,7 @@ async fn migration_creates_agent_scheduler_tables() {
         .fetch_one(store.pool())
         .await
         .expect("schema version row");
-    assert_eq!(version, "19");
+    assert_eq!(version, "27");
 }
 
 #[tokio::test]
@@ -534,7 +555,7 @@ async fn migration_creates_enterprise_agent_worker_runtime_tables() {
         .fetch_one(store.pool())
         .await
         .expect("schema version");
-    assert_eq!(version, "19");
+    assert_eq!(version, "27");
 
     let indexes: Vec<String> = sqlx::query_scalar(
         "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_%one_current'",
@@ -598,7 +619,7 @@ async fn migration_creates_enterprise_artifact_audit_tables() {
         .fetch_one(store.pool())
         .await
         .expect("schema version");
-    assert_eq!(version, "19");
+    assert_eq!(version, "27");
 
     let triggers: Vec<String> =
         sqlx::query("SELECT name FROM sqlite_master WHERE type='trigger' ORDER BY name")
@@ -667,7 +688,7 @@ async fn migration_creates_constrained_task_lease_tables() {
         .fetch_one(store.pool())
         .await
         .expect("schema version");
-    assert_eq!(version, "19");
+    assert_eq!(version, "27");
 
     let lease_fk_tables: Vec<String> = sqlx::query_scalar(
         "SELECT \"table\" FROM pragma_foreign_key_list('execution_task_leases') ORDER BY \"table\"",
@@ -835,4 +856,33 @@ async fn migration_creates_constrained_task_lease_tables() {
         .is_err(),
         "head history cannot be deleted"
     );
+}
+
+#[tokio::test]
+async fn migration_creates_enterprise_transition_and_mutation_fence_ledgers() {
+    let (store, _dir) = open_temp().await;
+    let tables: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            .fetch_all(store.pool())
+            .await
+            .expect("enterprise scale tables");
+    for expected in [
+        "enterprise_tenant_key_transitions",
+        "enterprise_artifact_replica_transitions",
+        "enterprise_mutation_fences",
+        "enterprise_worker_image_zone_observation_history",
+        "enterprise_worker_image_rollout_rollbacks",
+        "enterprise_zone_pool_policy_versions",
+        "enterprise_retention_policy_versions",
+    ] {
+        assert!(
+            tables.iter().any(|table| table == expected),
+            "missing enterprise scale table {expected}"
+        );
+    }
+    let version: String = sqlx::query_scalar("SELECT value FROM schema_meta WHERE key='version'")
+        .fetch_one(store.pool())
+        .await
+        .expect("schema version");
+    assert_eq!(version, "27");
 }

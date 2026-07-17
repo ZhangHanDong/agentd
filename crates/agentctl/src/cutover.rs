@@ -10,9 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use agentd_core::ports::{
     BackupManifest, CursorHandoff, CutoverLedgerPort, ServiceInstallation, ServiceModel,
 };
-use agentd_core::types::{
-    BackupManifestId, CutoverId, ServiceInstallationId,
-};
+use agentd_core::types::{BackupManifestId, CutoverId, ServiceInstallationId};
 use agentd_store::{CutoverService, SqliteCutoverLedger, SqliteStore, run_doctor};
 use serde::Serialize;
 use serde_json::json;
@@ -27,7 +25,7 @@ use crate::cli::{
 
 const EXIT_INVALID: u8 = 2;
 const EXIT_OPERATION: u8 = 3;
-const CURRENT_SCHEMA_VERSION: u32 = 24;
+const CURRENT_SCHEMA_VERSION: u32 = 27;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type CommandResult<T> = Result<T, BoxError>;
@@ -88,9 +86,15 @@ fn plan(args: &CutoverPlanArgs) -> Result<(), CommandFailure> {
         .checked_add(i64::try_from(args.rollback_window_seconds).map_err(|_| {
             CommandFailure::Invalid("rollback window exceeds supported range".to_string())
         })?)
-        .ok_or_else(|| CommandFailure::Invalid("rollback window overflows time range".to_string()))?;
+        .ok_or_else(|| {
+            CommandFailure::Invalid("rollback window overflows time range".to_string())
+        })?;
     let target_sha256 = if args.db_path.exists() {
-        Some(file_sha256(&args.db_path).map_err(CommandFailure::Operation)?.0)
+        Some(
+            file_sha256(&args.db_path)
+                .map_err(CommandFailure::Operation)?
+                .0,
+        )
     } else {
         None
     };
@@ -158,12 +162,7 @@ fn handoff(args: &CutoverHandoffArgs) -> Result<(), CommandFailure> {
     let result = run_async(async {
         let store = SqliteStore::connect(&args.db_path).await?;
         Ok(CutoverService::new(store)
-            .handoff(
-                &cutover_id,
-                &handoffs,
-                &args.idempotency_key,
-                observed_at,
-            )
+            .handoff(&cutover_id, &handoffs, &args.idempotency_key, observed_at)
             .await?)
     })?;
     print_json(&result)
@@ -207,9 +206,10 @@ fn inspect(args: &CutoverInspectArgs) -> Result<(), CommandFailure> {
     let value = run_async(async {
         let store = SqliteStore::connect(&args.db_path).await?;
         let ledger = SqliteCutoverLedger::new(store.pool().clone());
-        let run = ledger.load_cutover(&cutover_id).await?.ok_or_else(|| {
-            agentd_core::ports::CutoverError::NotFound(cutover_id.to_string())
-        })?;
+        let run = ledger
+            .load_cutover(&cutover_id)
+            .await?
+            .ok_or_else(|| agentd_core::ports::CutoverError::NotFound(cutover_id.to_string()))?;
         Ok(json!({
             "run": run,
             "mappings": ledger.mappings(&cutover_id).await?,
@@ -318,8 +318,10 @@ fn restore(args: &CutoverRestoreArgs) -> Result<(), CommandFailure> {
             "backup and manifest must both be regular files".to_string(),
         ));
     }
-    let manifest: BackupManifest = serde_json::from_slice(&fs::read(&args.manifest).map_err(boxed)?)
-        .map_err(|error| CommandFailure::Invalid(format!("invalid backup manifest: {error}")))?;
+    let manifest: BackupManifest =
+        serde_json::from_slice(&fs::read(&args.manifest).map_err(boxed)?).map_err(|error| {
+            CommandFailure::Invalid(format!("invalid backup manifest: {error}"))
+        })?;
     let (digest, size_bytes) = file_sha256(&args.backup).map_err(CommandFailure::Operation)?;
     if digest != manifest.database_sha256
         || size_bytes != manifest.size_bytes
@@ -391,11 +393,10 @@ fn service_install(args: &CutoverServiceInstallArgs) -> Result<(), CommandFailur
 }
 
 async fn schema_version(pool: &sqlx::SqlitePool) -> CommandResult<u32> {
-    let value = sqlx::query_scalar::<_, String>(
-        "SELECT value FROM schema_meta WHERE key = 'version'",
-    )
-    .fetch_one(pool)
-    .await?;
+    let value =
+        sqlx::query_scalar::<_, String>("SELECT value FROM schema_meta WHERE key = 'version'")
+            .fetch_one(pool)
+            .await?;
     Ok(value.parse()?)
 }
 
@@ -491,7 +492,10 @@ fn atomic_restore(backup: &Path, target: &Path) -> CommandResult<()> {
     for suffix in ["-wal", "-shm"] {
         let sidecar = PathBuf::from(format!("{}{suffix}", target.to_string_lossy()));
         if sidecar.exists() {
-            fs::rename(&sidecar, PathBuf::from(format!("{}{suffix}", displaced.to_string_lossy())))?;
+            fs::rename(
+                &sidecar,
+                PathBuf::from(format!("{}{suffix}", displaced.to_string_lossy())),
+            )?;
         }
     }
     if let Err(error) = fs::rename(&temp, target) {
@@ -591,7 +595,10 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> CommandResult<()> {
         .ok_or_else(|| boxed_message("target path must have a parent directory"))?;
     fs::create_dir_all(parent)?;
     let temp = sibling_temp_path(path, "write");
-    let mut file = OpenOptions::new().write(true).create_new(true).open(&temp)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)?;
     file.write_all(bytes)?;
     file.sync_all()?;
     fs::rename(&temp, path)?;

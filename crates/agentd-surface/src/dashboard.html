@@ -40,6 +40,10 @@
         font: inherit;
       }
 
+      [hidden] {
+        display: none !important;
+      }
+
       input {
         min-width: 0;
         height: 34px;
@@ -101,7 +105,31 @@
       .toolbar {
         display: flex;
         align-items: center;
+        justify-content: flex-end;
+        flex-wrap: wrap;
         gap: 8px;
+      }
+
+      .operator-login {
+        display: grid;
+        grid-template-columns: minmax(128px, 190px) auto;
+        gap: 6px;
+      }
+
+      .operator-login button {
+        height: 34px;
+        border: 1px solid var(--accent);
+        border-radius: 6px;
+        padding: 0 12px;
+        background: var(--accent);
+        color: var(--accent-ink);
+        cursor: pointer;
+        white-space: nowrap;
+      }
+
+      .operator-login button:disabled {
+        cursor: wait;
+        opacity: 0.65;
       }
 
       .status {
@@ -388,6 +416,22 @@
           border-bottom: 1px solid var(--line);
         }
       }
+
+      @media (max-width: 620px) {
+        header {
+          align-items: flex-start;
+        }
+
+        .toolbar {
+          max-width: min(100%, 280px);
+        }
+
+        .operator-login {
+          order: 2;
+          width: 100%;
+          grid-template-columns: minmax(0, 1fr) auto;
+        }
+      }
     </style>
   </head>
   <body>
@@ -398,6 +442,10 @@
           <h1>agentd</h1>
         </div>
         <div class="toolbar">
+          <form class="operator-login" id="operator-login" hidden>
+            <input id="operator-token" type="password" autocomplete="current-password" placeholder="Operator token" aria-label="Operator token" />
+            <button id="operator-sign-in" type="submit">Sign in</button>
+          </form>
           <span class="status" id="status">idle</span>
           <button class="icon-button" id="refresh" type="button" aria-label="Refresh runs" title="Refresh runs">
             &#8635;
@@ -445,6 +493,9 @@
       const eventLog = document.getElementById("event-log");
       const statusEl = document.getElementById("status");
       const refreshButton = document.getElementById("refresh");
+      const operatorLogin = document.getElementById("operator-login");
+      const operatorToken = document.getElementById("operator-token");
+      const operatorSignIn = document.getElementById("operator-sign-in");
       const runtimeLookup = document.getElementById("runtime-lookup");
       const runtimeSessionInput = document.getElementById("runtime-session");
       const enterpriseValues = Object.fromEntries(
@@ -469,10 +520,18 @@
         node.innerHTML = `<div class="empty">${escapeText(text)}</div>`;
       };
 
+      const showOperatorLogin = () => {
+        operatorLogin.hidden = false;
+        setStatus("sign in required");
+      };
+
       async function loadRuns() {
         setStatus("loading");
         try {
           const response = await fetch("/runs");
+          if (response.status === 401) {
+            showOperatorLogin();
+          }
           if (!response.ok) {
             throw new Error(`GET /runs ${response.status}`);
           }
@@ -554,6 +613,9 @@
       async function loadRunDetail(runId) {
         try {
           const response = await fetch(`/runs/${encodeURIComponent(runId)}`);
+          if (response.status === 401) {
+            showOperatorLogin();
+          }
           if (!response.ok) {
             throw new Error(`GET /runs/${runId} ${response.status}`);
           }
@@ -593,6 +655,9 @@
         runtimeSessionId = sessionId;
         try {
           const response = await fetch(`/api/runtime/sessions/${encodeURIComponent(sessionId)}`);
+          if (response.status === 401) {
+            showOperatorLogin();
+          }
           if (!response.ok) {
             throw new Error(`GET runtime ${response.status}`);
           }
@@ -691,6 +756,41 @@
       });
 
       refreshButton.addEventListener("click", () => refreshDashboard());
+      operatorLogin.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const token = operatorToken.value.trim();
+        if (!token) {
+          operatorToken.focus();
+          return;
+        }
+        operatorSignIn.disabled = true;
+        setStatus("signing in");
+        try {
+          const response = await fetch("/api/operator/session", {
+            method: "POST",
+            credentials: "same-origin",
+            cache: "no-store",
+            redirect: "error",
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (!response.ok) {
+            throw new Error(`Sign in ${response.status}`);
+          }
+          operatorLogin.hidden = true;
+          await loadEnterprise();
+          await loadRuns();
+          if (selectedRunId) {
+            await loadRunDetail(selectedRunId);
+            tailEvents(selectedRunId);
+          }
+        } catch (error) {
+          showOperatorLogin();
+          setStatus(error.message);
+        } finally {
+          operatorToken.value = "";
+          operatorSignIn.disabled = false;
+        }
+      });
       runtimeLookup.addEventListener("submit", (event) => {
         event.preventDefault();
         const sessionId = runtimeSessionInput.value.trim();

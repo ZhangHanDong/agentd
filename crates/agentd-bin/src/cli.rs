@@ -35,6 +35,69 @@ pub enum AgentdCommand {
     MatrixBridgeOnce(MatrixBridgeOnceArgs),
     /// Serve the agent-facing MCP dispatcher over line-delimited stdio JSON-RPC.
     McpStdio(McpStdioArgs),
+    /// Run one outbound-only enterprise worker pull loop.
+    EnterpriseWorker(EnterpriseWorkerArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct EnterpriseWorkerArgs {
+    /// Enterprise control-plane base URL.
+    #[arg(long)]
+    pub control_plane_url: String,
+    /// Stable enrolled worker id (`wk_<ULID>`).
+    #[arg(long)]
+    pub worker_id: Option<String>,
+    /// Current worker incarnation id (`wi_<ULID>`).
+    #[arg(long)]
+    pub worker_incarnation_id: Option<String>,
+    /// Per-pod identity descriptor injected by the workload identity provider.
+    #[arg(long)]
+    pub identity_config_file: Option<PathBuf>,
+    #[arg(long)]
+    pub region: String,
+    #[arg(long)]
+    pub zone: String,
+    #[arg(long)]
+    pub resource_class: String,
+    /// Digest-only worker image (`sha256:<64 lowercase hex>`).
+    #[arg(long)]
+    pub image_digest: String,
+    /// Confirm the running image was admitted by the configured signature policy.
+    #[arg(long)]
+    pub image_signature_verified: bool,
+    /// External executor receiving one assignment JSON on stdin.
+    #[arg(long)]
+    pub executor: PathBuf,
+    /// Writable root used by the executor for assignment-local work.
+    #[arg(long)]
+    pub executor_work_root: PathBuf,
+    /// Declare that plain HTTP is protected by a strict mesh-mTLS sidecar.
+    #[arg(long)]
+    pub mesh_mtls: bool,
+    /// PEM bundle containing the worker certificate chain and private key.
+    #[arg(long)]
+    pub client_identity_pem: Option<PathBuf>,
+    /// PEM certificate authority used to verify the control-plane workload endpoint.
+    #[arg(long)]
+    pub server_ca_pem: Option<PathBuf>,
+    #[arg(long, default_value_t = 1)]
+    pub total_slots: u32,
+    #[arg(long, default_value_t = 10)]
+    pub heartbeat_seconds: u64,
+    #[arg(long, default_value_t = 20)]
+    pub pull_seconds: u64,
+    #[arg(long, default_value_t = 20)]
+    pub renew_seconds: u64,
+    #[arg(long = "capability")]
+    pub capabilities: Vec<String>,
+    #[arg(long = "data-classification")]
+    pub data_classifications: Vec<String>,
+    #[arg(long = "egress-profile")]
+    pub egress_profile_ids: Vec<String>,
+    #[arg(long = "tenant-cache-namespace")]
+    pub tenant_cache_namespaces: Vec<String>,
+    #[arg(long)]
+    pub dedicated_pool: bool,
 }
 
 /// Arguments for `agentd cleanup-worktrees`.
@@ -295,6 +358,18 @@ pub struct EnterpriseDaemonConfig {
     #[arg(long, global = true)]
     pub enterprise_bind_address: Option<String>,
 
+    /// DER-encoded workload identity trust root. Repeatable.
+    #[arg(long = "workload-trust-root-der", global = true)]
+    pub workload_trust_root_der_files: Vec<PathBuf>,
+
+    /// Expected SPIFFE workload trust domain.
+    #[arg(long, global = true)]
+    pub workload_trust_domain: Option<String>,
+
+    /// File containing the private mTLS proxy assertion token.
+    #[arg(long, global = true)]
+    pub workload_proxy_authorization_file: Option<PathBuf>,
+
     /// Stable enterprise control-plane instance id (`ci_<ULID>`).
     #[arg(long, global = true)]
     pub control_plane_instance_id: Option<String>,
@@ -341,6 +416,9 @@ impl Default for EnterpriseDaemonConfig {
         Self {
             enterprise_control_plane_only: false,
             enterprise_bind_address: None,
+            workload_trust_root_der_files: Vec::new(),
+            workload_trust_domain: None,
+            workload_proxy_authorization_file: None,
             control_plane_instance_id: None,
             enterprise_region: None,
             enterprise_zone: None,

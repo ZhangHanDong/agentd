@@ -8,7 +8,7 @@ metadata:
     agentd.dev/zone: cn-east-1a
     agentd.dev/resource-class: standard
   annotations:
-    agentd.dev/zone-pool-id: zp_replace_with_ulid
+    agentd.dev/zone-pool-id: zp_replace_with_cn-east-1a_ulid
     agentd.dev/rollout-id: ir_replace_with_ulid
 spec:
   replicas: 3
@@ -29,6 +29,12 @@ spec:
       annotations:
         agentd.dev/dispatch-mode: outbound-pull
         agentd.dev/image-signature-policy: agentd-signed-images
+        agentd.dev/identity-contract: per-pod-spiffe-csi-v1
+        agentd.dev/executor-contract: codex-only-provider-v1
+        agentd.dev/zone-pool-id: zp_replace_with_cn-east-1a_ulid
+        agentd.dev/rollout-id: ir_replace_with_ulid
+        agentd.dev/signature-bundle-sha256: replace-with-64-lowercase-hex
+        agentd.dev/policy-sha256: replace-with-64-lowercase-hex
     spec:
       serviceAccountName: agentd-worker
       automountServiceAccountToken: false
@@ -36,31 +42,56 @@ spec:
       nodeSelector:
         topology.kubernetes.io/region: cn-east-1
         topology.kubernetes.io/zone: cn-east-1a
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: agentd-worker
+              agentd.dev/zone: cn-east-1a
+              agentd.dev/resource-class: standard
       securityContext:
         runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: worker
-          image: registry.example.invalid/agentd-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          image: registry.example.invalid/agentd@sha256:0000000000000000000000000000000000000000000000000000000000000000
           imagePullPolicy: IfNotPresent
           args:
             - enterprise-worker
             - --control-plane-url
-            - https://agentd-control-plane.agentd-enterprise.svc
+            - https://agentd-worker-gateway.agentd-enterprise.svc
+            - --identity-config-file
+            - /var/run/secrets/agentd/workload/identity.json
             - --region
             - cn-east-1
             - --zone
             - cn-east-1a
             - --resource-class
             - standard
-            - --identity-token-file
-            - /var/run/secrets/agentd/workload/authorization
-          env:
-            - name: AGENTD_WORKER_POD_UID
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.uid
+            - --image-digest
+            - sha256:0000000000000000000000000000000000000000000000000000000000000000
+            - --image-signature-verified
+            - --executor
+            - /opt/agentd-executor/bin/codex-fleet-executor
+            - --executor-work-root
+            - /var/lib/agentd/worktrees
+            - --capability
+            - native-runtime
+            - --capability
+            - codex
+            - --data-classification
+            - internal
+            - --egress-profile
+            - enterprise-default
+            - --tenant-cache-namespace
+            - isolated
           resources:
             requests:
               cpu: "1"
@@ -77,23 +108,720 @@ spec:
             - name: workload-identity
               mountPath: /var/run/secrets/agentd/workload
               readOnly: true
+            - name: execution-provider
+              mountPath: /opt/agentd-executor
+              readOnly: true
             - name: worktrees
               mountPath: /var/lib/agentd/worktrees
             - name: tmp
               mountPath: /tmp
       volumes:
         - name: workload-identity
-          projected:
-            defaultMode: 0400
-            sources:
-              - serviceAccountToken:
-                  path: authorization
-                  audience: agentd-control-plane
-                  expirationSeconds: 3600
+          csi:
+            driver: identity.agentd.dev
+            readOnly: true
+            volumeAttributes:
+              contract: agentd-worker-identity-v1
+              trust-domain: factory.example
+        - name: execution-provider
+          csi:
+            driver: executor.agentd.dev
+            readOnly: true
+            volumeAttributes:
+              contract: agentd-codex-fleet-executor-v1
         - name: worktrees
           emptyDir:
             sizeLimit: 100Gi
         - name: tmp
           emptyDir:
             sizeLimit: 10Gi
-
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentd-worker-cn-east-1b
+  labels:
+    app.kubernetes.io/name: agentd-worker
+    agentd.dev/region: cn-east-1
+    agentd.dev/zone: cn-east-1b
+    agentd.dev/resource-class: standard
+  annotations:
+    agentd.dev/zone-pool-id: zp_replace_with_cn-east-1b_ulid
+    agentd.dev/rollout-id: ir_replace_with_ulid
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentd-worker
+      agentd.dev/zone: cn-east-1b
+      agentd.dev/resource-class: standard
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentd-worker
+        agentd.dev/network-role: worker
+        agentd.dev/region: cn-east-1
+        agentd.dev/zone: cn-east-1b
+        agentd.dev/resource-class: standard
+      annotations:
+        agentd.dev/dispatch-mode: outbound-pull
+        agentd.dev/image-signature-policy: agentd-signed-images
+        agentd.dev/identity-contract: per-pod-spiffe-csi-v1
+        agentd.dev/executor-contract: codex-only-provider-v1
+        agentd.dev/zone-pool-id: zp_replace_with_cn-east-1b_ulid
+        agentd.dev/rollout-id: ir_replace_with_ulid
+        agentd.dev/signature-bundle-sha256: replace-with-64-lowercase-hex
+        agentd.dev/policy-sha256: replace-with-64-lowercase-hex
+    spec:
+      serviceAccountName: agentd-worker
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 90
+      nodeSelector:
+        topology.kubernetes.io/region: cn-east-1
+        topology.kubernetes.io/zone: cn-east-1b
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: agentd-worker
+              agentd.dev/zone: cn-east-1b
+              agentd.dev/resource-class: standard
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: registry.example.invalid/agentd@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          args:
+            - enterprise-worker
+            - --control-plane-url
+            - https://agentd-worker-gateway.agentd-enterprise.svc
+            - --identity-config-file
+            - /var/run/secrets/agentd/workload/identity.json
+            - --region
+            - cn-east-1
+            - --zone
+            - cn-east-1b
+            - --resource-class
+            - standard
+            - --image-digest
+            - sha256:0000000000000000000000000000000000000000000000000000000000000000
+            - --image-signature-verified
+            - --executor
+            - /opt/agentd-executor/bin/codex-fleet-executor
+            - --executor-work-root
+            - /var/lib/agentd/worktrees
+            - --capability
+            - native-runtime
+            - --capability
+            - codex
+            - --data-classification
+            - internal
+            - --egress-profile
+            - enterprise-default
+            - --tenant-cache-namespace
+            - isolated
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: workload-identity
+              mountPath: /var/run/secrets/agentd/workload
+              readOnly: true
+            - name: execution-provider
+              mountPath: /opt/agentd-executor
+              readOnly: true
+            - name: worktrees
+              mountPath: /var/lib/agentd/worktrees
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: workload-identity
+          csi:
+            driver: identity.agentd.dev
+            readOnly: true
+            volumeAttributes:
+              contract: agentd-worker-identity-v1
+              trust-domain: factory.example
+        - name: execution-provider
+          csi:
+            driver: executor.agentd.dev
+            readOnly: true
+            volumeAttributes:
+              contract: agentd-codex-fleet-executor-v1
+        - name: worktrees
+          emptyDir:
+            sizeLimit: 100Gi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentd-worker-cn-east-1c
+  labels:
+    app.kubernetes.io/name: agentd-worker
+    agentd.dev/region: cn-east-1
+    agentd.dev/zone: cn-east-1c
+    agentd.dev/resource-class: standard
+  annotations:
+    agentd.dev/zone-pool-id: zp_replace_with_cn-east-1c_ulid
+    agentd.dev/rollout-id: ir_replace_with_ulid
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentd-worker
+      agentd.dev/zone: cn-east-1c
+      agentd.dev/resource-class: standard
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentd-worker
+        agentd.dev/network-role: worker
+        agentd.dev/region: cn-east-1
+        agentd.dev/zone: cn-east-1c
+        agentd.dev/resource-class: standard
+      annotations:
+        agentd.dev/dispatch-mode: outbound-pull
+        agentd.dev/image-signature-policy: agentd-signed-images
+        agentd.dev/identity-contract: per-pod-spiffe-csi-v1
+        agentd.dev/executor-contract: codex-only-provider-v1
+        agentd.dev/zone-pool-id: zp_replace_with_cn-east-1c_ulid
+        agentd.dev/rollout-id: ir_replace_with_ulid
+        agentd.dev/signature-bundle-sha256: replace-with-64-lowercase-hex
+        agentd.dev/policy-sha256: replace-with-64-lowercase-hex
+    spec:
+      serviceAccountName: agentd-worker
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 90
+      nodeSelector:
+        topology.kubernetes.io/region: cn-east-1
+        topology.kubernetes.io/zone: cn-east-1c
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: agentd-worker
+              agentd.dev/zone: cn-east-1c
+              agentd.dev/resource-class: standard
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: registry.example.invalid/agentd@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          args:
+            - enterprise-worker
+            - --control-plane-url
+            - https://agentd-worker-gateway.agentd-enterprise.svc
+            - --identity-config-file
+            - /var/run/secrets/agentd/workload/identity.json
+            - --region
+            - cn-east-1
+            - --zone
+            - cn-east-1c
+            - --resource-class
+            - standard
+            - --image-digest
+            - sha256:0000000000000000000000000000000000000000000000000000000000000000
+            - --image-signature-verified
+            - --executor
+            - /opt/agentd-executor/bin/codex-fleet-executor
+            - --executor-work-root
+            - /var/lib/agentd/worktrees
+            - --capability
+            - native-runtime
+            - --capability
+            - codex
+            - --data-classification
+            - internal
+            - --egress-profile
+            - enterprise-default
+            - --tenant-cache-namespace
+            - isolated
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: workload-identity
+              mountPath: /var/run/secrets/agentd/workload
+              readOnly: true
+            - name: execution-provider
+              mountPath: /opt/agentd-executor
+              readOnly: true
+            - name: worktrees
+              mountPath: /var/lib/agentd/worktrees
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: workload-identity
+          csi:
+            driver: identity.agentd.dev
+            readOnly: true
+            volumeAttributes:
+              contract: agentd-worker-identity-v1
+              trust-domain: factory.example
+        - name: execution-provider
+          csi:
+            driver: executor.agentd.dev
+            readOnly: true
+            volumeAttributes:
+              contract: agentd-codex-fleet-executor-v1
+        - name: worktrees
+          emptyDir:
+            sizeLimit: 100Gi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentd-worker-cn-north-1a
+  labels:
+    app.kubernetes.io/name: agentd-worker
+    agentd.dev/region: cn-north-1
+    agentd.dev/zone: cn-north-1a
+    agentd.dev/resource-class: standard
+  annotations:
+    agentd.dev/zone-pool-id: zp_replace_with_cn-north-1a_ulid
+    agentd.dev/rollout-id: ir_replace_with_ulid
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentd-worker
+      agentd.dev/zone: cn-north-1a
+      agentd.dev/resource-class: standard
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentd-worker
+        agentd.dev/network-role: worker
+        agentd.dev/region: cn-north-1
+        agentd.dev/zone: cn-north-1a
+        agentd.dev/resource-class: standard
+      annotations:
+        agentd.dev/dispatch-mode: outbound-pull
+        agentd.dev/image-signature-policy: agentd-signed-images
+        agentd.dev/identity-contract: per-pod-spiffe-csi-v1
+        agentd.dev/executor-contract: codex-only-provider-v1
+        agentd.dev/zone-pool-id: zp_replace_with_cn-north-1a_ulid
+        agentd.dev/rollout-id: ir_replace_with_ulid
+        agentd.dev/signature-bundle-sha256: replace-with-64-lowercase-hex
+        agentd.dev/policy-sha256: replace-with-64-lowercase-hex
+    spec:
+      serviceAccountName: agentd-worker
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 90
+      nodeSelector:
+        topology.kubernetes.io/region: cn-north-1
+        topology.kubernetes.io/zone: cn-north-1a
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: agentd-worker
+              agentd.dev/zone: cn-north-1a
+              agentd.dev/resource-class: standard
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: registry.example.invalid/agentd@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          args:
+            - enterprise-worker
+            - --control-plane-url
+            - https://agentd-worker-gateway.agentd-enterprise.svc
+            - --identity-config-file
+            - /var/run/secrets/agentd/workload/identity.json
+            - --region
+            - cn-north-1
+            - --zone
+            - cn-north-1a
+            - --resource-class
+            - standard
+            - --image-digest
+            - sha256:0000000000000000000000000000000000000000000000000000000000000000
+            - --image-signature-verified
+            - --executor
+            - /opt/agentd-executor/bin/codex-fleet-executor
+            - --executor-work-root
+            - /var/lib/agentd/worktrees
+            - --capability
+            - native-runtime
+            - --capability
+            - codex
+            - --data-classification
+            - internal
+            - --egress-profile
+            - enterprise-default
+            - --tenant-cache-namespace
+            - isolated
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: workload-identity
+              mountPath: /var/run/secrets/agentd/workload
+              readOnly: true
+            - name: execution-provider
+              mountPath: /opt/agentd-executor
+              readOnly: true
+            - name: worktrees
+              mountPath: /var/lib/agentd/worktrees
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: workload-identity
+          csi:
+            driver: identity.agentd.dev
+            readOnly: true
+            volumeAttributes:
+              contract: agentd-worker-identity-v1
+              trust-domain: factory.example
+        - name: execution-provider
+          csi:
+            driver: executor.agentd.dev
+            readOnly: true
+            volumeAttributes:
+              contract: agentd-codex-fleet-executor-v1
+        - name: worktrees
+          emptyDir:
+            sizeLimit: 100Gi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentd-worker-cn-north-1b
+  labels:
+    app.kubernetes.io/name: agentd-worker
+    agentd.dev/region: cn-north-1
+    agentd.dev/zone: cn-north-1b
+    agentd.dev/resource-class: standard
+  annotations:
+    agentd.dev/zone-pool-id: zp_replace_with_cn-north-1b_ulid
+    agentd.dev/rollout-id: ir_replace_with_ulid
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentd-worker
+      agentd.dev/zone: cn-north-1b
+      agentd.dev/resource-class: standard
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentd-worker
+        agentd.dev/network-role: worker
+        agentd.dev/region: cn-north-1
+        agentd.dev/zone: cn-north-1b
+        agentd.dev/resource-class: standard
+      annotations:
+        agentd.dev/dispatch-mode: outbound-pull
+        agentd.dev/image-signature-policy: agentd-signed-images
+        agentd.dev/identity-contract: per-pod-spiffe-csi-v1
+        agentd.dev/executor-contract: codex-only-provider-v1
+        agentd.dev/zone-pool-id: zp_replace_with_cn-north-1b_ulid
+        agentd.dev/rollout-id: ir_replace_with_ulid
+        agentd.dev/signature-bundle-sha256: replace-with-64-lowercase-hex
+        agentd.dev/policy-sha256: replace-with-64-lowercase-hex
+    spec:
+      serviceAccountName: agentd-worker
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 90
+      nodeSelector:
+        topology.kubernetes.io/region: cn-north-1
+        topology.kubernetes.io/zone: cn-north-1b
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: agentd-worker
+              agentd.dev/zone: cn-north-1b
+              agentd.dev/resource-class: standard
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: registry.example.invalid/agentd@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          args:
+            - enterprise-worker
+            - --control-plane-url
+            - https://agentd-worker-gateway.agentd-enterprise.svc
+            - --identity-config-file
+            - /var/run/secrets/agentd/workload/identity.json
+            - --region
+            - cn-north-1
+            - --zone
+            - cn-north-1b
+            - --resource-class
+            - standard
+            - --image-digest
+            - sha256:0000000000000000000000000000000000000000000000000000000000000000
+            - --image-signature-verified
+            - --executor
+            - /opt/agentd-executor/bin/codex-fleet-executor
+            - --executor-work-root
+            - /var/lib/agentd/worktrees
+            - --capability
+            - native-runtime
+            - --capability
+            - codex
+            - --data-classification
+            - internal
+            - --egress-profile
+            - enterprise-default
+            - --tenant-cache-namespace
+            - isolated
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: workload-identity
+              mountPath: /var/run/secrets/agentd/workload
+              readOnly: true
+            - name: execution-provider
+              mountPath: /opt/agentd-executor
+              readOnly: true
+            - name: worktrees
+              mountPath: /var/lib/agentd/worktrees
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: workload-identity
+          csi:
+            driver: identity.agentd.dev
+            readOnly: true
+            volumeAttributes:
+              contract: agentd-worker-identity-v1
+              trust-domain: factory.example
+        - name: execution-provider
+          csi:
+            driver: executor.agentd.dev
+            readOnly: true
+            volumeAttributes:
+              contract: agentd-codex-fleet-executor-v1
+        - name: worktrees
+          emptyDir:
+            sizeLimit: 100Gi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentd-worker-cn-north-1c
+  labels:
+    app.kubernetes.io/name: agentd-worker
+    agentd.dev/region: cn-north-1
+    agentd.dev/zone: cn-north-1c
+    agentd.dev/resource-class: standard
+  annotations:
+    agentd.dev/zone-pool-id: zp_replace_with_cn-north-1c_ulid
+    agentd.dev/rollout-id: ir_replace_with_ulid
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentd-worker
+      agentd.dev/zone: cn-north-1c
+      agentd.dev/resource-class: standard
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentd-worker
+        agentd.dev/network-role: worker
+        agentd.dev/region: cn-north-1
+        agentd.dev/zone: cn-north-1c
+        agentd.dev/resource-class: standard
+      annotations:
+        agentd.dev/dispatch-mode: outbound-pull
+        agentd.dev/image-signature-policy: agentd-signed-images
+        agentd.dev/identity-contract: per-pod-spiffe-csi-v1
+        agentd.dev/executor-contract: codex-only-provider-v1
+        agentd.dev/zone-pool-id: zp_replace_with_cn-north-1c_ulid
+        agentd.dev/rollout-id: ir_replace_with_ulid
+        agentd.dev/signature-bundle-sha256: replace-with-64-lowercase-hex
+        agentd.dev/policy-sha256: replace-with-64-lowercase-hex
+    spec:
+      serviceAccountName: agentd-worker
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 90
+      nodeSelector:
+        topology.kubernetes.io/region: cn-north-1
+        topology.kubernetes.io/zone: cn-north-1c
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: agentd-worker
+              agentd.dev/zone: cn-north-1c
+              agentd.dev/resource-class: standard
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: registry.example.invalid/agentd@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          args:
+            - enterprise-worker
+            - --control-plane-url
+            - https://agentd-worker-gateway.agentd-enterprise.svc
+            - --identity-config-file
+            - /var/run/secrets/agentd/workload/identity.json
+            - --region
+            - cn-north-1
+            - --zone
+            - cn-north-1c
+            - --resource-class
+            - standard
+            - --image-digest
+            - sha256:0000000000000000000000000000000000000000000000000000000000000000
+            - --image-signature-verified
+            - --executor
+            - /opt/agentd-executor/bin/codex-fleet-executor
+            - --executor-work-root
+            - /var/lib/agentd/worktrees
+            - --capability
+            - native-runtime
+            - --capability
+            - codex
+            - --data-classification
+            - internal
+            - --egress-profile
+            - enterprise-default
+            - --tenant-cache-namespace
+            - isolated
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: workload-identity
+              mountPath: /var/run/secrets/agentd/workload
+              readOnly: true
+            - name: execution-provider
+              mountPath: /opt/agentd-executor
+              readOnly: true
+            - name: worktrees
+              mountPath: /var/lib/agentd/worktrees
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: workload-identity
+          csi:
+            driver: identity.agentd.dev
+            readOnly: true
+            volumeAttributes:
+              contract: agentd-worker-identity-v1
+              trust-domain: factory.example
+        - name: execution-provider
+          csi:
+            driver: executor.agentd.dev
+            readOnly: true
+            volumeAttributes:
+              contract: agentd-codex-fleet-executor-v1
+        - name: worktrees
+          emptyDir:
+            sizeLimit: 100Gi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 10Gi

@@ -51,13 +51,14 @@ pub use cutover::{
 pub use enterprise_scale::{
     ArtifactReplicaAcknowledgement, ArtifactReplicationPlan, AutoscalingRecommendation,
     CapacityObservation, ControlPlaneHeartbeatRequest, ControlPlaneLeadershipLease,
-    ControlPlaneLeadershipRequest, ControlPlaneLeadershipRenewal, ControlPlaneMember,
+    ControlPlaneLeadershipRenewal, ControlPlaneLeadershipRequest, ControlPlaneMember,
     ControlPlaneMemberStatus, DisasterRecoveryCheckpoint, DisasterRecoveryDrill,
-    DisasterRecoveryDrillStatus, EnterpriseOperationalSnapshot, EnterpriseScaleError,
-    EnterpriseScalePort, EnterpriseZoneStatus, LegalHold, LoadModelRegistration, ReplicaStatus,
-    RetentionDecision, RetentionDisposition, RetentionPolicy, ServiceLevelMeasurement,
-    ServiceLevelStatus, TenantKeyStatus, TenantKeyVersion, WorkerImageRollout,
-    WorkerImageRolloutStatus, WorkerImageZoneObservation, ZonePoolPolicy,
+    DisasterRecoveryDrillStatus, EnterpriseMutationFence, EnterpriseOperationalSnapshot,
+    EnterpriseScaleError, EnterpriseScalePort, EnterpriseZoneStatus, LegalHold,
+    LoadModelRegistration, ReplicaStatus, RetentionDecision, RetentionDisposition, RetentionPolicy,
+    ServiceLevelMeasurement, ServiceLevelStatus, TenantKeyStatus, TenantKeyTransition,
+    TenantKeyVersion, WorkerImageRollout, WorkerImageRolloutStatus, WorkerImageZoneObservation,
+    ZonePoolPolicy,
 };
 pub use execution_evidence::{
     ArtifactCursor, ArtifactIndexPort, ArtifactListRequest, ArtifactPage, AuditActorKind,

@@ -17,18 +17,19 @@ spec:
   policyTypes: ["Ingress"]
   ingress:
     - from:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: agentd-enterprise
-          podSelector:
+        - podSelector:
             matchLabels:
               app.kubernetes.io/name: agentd-worker
+      ports:
+        - protocol: TCP
+          port: 8443
+    - from:
         - namespaceSelector:
             matchLabels:
               agentd.dev/operator-access: "true"
       ports:
         - protocol: TCP
-          port: 8787
+          port: 9443
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -47,7 +48,17 @@ spec:
               app.kubernetes.io/name: agentd-control-plane
       ports:
         - protocol: TCP
-          port: 8787
+          port: 8443
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              agentd.dev/worker-egress-access: "true"
+          podSelector:
+            matchLabels:
+              agentd.dev/network-role: worker-egress-gateway
+      ports:
+        - protocol: TCP
+          port: 443
     - to:
         - namespaceSelector:
             matchLabels:
@@ -90,4 +101,3 @@ spec:
       ports:
         - protocol: TCP
           port: 443
-

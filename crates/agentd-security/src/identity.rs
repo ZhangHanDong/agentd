@@ -19,11 +19,24 @@ use url::Url;
 use x509_parser::extensions::GeneralName;
 use x509_parser::parse_x509_certificate;
 
+const MAX_CERTIFICATES: usize = 8;
+const MAX_CERTIFICATE_BYTES: usize = 16 * 1024;
+
 #[derive(Debug)]
 pub struct RustlsWorkloadIdentityAdapter {
     pool: SqlitePool,
     verifier: Arc<dyn ClientCertVerifier>,
     trust_domain: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedWorkloadCertificate {
+    pub certificate_sha256: String,
+    pub spiffe_uri: String,
+    pub trust_domain: String,
+    pub worker_incarnation_id: agentd_core::types::WorkerIncarnationId,
+    pub not_before: i64,
+    pub not_after: i64,
 }
 
 impl RustlsWorkloadIdentityAdapter {
@@ -34,8 +47,11 @@ impl RustlsWorkloadIdentityAdapter {
     ) -> Result<Self, SecurityError> {
         let trust_domain = trust_domain.into();
         if trust_roots_der.is_empty()
-            || trust_domain.trim().is_empty()
-            || trust_domain.contains('/')
+            || trust_roots_der.len() > MAX_CERTIFICATES
+            || trust_roots_der
+                .iter()
+                .any(|root| root.is_empty() || root.len() > MAX_CERTIFICATE_BYTES)
+            || !valid_trust_domain(&trust_domain)
         {
             return Err(SecurityError::Invalid(
                 "identity adapter requires trust roots and one DNS-like trust domain".to_string(),
@@ -58,16 +74,27 @@ impl RustlsWorkloadIdentityAdapter {
             trust_domain,
         })
     }
-}
 
-#[async_trait::async_trait]
-impl WorkloadIdentityPort for RustlsWorkloadIdentityAdapter {
-    async fn authenticate_workload(
+    /// Verify an unbound worker certificate before an operator enrolls it.
+    ///
+    /// This validates the chain, time window, trust domain, and SPIFFE shape,
+    /// but deliberately does not consult the identity-binding table.
+    pub fn verify_enrollment_certificate(
         &self,
         request: &WorkloadIdentityRequest,
-    ) -> Result<AuthenticatedWorkload, SecurityError> {
+    ) -> Result<VerifiedWorkloadCertificate, SecurityError> {
         if request.observed_at < 0 {
             return Err(SecurityError::Denied(SecurityDenialReason::IdentityExpired));
+        }
+        if request.peer_certificates_der.is_empty()
+            || request.peer_certificates_der.len() > MAX_CERTIFICATES
+            || request.peer_certificates_der.iter().any(|certificate| {
+                certificate.is_empty() || certificate.len() > MAX_CERTIFICATE_BYTES
+            })
+        {
+            return Err(SecurityError::Denied(
+                SecurityDenialReason::IdentityUntrusted,
+            ));
         }
         let (leaf_bytes, intermediates) =
             request
@@ -79,6 +106,11 @@ impl WorkloadIdentityPort for RustlsWorkloadIdentityAdapter {
         let parsed = parse_leaf_identity(leaf_bytes)?;
         if request.observed_at < parsed.not_before || request.observed_at >= parsed.not_after {
             return Err(SecurityError::Denied(SecurityDenialReason::IdentityExpired));
+        }
+        if parsed.trust_domain != self.trust_domain {
+            return Err(SecurityError::Denied(
+                SecurityDenialReason::IdentityUntrusted,
+            ));
         }
         let leaf = CertificateDer::from(leaf_bytes.clone());
         let intermediates = intermediates
@@ -93,9 +125,25 @@ impl WorkloadIdentityPort for RustlsWorkloadIdentityAdapter {
         self.verifier
             .verify_client_cert(&leaf, &intermediates, now)
             .map_err(|_| SecurityError::Denied(SecurityDenialReason::IdentityUntrusted))?;
+        Ok(VerifiedWorkloadCertificate {
+            certificate_sha256: certificate_sha256(leaf_bytes),
+            spiffe_uri: parsed.spiffe_uri,
+            trust_domain: parsed.trust_domain,
+            worker_incarnation_id: parsed.worker_incarnation_id,
+            not_before: parsed.not_before,
+            not_after: parsed.not_after,
+        })
+    }
+}
 
-        let fingerprint = certificate_sha256(leaf_bytes);
-        let record = get_workload_identity_binding(&self.pool, &fingerprint)
+#[async_trait::async_trait]
+impl WorkloadIdentityPort for RustlsWorkloadIdentityAdapter {
+    async fn authenticate_workload(
+        &self,
+        request: &WorkloadIdentityRequest,
+    ) -> Result<AuthenticatedWorkload, SecurityError> {
+        let verified = self.verify_enrollment_certificate(request)?;
+        let record = get_workload_identity_binding(&self.pool, &verified.certificate_sha256)
             .await?
             .ok_or(SecurityError::Denied(
                 SecurityDenialReason::IdentityUntrusted,
@@ -104,14 +152,14 @@ impl WorkloadIdentityPort for RustlsWorkloadIdentityAdapter {
             return Err(SecurityError::Denied(SecurityDenialReason::IdentityRevoked));
         }
         let binding = record.binding;
-        if binding.certificate_sha256 != fingerprint
-            || binding.spiffe_uri != parsed.spiffe_uri
+        if binding.certificate_sha256 != verified.certificate_sha256
+            || binding.spiffe_uri != verified.spiffe_uri
             || binding.trust_domain != self.trust_domain
-            || parsed.trust_domain != self.trust_domain
-            || binding.not_before != parsed.not_before
-            || binding.not_after != parsed.not_after
+            || verified.trust_domain != self.trust_domain
+            || binding.not_before != verified.not_before
+            || binding.not_after != verified.not_after
             || binding.role != WorkloadRole::Worker
-            || binding.worker_incarnation_id.as_ref() != Some(&parsed.worker_incarnation_id)
+            || binding.worker_incarnation_id.as_ref() != Some(&verified.worker_incarnation_id)
         {
             return Err(SecurityError::Denied(
                 SecurityDenialReason::IdentityUntrusted,
@@ -120,7 +168,7 @@ impl WorkloadIdentityPort for RustlsWorkloadIdentityAdapter {
         let worker_id = binding.worker_id.as_ref().ok_or(SecurityError::Denied(
             SecurityDenialReason::IncarnationStale,
         ))?;
-        let incarnation = worker_repo::get_incarnation(&self.pool, &parsed.worker_incarnation_id)
+        let incarnation = worker_repo::get_incarnation(&self.pool, &verified.worker_incarnation_id)
             .await
             .map_err(|error| {
                 SecurityError::Unavailable(format!("worker identity lookup failed: {error}"))
@@ -137,9 +185,9 @@ impl WorkloadIdentityPort for RustlsWorkloadIdentityAdapter {
             spiffe_uri: binding.spiffe_uri,
             role: binding.role,
             trust_domain: binding.trust_domain,
-            certificate_sha256: fingerprint,
-            not_before: parsed.not_before,
-            not_after: parsed.not_after,
+            certificate_sha256: verified.certificate_sha256,
+            not_before: verified.not_before,
+            not_after: verified.not_after,
             worker_id: binding.worker_id,
             worker_incarnation_id: binding.worker_incarnation_id,
         })
@@ -209,7 +257,11 @@ fn parse_leaf_identity(certificate_der: &[u8]) -> Result<ParsedLeafIdentity, Sec
             SecurityDenialReason::IdentityUntrusted,
         ));
     };
-    if !incarnation_id.starts_with("wi_") {
+    let expected_spiffe_uri = format!("spiffe://{trust_domain}/worker/{incarnation_id}");
+    if !valid_typed_id(incarnation_id, "wi_")
+        || !valid_trust_domain(trust_domain)
+        || expected_spiffe_uri.as_str() != *spiffe_uri
+    {
         return Err(SecurityError::Denied(
             SecurityDenialReason::IdentityUntrusted,
         ));
@@ -223,6 +275,29 @@ fn parse_leaf_identity(certificate_der: &[u8]) -> Result<ParsedLeafIdentity, Sec
         not_before: certificate.validity().not_before.timestamp(),
         not_after: certificate.validity().not_after.timestamp(),
     })
+}
+
+fn valid_typed_id(value: &str, prefix: &str) -> bool {
+    value.strip_prefix(prefix).is_some_and(|payload| {
+        payload.len() == 26
+            && payload
+                .parse::<ulid::Ulid>()
+                .is_ok_and(|parsed| parsed.to_string() == payload)
+    })
+}
+
+fn valid_trust_domain(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 253
+        && value.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        })
 }
 
 #[must_use]

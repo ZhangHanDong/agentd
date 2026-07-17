@@ -87,6 +87,10 @@ fn test_ca(common_name: &str) -> TestCa {
 
 fn worker_certificate(ca: &TestCa, incarnation_id: &WorkerIncarnationId) -> Vec<u8> {
     let spiffe_uri = format!("spiffe://agents.example/worker/{incarnation_id}");
+    worker_certificate_for_uri(ca, &spiffe_uri)
+}
+
+fn worker_certificate_for_uri(ca: &TestCa, spiffe_uri: &str) -> Vec<u8> {
     let mut params = CertificateParams::new(Vec::<String>::new()).expect("leaf params");
     params
         .distinguished_name
@@ -162,6 +166,69 @@ async fn workload_identity_accepts_verified_current_worker_certificate() {
 }
 
 #[tokio::test]
+async fn enrollment_verifier_accepts_trusted_unbound_worker_certificate() {
+    let fixture = fixture().await;
+    let ca = test_ca("trusted enrollment CA");
+    let leaf = worker_certificate(&ca, &fixture.incarnation_id);
+    let adapter = RustlsWorkloadIdentityAdapter::new(
+        fixture.store.pool().clone(),
+        vec![ca.certificate.der().to_vec()],
+        "agents.example",
+    )
+    .expect("identity adapter");
+
+    let verified = adapter
+        .verify_enrollment_certificate(&request(leaf.clone(), VALID_AT))
+        .expect("verified enrollment certificate");
+
+    assert_eq!(
+        verified.spiffe_uri,
+        format!("spiffe://agents.example/worker/{}", fixture.incarnation_id)
+    );
+    assert_eq!(verified.trust_domain, "agents.example");
+    assert_eq!(verified.worker_incarnation_id, fixture.incarnation_id);
+    assert_eq!(verified.certificate_sha256, certificate_sha256(&leaf));
+    assert_eq!(verified.not_before, NOT_BEFORE);
+    assert_eq!(verified.not_after, NOT_AFTER);
+}
+
+#[tokio::test]
+async fn enrollment_verifier_rejects_noncanonical_identity_and_oversized_chain() {
+    let fixture = fixture().await;
+    let ca = test_ca("trusted enrollment boundary CA");
+    let adapter = RustlsWorkloadIdentityAdapter::new(
+        fixture.store.pool().clone(),
+        vec![ca.certificate.der().to_vec()],
+        "agents.example",
+    )
+    .expect("identity adapter");
+    let invalid_id =
+        worker_certificate_for_uri(&ca, "spiffe://agents.example/worker/wi_not-a-ulid");
+    let error = adapter
+        .verify_enrollment_certificate(&request(invalid_id, VALID_AT))
+        .expect_err("noncanonical worker identity");
+    assert_denied(&error, SecurityDenialReason::IdentityUntrusted);
+
+    let leaf = worker_certificate(&ca, &fixture.incarnation_id);
+    let error = adapter
+        .verify_enrollment_certificate(&WorkloadIdentityRequest {
+            peer_certificates_der: vec![leaf; 9],
+            observed_at: VALID_AT,
+        })
+        .expect_err("oversized certificate chain");
+    assert_denied(&error, SecurityDenialReason::IdentityUntrusted);
+
+    assert!(
+        RustlsWorkloadIdentityAdapter::new(
+            fixture.store.pool().clone(),
+            vec![ca.certificate.der().to_vec()],
+            "Agents.example",
+        )
+        .is_err()
+    );
+}
+
+#[tokio::test]
 async fn workload_identity_rejects_untrusted_expired_revoked_and_stale_peers() {
     let fixture = fixture().await;
     let trusted_ca = test_ca("trusted test CA");
@@ -198,6 +265,31 @@ async fn workload_identity_rejects_untrusted_expired_revoked_and_stale_peers() {
     )
     .await
     .expect("revoke identity");
+    let replay = revoke_workload_identity(
+        fixture.store.pool(),
+        &certificate_sha256(&revoked_leaf),
+        VALID_AT,
+        "test_revocation",
+    )
+    .await
+    .expect("replay identity revocation");
+    assert_eq!(replay.revoked_at, Some(VALID_AT - 1));
+    let worker_status: String = sqlx::query_scalar("SELECT status FROM workers WHERE id = ?")
+        .bind(fixture.worker_id.as_str())
+        .fetch_one(fixture.store.pool())
+        .await
+        .expect("worker status");
+    assert_eq!(worker_status, "offline");
+    assert!(
+        revoke_workload_identity(
+            fixture.store.pool(),
+            &certificate_sha256(&revoked_leaf),
+            VALID_AT + 1,
+            "changed_reason",
+        )
+        .await
+        .is_err()
+    );
     let revoked = adapter
         .authenticate_workload(&request(revoked_leaf, VALID_AT))
         .await
@@ -217,4 +309,34 @@ async fn workload_identity_rejects_untrusted_expired_revoked_and_stale_peers() {
         .await
         .expect_err("superseded incarnation");
     assert_denied(&stale, SecurityDenialReason::IncarnationStale);
+}
+
+#[tokio::test]
+async fn workload_identity_revocation_cannot_predate_its_binding() {
+    let fixture = fixture().await;
+    let trusted_ca = test_ca("trusted test CA");
+    let leaf = worker_certificate(&trusted_ca, &fixture.incarnation_id);
+    bind(&fixture, &leaf, &fixture.incarnation_id).await;
+
+    assert!(
+        revoke_workload_identity(
+            fixture.store.pool(),
+            &certificate_sha256(&leaf),
+            VALID_AT - 11,
+            "invalid_historical_revocation",
+        )
+        .await
+        .is_err()
+    );
+
+    let adapter = RustlsWorkloadIdentityAdapter::new(
+        fixture.store.pool().clone(),
+        vec![trusted_ca.certificate.der().to_vec()],
+        "agents.example",
+    )
+    .expect("identity adapter");
+    adapter
+        .authenticate_workload(&request(leaf, VALID_AT))
+        .await
+        .expect("binding remains active");
 }

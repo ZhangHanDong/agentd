@@ -1,11 +1,70 @@
 //! Small shared helpers: unix time and enum <-> TEXT column conversions.
 
+use std::ops::{Deref, DerefMut};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agentd_core::ports::RunStatus;
 use agentd_core::types::Status;
+use sqlx::pool::PoolConnection;
+use sqlx::{Sqlite, SqliteConnection, SqlitePool};
 
 use crate::error::StoreError;
+
+/// `BEGIN IMMEDIATE` connection that cannot return an open transaction to the
+/// pool when an async operation exits through `?`.
+pub(crate) struct SqliteImmediateTransaction {
+    connection: PoolConnection<Sqlite>,
+    finished: bool,
+}
+
+impl SqliteImmediateTransaction {
+    pub(crate) async fn begin(pool: &SqlitePool) -> Result<Self, sqlx::Error> {
+        let mut connection = pool.acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await?;
+        Ok(Self {
+            connection,
+            finished: false,
+        })
+    }
+
+    pub(crate) async fn commit(&mut self) -> Result<(), sqlx::Error> {
+        sqlx::query("COMMIT").execute(&mut *self.connection).await?;
+        self.finished = true;
+        Ok(())
+    }
+
+    pub(crate) async fn rollback(&mut self) -> Result<(), sqlx::Error> {
+        sqlx::query("ROLLBACK")
+            .execute(&mut *self.connection)
+            .await?;
+        self.finished = true;
+        Ok(())
+    }
+}
+
+impl Deref for SqliteImmediateTransaction {
+    type Target = SqliteConnection;
+
+    fn deref(&self) -> &Self::Target {
+        self.connection.as_ref()
+    }
+}
+
+impl DerefMut for SqliteImmediateTransaction {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.connection.as_mut()
+    }
+}
+
+impl Drop for SqliteImmediateTransaction {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.connection.close_on_drop();
+        }
+    }
+}
 
 /// Current unix time in seconds (saturating; never panics on a backwards clock).
 #[must_use]

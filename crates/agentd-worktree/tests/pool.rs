@@ -20,7 +20,10 @@ impl WorktreeProvider for RecordingProvider {
     }
 
     async fn remove(&self, path: &Path) -> Result<(), CoreError> {
-        self.removed.lock().expect("removed").push(path.to_path_buf());
+        self.removed
+            .lock()
+            .expect("removed")
+            .push(path.to_path_buf());
         Ok(())
     }
 
@@ -44,7 +47,10 @@ async fn keyed_worktrees_are_isolated_and_boot_gc_preserves_durable_paths() {
     pool.gc_on_boot_preserving([first.clone()])
         .await
         .expect("boot gc");
-    assert_eq!(provider.removed.lock().expect("removed").as_slice(), [second]);
+    assert_eq!(
+        provider.removed.lock().expect("removed").as_slice(),
+        [second]
+    );
 }
 
 #[tokio::test]

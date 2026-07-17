@@ -12,6 +12,8 @@ pub mod command_runner;
 pub mod daemon;
 pub mod enterprise;
 pub mod fleet;
+pub mod fleet_http;
+pub mod fleet_worker;
 pub mod host;
 pub mod matrix_bridge;
 pub mod matrix_gateway;
@@ -24,8 +26,9 @@ pub mod security;
 pub mod stdio_mcp;
 
 pub use cli::{
-    AgentdCli, AgentdCommand, CleanupWorktreesArgs, DaemonConfig, EnterpriseDaemonConfig, MatrixBridgeOnceArgs,
-    MatrixClientBridgePreflightArgs, MatrixClientBridgeServiceArgs,
+    AgentdCli, AgentdCommand, CleanupWorktreesArgs, DaemonConfig, EnterpriseDaemonConfig,
+    EnterpriseWorkerArgs, MatrixBridgeOnceArgs, MatrixClientBridgePreflightArgs,
+    MatrixClientBridgeServiceArgs,
 };
 pub use clock::SystemClock;
 pub use host::ProductionRunHost;

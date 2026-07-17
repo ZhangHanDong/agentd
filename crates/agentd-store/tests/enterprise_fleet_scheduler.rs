@@ -2,10 +2,10 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use agentd_core::ports::{
-    ArtifactUploadAckRequest, FleetCompletionReport, FleetFailureReport, FleetHeartbeatRequest,
-    FleetPullRequest, FleetQueueStatus, FleetReapRequest, FleetSchedulerPort,
-    FleetSideEffectRequest, FleetSubmitRequest, FleetTaskRequirements, PolicyRevocationPort,
-    SecurityError, WorkerAvailability,
+    ArtifactUploadAckRequest, FleetCompletionReport, FleetDenialReason, FleetFailureReport,
+    FleetHeartbeatRequest, FleetPullRequest, FleetQueueStatus, FleetReapRequest,
+    FleetSchedulerError, FleetSchedulerPort, FleetSideEffectRequest, FleetSubmitRequest,
+    FleetTaskRequirements, PolicyRevocationPort, SecurityError, WorkerAvailability,
 };
 use agentd_core::types::{
     ArtifactUploadId, AuthenticatedWorkload, AuthorityKey, CertificationGate,
@@ -18,9 +18,15 @@ use agentd_core::types::{
     WorkerIncarnationId, WorkerStatus, WorkloadRole,
 };
 use agentd_store::fleet_scheduler::SqliteFleetScheduler;
+use agentd_store::security_repo::{
+    WorkloadIdentityBindingCreate, bind_workload_identity, revoke_workload_identity,
+};
 use agentd_store::worker_repo::{self, WorkerCreate, WorkerRegistration};
 use agentd_store::{SqliteStore, run_repo, task_repo};
 use serde_json::json;
+use sqlx::Row;
+
+const ROLLOUT_ID: &str = "ir_01ARZ3NDEKTSV4RRFFQ69G5FAV";
 
 #[derive(Debug)]
 struct CurrentEpoch;
@@ -42,6 +48,94 @@ impl PolicyRevocationPort for CurrentEpoch {
     }
 }
 
+#[tokio::test]
+async fn heartbeat_must_match_operator_enrolled_image_attestation() {
+    let fixture = fixture().await;
+    let labels = json!({
+        "agentd_attestation": {
+            "rollout_id": ROLLOUT_ID,
+            "image_digest": format!("sha256:{}", "d".repeat(64)),
+            "signature_bundle_sha256": "e".repeat(64),
+            "signature_policy_sha256": "f".repeat(64),
+            "region": "eu-west-1",
+            "zone": "zone-a",
+            "resource_class": "standard"
+        }
+    });
+    sqlx::query("UPDATE workers SET labels_json = ? WHERE id = ?")
+        .bind(serde_json::to_string(&labels).expect("labels"))
+        .bind(fixture.worker_id.as_str())
+        .execute(fixture._store.pool())
+        .await
+        .expect("attestation labels");
+
+    fixture
+        .scheduler
+        .heartbeat(&heartbeat(&fixture, 1, 160))
+        .await
+        .expect("matching heartbeat");
+    let mut mismatch = heartbeat(&fixture, 2, 170);
+    mismatch.availability.zone = "zone-b".to_string();
+    assert_eq!(
+        fixture.scheduler.heartbeat(&mismatch).await,
+        Err(FleetSchedulerError::Denied(
+            FleetDenialReason::PlacementDenied
+        ))
+    );
+    sqlx::query("UPDATE workers SET labels_json = '{}' WHERE id = ?")
+        .bind(fixture.worker_id.as_str())
+        .execute(fixture._store.pool())
+        .await
+        .expect("remove attestation labels");
+    assert_eq!(
+        fixture
+            .scheduler
+            .heartbeat(&heartbeat(&fixture, 3, 180))
+            .await,
+        Err(FleetSchedulerError::Denied(
+            FleetDenialReason::PlacementDenied
+        ))
+    );
+    sqlx::query("UPDATE workers SET labels_json = ? WHERE id = ?")
+        .bind(serde_json::to_string(&labels).expect("labels"))
+        .bind(fixture.worker_id.as_str())
+        .execute(fixture._store.pool())
+        .await
+        .expect("restore attestation labels");
+    sqlx::query(
+        "UPDATE enterprise_worker_image_rollouts SET status = 'rolled_back', updated_at = 185 \
+         WHERE rollout_id = ?",
+    )
+    .bind(ROLLOUT_ID)
+    .execute(fixture._store.pool())
+    .await
+    .expect("roll back rollout");
+    assert_eq!(
+        fixture
+            .scheduler
+            .heartbeat(&heartbeat(&fixture, 4, 190))
+            .await,
+        Err(FleetSchedulerError::Denied(
+            FleetDenialReason::PlacementDenied
+        ))
+    );
+}
+
+#[tokio::test]
+async fn pull_rejects_an_overlong_worker_selected_lease() {
+    let fixture = fixture().await;
+    fixture
+        .scheduler
+        .heartbeat(&heartbeat(&fixture, 1, 160))
+        .await
+        .expect("heartbeat");
+
+    assert!(matches!(
+        fixture.scheduler.pull(&pull(&fixture, 170, 471)).await,
+        Err(FleetSchedulerError::Invalid(_))
+    ));
+}
+
 struct Fixture {
     _store: SqliteStore,
     _dir: tempfile::TempDir,
@@ -56,6 +150,34 @@ async fn fixture() -> Fixture {
     let store = SqliteStore::connect(&dir.path().join("agentd.db"))
         .await
         .expect("store");
+    sqlx::query(
+        "INSERT INTO enterprise_worker_image_rollouts \
+         (rollout_id, image_digest, signature_bundle_sha256, policy_sha256, \
+          required_zones_json, declaration_sha256, status, declared_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, 'declared', 1, 1)",
+    )
+    .bind(ROLLOUT_ID)
+    .bind(format!("sha256:{}", "d".repeat(64)))
+    .bind("e".repeat(64))
+    .bind("f".repeat(64))
+    .bind(json!(["zone-a"]).to_string())
+    .bind("a".repeat(64))
+    .execute(store.pool())
+    .await
+    .expect("rollout");
+    sqlx::query(
+        "INSERT INTO enterprise_zone_pool_policies \
+         (pool_id, region, zone, resource_class, trust_domain, rollout_id, \
+          minimum_replicas, maximum_replicas, target_queue_per_slot, \
+          scale_down_cooldown_seconds, enabled, policy_sha256, updated_at) \
+         VALUES ('zp_01ARZ3NDEKTSV4RRFFQ69G5FAV', 'eu-west-1', 'zone-a', \
+                 'standard', 'workers.example', ?, 1, 10, 1, 60, 1, ?, 1)",
+    )
+    .bind(ROLLOUT_ID)
+    .bind("b".repeat(64))
+    .execute(store.pool())
+    .await
+    .expect("zone policy");
     let run_id = RunId::new();
     run_repo::insert_run(store.pool(), &run_id, "fleet-workflow")
         .await
@@ -69,7 +191,18 @@ async fn fixture() -> Fixture {
         WorkerCreate {
             id: worker_id.clone(),
             trust_domain: "workers.example".to_string(),
-            labels: json!({"fleet": "enterprise"}),
+            labels: json!({
+                "fleet": "enterprise",
+                "agentd_attestation": {
+                    "rollout_id": ROLLOUT_ID,
+                    "image_digest": format!("sha256:{}", "d".repeat(64)),
+                    "signature_bundle_sha256": "e".repeat(64),
+                    "signature_policy_sha256": "f".repeat(64),
+                    "region": "eu-west-1",
+                    "zone": "zone-a",
+                    "resource_class": "standard"
+                }
+            }),
         },
     )
     .await
@@ -88,6 +221,22 @@ async fn fixture() -> Fixture {
     )
     .await
     .expect("incarnation");
+    bind_workload_identity(
+        store.pool(),
+        WorkloadIdentityBindingCreate {
+            certificate_sha256: "c".repeat(64),
+            spiffe_uri: format!("spiffe://workers.example/worker/{incarnation_id}"),
+            role: WorkloadRole::Worker,
+            trust_domain: "workers.example".to_string(),
+            worker_id: Some(worker_id.clone()),
+            worker_incarnation_id: Some(incarnation_id.clone()),
+            not_before: 100,
+            not_after: 1_000,
+            created_at: 100,
+        },
+    )
+    .await
+    .expect("identity binding");
     let scheduler = SqliteFleetScheduler::new(store.pool().clone(), Arc::new(CurrentEpoch));
     Fixture {
         _store: store,
@@ -97,6 +246,46 @@ async fn fixture() -> Fixture {
         worker_id,
         incarnation_id,
     }
+}
+
+#[tokio::test]
+async fn revoked_identity_is_offlined_and_cannot_commit_with_cached_authentication() {
+    let fixture = fixture().await;
+    fixture
+        .scheduler
+        .heartbeat(&heartbeat(&fixture, 1, 160))
+        .await
+        .expect("initial heartbeat");
+
+    revoke_workload_identity(
+        fixture._store.pool(),
+        &"c".repeat(64),
+        165,
+        "operator_revocation",
+    )
+    .await
+    .expect("revoke identity");
+
+    let availability = sqlx::query(
+        "SELECT worker_status, available_slots FROM enterprise_worker_availability \
+         WHERE worker_incarnation_id = ?",
+    )
+    .bind(fixture.incarnation_id.as_str())
+    .fetch_one(fixture._store.pool())
+    .await
+    .expect("availability");
+    assert_eq!(availability.get::<String, _>("worker_status"), "offline");
+    assert_eq!(availability.get::<i64, _>("available_slots"), 0);
+
+    assert_eq!(
+        fixture
+            .scheduler
+            .heartbeat(&heartbeat(&fixture, 2, 170))
+            .await,
+        Err(FleetSchedulerError::Denied(
+            FleetDenialReason::IdentityMismatch
+        ))
+    );
 }
 
 fn authority() -> AuthorityKey {

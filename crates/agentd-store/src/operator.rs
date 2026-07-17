@@ -29,18 +29,14 @@ pub struct DoctorReport {
     pub checks: Vec<DoctorCheck>,
 }
 
-pub async fn run_doctor(
-    pool: &SqlitePool,
-    observed_at: i64,
-) -> Result<DoctorReport, StoreError> {
-    let schema_text = sqlx::query_scalar::<_, String>(
-        "SELECT value FROM schema_meta WHERE key = 'version'",
-    )
-    .fetch_one(pool)
-    .await?;
-    let schema_version = schema_text.parse::<u32>().map_err(|error| {
-        StoreError::Invariant(format!("schema version is invalid: {error}"))
-    })?;
+pub async fn run_doctor(pool: &SqlitePool, observed_at: i64) -> Result<DoctorReport, StoreError> {
+    let schema_text =
+        sqlx::query_scalar::<_, String>("SELECT value FROM schema_meta WHERE key = 'version'")
+            .fetch_one(pool)
+            .await?;
+    let schema_version = schema_text
+        .parse::<u32>()
+        .map_err(|error| StoreError::Invariant(format!("schema version is invalid: {error}")))?;
     let integrity = sqlx::query_scalar::<_, String>("PRAGMA quick_check")
         .fetch_one(pool)
         .await?;
@@ -60,12 +56,12 @@ pub async fn run_doctor(
     }];
     checks.push(DoctorCheck {
         name: "schema".to_string(),
-        status: if schema_version == 24 {
+        status: if schema_version == 27 {
             DoctorStatus::Pass
         } else {
             DoctorStatus::Fail
         },
-        code: if schema_version == 24 {
+        code: if schema_version == 27 {
             "schema_current".to_string()
         } else {
             "schema_mismatch".to_string()
@@ -106,11 +102,8 @@ pub async fn run_doctor(
         },
     });
 
-    let project_bindings = count(
-        pool,
-        "SELECT COUNT(*) FROM matrix_gateway_project_bindings",
-    )
-    .await?;
+    let project_bindings =
+        count(pool, "SELECT COUNT(*) FROM matrix_gateway_project_bindings").await?;
     checks.push(count_check(
         "project_authority",
         project_bindings,
@@ -225,7 +218,11 @@ pub async fn run_doctor(
         "backup_manifest_absent",
         DoctorStatus::Warn,
     ));
-    let enterprise_members = count(pool, "SELECT COUNT(*) FROM enterprise_control_plane_members").await?;
+    let enterprise_members = count(
+        pool,
+        "SELECT COUNT(*) FROM enterprise_control_plane_members",
+    )
+    .await?;
     let ready_control_plane = count_with_i64(
         pool,
         "SELECT COUNT(*) FROM enterprise_control_plane_members \
@@ -277,7 +274,8 @@ pub async fn run_doctor(
     });
     let degraded_rollouts = count(
         pool,
-        "SELECT COUNT(*) FROM enterprise_worker_image_rollouts WHERE status = 'degraded'",
+        "SELECT COUNT(*) FROM enterprise_worker_image_rollouts \
+         WHERE status IN ('degraded', 'rolled_back')",
     )
     .await?;
     checks.push(DoctorCheck {
@@ -293,6 +291,107 @@ pub async fn run_doctor(
             "rollouts_degraded".to_string()
         },
         count: Some(degraded_rollouts),
+    });
+    let unaudited_enterprise_versions = count(
+        pool,
+        "SELECT \
+           (SELECT COUNT(*) FROM enterprise_worker_image_zone_observations AS current \
+            WHERE NOT EXISTS (SELECT 1 FROM enterprise_worker_image_zone_observation_history AS history \
+              WHERE history.observation_sha256 = current.observation_sha256 \
+                AND history.rollout_id = current.rollout_id \
+                AND history.zone = current.zone \
+                AND history.observed_image_digest = current.observed_image_digest \
+                AND history.signature_verified = current.signature_verified \
+                AND history.ready_workers = current.ready_workers \
+                AND history.desired_workers = current.desired_workers \
+                AND history.observed_at = current.observed_at)) + \
+           (SELECT COUNT(*) FROM enterprise_zone_pool_policies AS current \
+            WHERE NOT EXISTS (SELECT 1 FROM enterprise_zone_pool_policy_versions AS history \
+              WHERE history.pool_id = current.pool_id \
+                AND history.region = current.region \
+                AND history.zone = current.zone \
+                AND history.resource_class = current.resource_class \
+                AND history.trust_domain = current.trust_domain \
+                AND history.rollout_id = current.rollout_id \
+                AND history.minimum_replicas = current.minimum_replicas \
+                AND history.maximum_replicas = current.maximum_replicas \
+                AND history.target_queue_per_slot = current.target_queue_per_slot \
+                AND history.scale_down_cooldown_seconds = current.scale_down_cooldown_seconds \
+                AND history.enabled = current.enabled \
+                AND history.policy_sha256 = current.policy_sha256 \
+                AND history.updated_at = current.updated_at)) + \
+           (SELECT COUNT(*) FROM enterprise_retention_policies AS current \
+            WHERE NOT EXISTS (SELECT 1 FROM enterprise_retention_policy_versions AS history \
+              WHERE history.tenant_scope_sha256 = current.tenant_scope_sha256 \
+                AND history.policy_version_sha256 = current.policy_version_sha256 \
+                AND history.artifact_retention_seconds = current.artifact_retention_seconds \
+                AND history.transcript_retention_seconds = current.transcript_retention_seconds \
+                AND history.audit_retention_seconds = current.audit_retention_seconds \
+                AND history.minimum_replica_regions = current.minimum_replica_regions \
+                AND history.updated_at = current.updated_at)) + \
+           (SELECT COUNT(*) FROM enterprise_retention_policies \
+            WHERE audit_retention_seconds < transcript_retention_seconds)",
+    )
+    .await?;
+    checks.push(DoctorCheck {
+        name: "enterprise_audit_history".to_string(),
+        status: if unaudited_enterprise_versions == 0 {
+            DoctorStatus::Pass
+        } else {
+            DoctorStatus::Fail
+        },
+        code: if unaudited_enterprise_versions == 0 {
+            "enterprise_history_complete".to_string()
+        } else {
+            "enterprise_history_missing".to_string()
+        },
+        count: Some(unaudited_enterprise_versions),
+    });
+    let rolled_back_workers_online = count(
+        pool,
+        "SELECT COUNT(*) FROM enterprise_worker_availability AS availability \
+         JOIN workers AS worker ON worker.id = availability.worker_id \
+         JOIN enterprise_worker_image_rollouts AS rollout ON rollout.rollout_id = \
+           CASE WHEN json_valid(worker.labels_json) \
+             THEN json_extract(worker.labels_json, '$.agentd_attestation.rollout_id') END \
+         WHERE rollout.status = 'rolled_back' AND availability.worker_status = 'online'",
+    )
+    .await?;
+    checks.push(DoctorCheck {
+        name: "enterprise_rollout_fencing".to_string(),
+        status: if rolled_back_workers_online == 0 {
+            DoctorStatus::Pass
+        } else {
+            DoctorStatus::Fail
+        },
+        code: if rolled_back_workers_online == 0 {
+            "rolled_back_workers_offline".to_string()
+        } else {
+            "rolled_back_workers_online".to_string()
+        },
+        count: Some(rolled_back_workers_online),
+    });
+    let invalid_replication_plans = count(
+        pool,
+        "SELECT COUNT(*) FROM enterprise_artifact_replication_plans AS plan \
+         WHERE NOT EXISTS (SELECT 1 FROM execution_artifacts AS artifact \
+           WHERE artifact.id = plan.execution_artifact_id \
+             AND artifact.content_sha256 = plan.artifact_sha256)",
+    )
+    .await?;
+    checks.push(DoctorCheck {
+        name: "enterprise_replication_integrity".to_string(),
+        status: if invalid_replication_plans == 0 {
+            DoctorStatus::Pass
+        } else {
+            DoctorStatus::Fail
+        },
+        code: if invalid_replication_plans == 0 {
+            "replication_artifacts_resolved".to_string()
+        } else {
+            "replication_artifacts_missing_or_mismatched".to_string()
+        },
+        count: Some(invalid_replication_plans),
     });
     let missing_replica_regions = count(
         pool,
@@ -369,21 +468,15 @@ pub async fn run_doctor(
 
 async fn count(pool: &SqlitePool, query: &str) -> Result<u64, StoreError> {
     let value = sqlx::query_scalar::<_, i64>(query).fetch_one(pool).await?;
-    u64::try_from(value)
-        .map_err(|_| StoreError::Invariant("doctor count is negative".to_string()))
+    u64::try_from(value).map_err(|_| StoreError::Invariant("doctor count is negative".to_string()))
 }
 
-async fn count_with_i64(
-    pool: &SqlitePool,
-    query: &str,
-    value: i64,
-) -> Result<u64, StoreError> {
+async fn count_with_i64(pool: &SqlitePool, query: &str, value: i64) -> Result<u64, StoreError> {
     let count = sqlx::query_scalar::<_, i64>(query)
         .bind(value)
         .fetch_one(pool)
         .await?;
-    u64::try_from(count)
-        .map_err(|_| StoreError::Invariant("doctor count is negative".to_string()))
+    u64::try_from(count).map_err(|_| StoreError::Invariant("doctor count is negative".to_string()))
 }
 
 fn count_check(

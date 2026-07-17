@@ -41,11 +41,14 @@ impl CommandRunner for TokioCommandRunner {
         })?;
         if let Some(bytes) = options.stdin {
             if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(&bytes).await.map_err(|error| CommandError {
-                    message: format!("failed writing stdin to `{program}`: {error}"),
-                    stderr: String::new(),
-                    status: None,
-                })?;
+                stdin
+                    .write_all(&bytes)
+                    .await
+                    .map_err(|error| CommandError {
+                        message: format!("failed writing stdin to `{program}`: {error}"),
+                        stderr: String::new(),
+                        status: None,
+                    })?;
             }
         } else {
             drop(child.stdin.take());

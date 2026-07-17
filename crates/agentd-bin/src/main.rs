@@ -94,6 +94,9 @@ async fn main() -> ExitCode {
                 }
             }
         }
+        Some(AgentdCommand::EnterpriseWorker(args)) => agentd_bin::fleet_worker::run(&args)
+            .await
+            .map_err(|error| Box::new(error) as Box<dyn std::error::Error>),
         None => daemon::serve(cli.config).await,
     };
     match result {

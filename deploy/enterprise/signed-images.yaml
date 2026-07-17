@@ -5,6 +5,8 @@ metadata:
 spec:
   images:
     - glob: registry.example.invalid/agentd**
+    - glob: registry.example.invalid/envoy**
+    - glob: registry.example.invalid/busybox**
   authorities:
     - key:
         data: |
@@ -29,4 +31,3 @@ data:
       ],
       "healthyWhen": "all-required-zones-report-exact-digest-and-verified-signature"
     }
-

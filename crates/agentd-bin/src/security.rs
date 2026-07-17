@@ -306,7 +306,11 @@ pub fn build_security_runtime(
 pub fn validate_enterprise_control_plane_auth(
     auth: &AuthConfig,
 ) -> Result<(), SecurityStartupError> {
-    if auth_is_open(auth) {
+    if auth
+        .api_token
+        .as_deref()
+        .is_none_or(|token| token.trim().is_empty())
+    {
         return Err(SecurityStartupError::OpenAuth);
     }
     if auth.agent_token_mode == agentd_surface::http::AgentTokenMode::Audit {

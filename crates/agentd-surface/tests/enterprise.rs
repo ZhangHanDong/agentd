@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use agentd_core::ports::EnterpriseOperationalSnapshot;
 use agentd_surface::http::{
-    AgentTokenMode, AppState, AuthConfig, MediaConfig, SchedulerConfig, router,
+    AgentTokenMode, AppState, AuthConfig, MediaConfig, OPERATOR_READ_COOKIE_NAME, SchedulerConfig,
+    operator_read_cookie_value, router,
 };
 use agentd_surface::test_support::FakeRunHost;
 use axum::Router;
@@ -14,14 +15,18 @@ use tower::ServiceExt;
 fn app(host: Arc<FakeRunHost>) -> Router {
     router(AppState {
         host,
-        auth: AuthConfig {
-            api_token: Some("operator-secret".to_string()),
-            agent_token_mode: AgentTokenMode::Hard,
-            agent_tokens: BTreeMap::new(),
-        },
+        auth: auth_config(),
         media: MediaConfig::default_for_tests(),
         scheduler: SchedulerConfig::default(),
     })
+}
+
+fn auth_config() -> AuthConfig {
+    AuthConfig {
+        api_token: Some("operator-secret".to_string()),
+        agent_token_mode: AgentTokenMode::Hard,
+        agent_tokens: BTreeMap::new(),
+    }
 }
 
 fn snapshot() -> EnterpriseOperationalSnapshot {
@@ -68,6 +73,38 @@ async fn enterprise_status_requires_operator_and_returns_bounded_snapshot() {
         .await
         .expect("response");
     assert_eq!(authorized.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn enterprise_read_cookie_authorizes_reads_but_not_mutations() {
+    let host = Arc::new(FakeRunHost::new());
+    host.set_enterprise_snapshot(snapshot());
+    let cookie = operator_read_cookie_value(&auth_config()).expect("derived read cookie");
+    let read = app(Arc::clone(&host))
+        .oneshot(
+            Request::get("/api/enterprise/status")
+                .header(
+                    "cookie",
+                    format!("theme=dark; {OPERATOR_READ_COOKIE_NAME}={cookie}"),
+                )
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(read.status(), StatusCode::OK);
+
+    let mutation = app(host)
+        .oneshot(
+            Request::post("/api/enterprise/mutations/set-retention-policy")
+                .header("cookie", format!("{OPERATOR_READ_COOKIE_NAME}={cookie}"))
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(mutation.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

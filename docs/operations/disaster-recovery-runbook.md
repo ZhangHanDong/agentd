@@ -4,6 +4,9 @@
 - Required invariant: accepted state, audit history, cursors, lease epochs, and
   fencing tokens are never rewound
 - Default objectives: use the values pinned in the active factory load model
+- Store boundary: the checked-in SQLite profile supports single-authority
+  backup/restore drills only; multi-member or multi-region acceptance requires
+  the external replicated durable-store composition
 
 ## Checkpoint Contract
 
@@ -40,11 +43,13 @@ agentctl enterprise dr-checkpoint --file checkpoint.json \
    tenant KMS versions. Missing replicas remain pending.
 3. Verify audit, Matrix cursor, and certification heads exactly match the
    checkpoint. Never choose an earlier cursor to make replay easier.
-4. Start one recovery control-plane instance with ingress closed. Run schema,
+4. Start one recovery control-plane instance with ingress closed. Require
+   schema `27`, then run schema,
    integrity, leadership, lease, queue, runtime, Matrix, OpenFab, artifact,
    replication, load-model, and SLO doctor checks.
-5. Start additional members, acquire a new higher leadership term/fence, then
-   enable operator reads.
+5. For an approved replicated-store target, start additional members and
+   acquire a new higher leadership term/fence. For the SQLite reference target,
+   keep exactly one member. Then enable operator reads.
 6. Recreate workers with new incarnation ids. Reap old leases before dispatch.
 7. Open task admission only after stale workers and old-region writes are
    denied and the current Specify epoch is available.
@@ -88,4 +93,3 @@ Keep admission closed and escalate if any digest mismatches, accepted state is
 missing, an old fence can mutate, a legal hold is absent, key/object refs cannot
 be resolved, Specify authority changes unexpectedly, or measured RPO/RTO exceeds
 the declared objective.
-

@@ -25,17 +25,15 @@ use agentd_core::types::{
     WorkerIncarnationId, WorkloadRole,
 };
 use agentd_runtime::ProviderCommand;
+use agentd_store::SqliteStore;
 use agentd_store::native_agent_binding::{
     NativeAgentRuntimeBinding, active_native_agent_binding, ensure_native_agent_profile,
     ensure_native_execution_task, ensure_native_runtime_authority, finish_native_agent_binding,
     native_agent_binding, record_native_agent_binding,
 };
-use agentd_store::SqliteStore;
 use sha2::{Digest, Sha256};
 
-use crate::host::{
-    AgentLifecycle, AgentLifecycleShutdown, AgentLifecycleShutdownReport,
-};
+use crate::host::{AgentLifecycle, AgentLifecycleShutdown, AgentLifecycleShutdownReport};
 use crate::runtime::{NativeRuntimeService, NativeRuntimeStartRequest, provider_command_sha256};
 
 const MAX_CAPTURE_BYTES: u64 = 256 * 1024;
@@ -69,8 +67,14 @@ impl NativeAgentBackend {
         Arc::clone(&self.service)
     }
 
-    async fn start_native(&self, request: agentd_core::types::SpawnRequest) -> Result<AgentHandle, CoreError> {
-        if !matches!(request.launch_strategy, agentd_core::types::LaunchStrategy::Direct) {
+    async fn start_native(
+        &self,
+        request: agentd_core::types::SpawnRequest,
+    ) -> Result<AgentHandle, CoreError> {
+        if !matches!(
+            request.launch_strategy,
+            agentd_core::types::LaunchStrategy::Direct
+        ) {
             return Err(CoreError::Backend(
                 "native runtime owns child supervision and rejects external launch scopes"
                     .to_string(),
@@ -88,24 +92,16 @@ impl NativeAgentBackend {
             ));
         }
         let observed_at = now_unix()?;
-        let authority = ensure_native_runtime_authority(
-            self.store.pool(),
-            &self.host_instance_id,
-        )
-        .await?;
+        let authority =
+            ensure_native_runtime_authority(self.store.pool(), &self.host_instance_id).await?;
         let provider = runtime_provider(request.cli);
         let runtime_name = provider.as_str();
-        let profile_id = ensure_native_agent_profile(
-            self.store.pool(),
-            request.agent_id.as_str(),
-            runtime_name,
-        )
-        .await?;
-        let (execution_task_id, synthetic_task) = ensure_native_execution_task(
-            self.store.pool(),
-            request.execution_task_id.as_ref(),
-        )
-        .await?;
+        let profile_id =
+            ensure_native_agent_profile(self.store.pool(), request.agent_id.as_str(), runtime_name)
+                .await?;
+        let (execution_task_id, synthetic_task) =
+            ensure_native_execution_task(self.store.pool(), request.execution_task_id.as_ref())
+                .await?;
         let provider_command = provider_command(provider, &request, &worktree);
         let command_sha256 = provider_command_sha256(&provider_command);
         let security = local_security_context(
@@ -203,11 +199,8 @@ impl NativeAgentBackend {
         &self,
         request: &agentd_core::types::SpawnRequest,
     ) -> Result<Option<AgentHandle>, CoreError> {
-        let Some(binding) = active_native_agent_binding(
-            self.store.pool(),
-            request.agent_id.as_str(),
-        )
-        .await?
+        let Some(binding) =
+            active_native_agent_binding(self.store.pool(), request.agent_id.as_str()).await?
         else {
             return Ok(None);
         };
@@ -405,8 +398,7 @@ impl InteractiveSandboxPort for LocalInteractiveSandbox {
     ) -> Result<RuntimeCommand, NativeRuntimeError> {
         if request.argv.is_empty()
             || request.sandbox.expires_at <= request.observed_at
-            || request.admission.scope.sandbox_profile_id
-                != request.sandbox.profile.profile_id
+            || request.admission.scope.sandbox_profile_id != request.sandbox.profile.profile_id
         {
             return Err(NativeRuntimeError::Denied(
                 "local interactive sandbox binding is invalid".to_string(),
@@ -475,14 +467,11 @@ fn local_security_context(
         .checked_add(AUTHORITY_LIFETIME_SECONDS)
         .ok_or_else(|| CoreError::Invariant("native capability expiry overflow".to_string()))?;
     let authority_key = AuthorityKey::new("agentd-local").map_err(project_ref_error)?;
-    let organization_ref = agentd_core::types::OrganizationRef::new(
-        authority_key.clone(),
-        "local-organization",
-        "v1",
-    )
-    .map_err(project_ref_error)?;
-    let project_ref = ProjectRef::new(authority_key.clone(), "local-project", "v1")
-        .map_err(project_ref_error)?;
+    let organization_ref =
+        agentd_core::types::OrganizationRef::new(authority_key.clone(), "local-organization", "v1")
+            .map_err(project_ref_error)?;
+    let project_ref =
+        ProjectRef::new(authority_key.clone(), "local-project", "v1").map_err(project_ref_error)?;
     let snapshot_sha256 = sha256(
         format!(
             "{}:{}:{}",
@@ -498,12 +487,9 @@ fn local_security_context(
         &snapshot_sha256,
     )
     .map_err(project_ref_error)?;
-    let rbac_policy_version_ref = RbacPolicyVersionRef::new(
-        authority_key.clone(),
-        "local-native-policy",
-        "v1",
-    )
-    .map_err(project_ref_error)?;
+    let rbac_policy_version_ref =
+        RbacPolicyVersionRef::new(authority_key.clone(), "local-native-policy", "v1")
+            .map_err(project_ref_error)?;
     let repository_ref = RepositoryRef::new(
         authority_key.clone(),
         format!("worktree-{}", sha256(worktree.to_string_lossy().as_bytes())),
@@ -558,9 +544,8 @@ fn local_security_context(
             execution_task_id: execution_task_id.clone(),
             worker_incarnation_id: worker_incarnation_id.clone(),
             lease_id: LeaseId::new(),
-            fencing_token: FencingToken::new(1).map_err(|error| {
-                CoreError::Invariant(format!("native fencing token: {error}"))
-            })?,
+            fencing_token: FencingToken::new(1)
+                .map_err(|error| CoreError::Invariant(format!("native fencing token: {error}")))?,
         },
         sandbox_profile_id: profile.profile_id.clone(),
         egress_profile_id: "local-native-egress".to_string(),
@@ -671,12 +656,12 @@ fn parse_address(
     ),
     CoreError,
 > {
-    let rest = address.strip_prefix("native://").ok_or_else(|| {
-        CoreError::Backend("runtime address must use native://".to_string())
-    })?;
-    let (session, attempt) = rest.split_once('/').ok_or_else(|| {
-        CoreError::Backend("runtime address is missing its attempt".to_string())
-    })?;
+    let rest = address
+        .strip_prefix("native://")
+        .ok_or_else(|| CoreError::Backend("runtime address must use native://".to_string()))?;
+    let (session, attempt) = rest
+        .split_once('/')
+        .ok_or_else(|| CoreError::Backend("runtime address is missing its attempt".to_string()))?;
     if !session.starts_with("rs_") || !attempt.starts_with("ra_") {
         return Err(CoreError::Backend(
             "runtime address contains invalid ids".to_string(),
@@ -729,8 +714,7 @@ fn now_unix() -> Result<i64, CoreError> {
         .duration_since(UNIX_EPOCH)
         .map_err(|error| CoreError::Backend(format!("system clock is invalid: {error}")))?
         .as_secs();
-    i64::try_from(seconds)
-        .map_err(|_| CoreError::Backend("system clock exceeds i64".to_string()))
+    i64::try_from(seconds).map_err(|_| CoreError::Backend("system clock exceeds i64".to_string()))
 }
 
 fn unix_system_time(seconds: i64) -> SystemTime {

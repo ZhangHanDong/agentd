@@ -7,12 +7,12 @@
 use agentd_core::CoreError;
 use agentd_core::ports::{
     ArtifactReplicaAcknowledgement, ArtifactReplicationPlan, CapacityObservation,
-    DisasterRecoveryCheckpoint, DisasterRecoveryDrill, EnterpriseOperationalSnapshot,
-    FleetExplain, LegalHold, LoadModelRegistration, RetentionPolicy, RuntimeEvent,
-    RuntimeInputAck, RuntimeKeyInput, RuntimeResizeRequest, RuntimeShutdownReport,
-    RuntimeShutdownRequest, RuntimeSnapshot, RuntimeTextInput, RuntimeView, RuntimeWaitRequest,
-    ServiceLevelMeasurement, TenantKeyVersion, WorkerImageRollout, WorkerImageZoneObservation,
-    ZonePoolPolicy,
+    DisasterRecoveryCheckpoint, DisasterRecoveryDrill, EnterpriseOperationalSnapshot, FleetExplain,
+    LegalHold, LoadModelRegistration, RetentionPolicy, RuntimeEvent, RuntimeInputAck,
+    RuntimeKeyInput, RuntimeResizeRequest, RuntimeShutdownReport, RuntimeShutdownRequest,
+    RuntimeSnapshot, RuntimeTextInput, RuntimeView, RuntimeWaitRequest, ServiceLevelMeasurement,
+    TenantKeyTransition, TenantKeyVersion, WorkerImageRollback, WorkerImageRollout,
+    WorkerImageZoneObservation, ZonePoolPolicy,
 };
 use agentd_core::types::{
     CapabilityAdmission, LegalHoldId, NodeId, ReviewRunId, RunId, RuntimeSessionId, TaskRunId,
@@ -909,11 +909,13 @@ fn default_clear_runtime() -> bool {
 pub enum EnterpriseMutation {
     DeclareRollout(WorkerImageRollout),
     ObserveRollout(WorkerImageZoneObservation),
+    RollbackRollout(WorkerImageRollback),
     UpsertZonePool(ZonePoolPolicy),
     RecommendCapacity(CapacityObservation),
     CreateReplicationPlan(ArtifactReplicationPlan),
     AcknowledgeReplica(ArtifactReplicaAcknowledgement),
     RegisterTenantKey(TenantKeyVersion),
+    TransitionTenantKey(TenantKeyTransition),
     SetRetentionPolicy(RetentionPolicy),
     PlaceLegalHold(LegalHold),
     ReleaseLegalHold {

@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use reqwest::header::{AUTHORIZATION, HeaderValue};
-use reqwest::{Client, Method, Url};
+use reqwest::{Certificate, Client, Method, Url};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -19,6 +19,7 @@ const EXIT_INVALID: u8 = 2;
 const EXIT_DAEMON: u8 = 3;
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_CA_PEM_BYTES: u64 = 128 * 1024;
 
 #[must_use]
 pub fn run(command: &EnterpriseCmd) -> ExitCode {
@@ -47,15 +48,19 @@ pub fn run(command: &EnterpriseCmd) -> ExitCode {
 
 async fn execute(command: &EnterpriseCmd) -> Result<Value, EnterpriseCliError> {
     match command {
-        EnterpriseCmd::Status(daemon) => request(daemon, Method::GET, "/api/enterprise/status", None).await,
+        EnterpriseCmd::Status(daemon) => {
+            request(daemon, Method::GET, "/api/enterprise/status", None).await
+        }
         EnterpriseCmd::Explain(args) => explain(args).await,
         EnterpriseCmd::Rollout(args) => mutate(args, "declare-rollout").await,
         EnterpriseCmd::RolloutObserve(args) => mutate(args, "observe-rollout").await,
+        EnterpriseCmd::RolloutRollback(args) => mutate(args, "rollback-rollout").await,
         EnterpriseCmd::ZonePolicy(args) => mutate(args, "upsert-zone-pool").await,
         EnterpriseCmd::Capacity(args) => mutate(args, "recommend-capacity").await,
         EnterpriseCmd::ReplicationPlan(args) => mutate(args, "create-replication-plan").await,
         EnterpriseCmd::ReplicaAck(args) => mutate(args, "acknowledge-replica").await,
         EnterpriseCmd::TenantKey(args) => mutate(args, "register-tenant-key").await,
+        EnterpriseCmd::TenantKeyTransition(args) => mutate(args, "transition-tenant-key").await,
         EnterpriseCmd::Retention(args) => mutate(args, "set-retention-policy").await,
         EnterpriseCmd::LegalHold(args) => mutate(args, "place-legal-hold").await,
         EnterpriseCmd::LegalHoldRelease(args) => release_legal_hold(args).await,
@@ -63,6 +68,10 @@ async fn execute(command: &EnterpriseCmd) -> Result<Value, EnterpriseCliError> {
         EnterpriseCmd::DrDrill(args) => mutate(args, "record-dr-drill").await,
         EnterpriseCmd::LoadModel(args) => mutate(args, "register-load-model").await,
         EnterpriseCmd::ServiceLevel(args) => mutate(args, "record-service-level").await,
+        EnterpriseCmd::WorkerEnroll(args) => fleet_mutate(args, "workers/enroll").await,
+        EnterpriseCmd::WorkerIdentityRevoke(args) => {
+            fleet_mutate(args, "workers/identities/revoke").await
+        }
     }
 }
 
@@ -101,6 +110,20 @@ async fn mutate(
         &args.daemon,
         Method::POST,
         &format!("/api/enterprise/mutations/{operation}"),
+        Some(body),
+    )
+    .await
+}
+
+async fn fleet_mutate(
+    args: &EnterpriseMutationFileArgs,
+    operation: &str,
+) -> Result<Value, EnterpriseCliError> {
+    let (body, _) = read_json(&args.file)?;
+    request(
+        &args.daemon,
+        Method::POST,
+        &format!("/api/enterprise/fleet/{operation}"),
         Some(body),
     )
     .await
@@ -152,7 +175,10 @@ async fn request(
                 )
             })?,
     );
-    if token.chars().any(|character| matches!(character, '\r' | '\n')) {
+    if token
+        .chars()
+        .any(|character| matches!(character, '\r' | '\n'))
+    {
         return Err(EnterpriseCliError::Invalid(
             "enterprise operator bearer token is invalid".to_string(),
         ));
@@ -161,13 +187,30 @@ async fn request(
         .map_err(|error| EnterpriseCliError::Invalid(error.to_string()))?;
     authorization.set_sensitive(true);
 
-    let client = Client::builder()
+    let mut client_builder = Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(30));
+    if let Some(path) = daemon.server_ca_pem.as_deref() {
+        if base.scheme() != "https" {
+            return Err(EnterpriseCliError::Invalid(
+                "--server-ca-pem requires an HTTPS daemon URL".to_string(),
+            ));
+        }
+        let ca = read_bounded(path, MAX_CA_PEM_BYTES, "server CA")?;
+        let ca = Certificate::from_pem(&ca).map_err(|error| {
+            EnterpriseCliError::Invalid(format!("invalid server CA PEM: {error}"))
+        })?;
+        client_builder = client_builder
+            .tls_built_in_root_certs(false)
+            .add_root_certificate(ca);
+    }
+    let client = client_builder
         .build()
         .map_err(|error| EnterpriseCliError::Daemon(error.to_string()))?;
-    let mut builder = client.request(method, base).header(AUTHORIZATION, authorization);
+    let mut builder = client
+        .request(method, base)
+        .header(AUTHORIZATION, authorization);
     if let Some(body) = body {
         builder = builder.json(&body);
     }
@@ -203,8 +246,29 @@ async fn request(
     }
 }
 
+fn read_bounded(
+    path: &Path,
+    maximum_bytes: u64,
+    field: &str,
+) -> Result<Vec<u8>, EnterpriseCliError> {
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        EnterpriseCliError::Invalid(format!("cannot inspect {field} file: {error}"))
+    })?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > maximum_bytes {
+        return Err(EnterpriseCliError::Invalid(format!(
+            "{field} must be a non-empty regular file <= {maximum_bytes} bytes"
+        )));
+    }
+    std::fs::read(path)
+        .map_err(|error| EnterpriseCliError::Invalid(format!("cannot read {field} file: {error}")))
+}
+
 fn validate_url(url: &Url, allow_loopback_http: bool) -> Result<(), EnterpriseCliError> {
-    if url.username() != "" || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
+    if url.username() != ""
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
         return Err(EnterpriseCliError::Invalid(
             "daemon URL must not contain credentials, query, or fragment".to_string(),
         ));
@@ -244,9 +308,7 @@ fn normalize_load_model(body: Value, source: &[u8]) -> Result<Value, EnterpriseC
     if body.get("load_model_id").is_some() {
         return Ok(body);
     }
-    if body.get("schemaVersion").and_then(Value::as_str)
-        != Some("agentd.factory-load-model/v1")
-    {
+    if body.get("schemaVersion").and_then(Value::as_str) != Some("agentd.factory-load-model/v1") {
         return Err(EnterpriseCliError::Invalid(
             "load model must be a LoadModelRegistration or agentd.factory-load-model/v1"
                 .to_string(),
@@ -264,9 +326,8 @@ fn normalize_load_model(body: Value, source: &[u8]) -> Result<Value, EnterpriseC
             .ok_or_else(|| EnterpriseCliError::Invalid(format!("load model missing {pointer}")))
     };
     let bounded_u32 = |value: u64, field: &str| -> Result<u32, EnterpriseCliError> {
-        u32::try_from(value).map_err(|_| {
-            EnterpriseCliError::Invalid(format!("load model {field} exceeds u32"))
-        })
+        u32::try_from(value)
+            .map_err(|_| EnterpriseCliError::Invalid(format!("load model {field} exceeds u32")))
     };
     let tenant_count = number("/dimensions/tenant/count")?;
     let project_count = tenant_count

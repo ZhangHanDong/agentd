@@ -130,9 +130,7 @@ impl GitWorktreeProvider {
             .args(args)
             .output()
             .await
-            .map_err(|error| {
-                CoreError::Backend(format!("git {args:?} failed to spawn: {error}"))
-            })
+            .map_err(|error| CoreError::Backend(format!("git {args:?} failed to spawn: {error}")))
     }
 }
 

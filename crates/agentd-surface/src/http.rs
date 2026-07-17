@@ -25,6 +25,8 @@ use base64::engine::general_purpose::STANDARD;
 use futures::Stream;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use tokio::sync::broadcast;
 
 use agentd_core::ports::{
@@ -32,8 +34,8 @@ use agentd_core::ports::{
     DisasterRecoveryCheckpoint, DisasterRecoveryDrill, LegalHold, LoadModelRegistration,
     RetentionPolicy, RuntimeDimensions, RuntimeEvent, RuntimeKey, RuntimeKeyInput,
     RuntimeResizeRequest, RuntimeShutdownRequest, RuntimeTerminalReason, RuntimeTextInput,
-    RuntimeWaitRequest, ServiceLevelMeasurement, TenantKeyVersion, WorkerImageRollout,
-    WorkerImageZoneObservation, ZonePoolPolicy,
+    RuntimeWaitRequest, ServiceLevelMeasurement, TenantKeyVersion, WorkerImageRollback,
+    WorkerImageRollout, WorkerImageZoneObservation, ZonePoolPolicy,
 };
 use agentd_core::types::{
     CapabilityAdmission, LegalHoldId, RunId, RuntimeAttemptId, RuntimeSessionId, TaskRunId,
@@ -47,9 +49,8 @@ use crate::host::{
     AgentChatTaskPatchInput, AgentChatTaskTransitionInput, AgentHeartbeat, AgentIdentityPatch,
     AgentOffline, AgentRegistration, AgentRuntimeUpdate, DeliveryEventInput, DirectMessageInput,
     EnterpriseMutation, EventRecord, GroupCreateInput, GroupMemberUpdate, LiveEvent,
-    MatrixBridgeRoomInput,
-    MatrixInboundMessageInput, RelayServerHeartbeat, RelayStreamEventRecord, RunHost, RunSnapshot,
-    SchedulerDispatchInput, SchedulerPoolFilters, SchedulerReleaseInput,
+    MatrixBridgeRoomInput, MatrixInboundMessageInput, RelayServerHeartbeat, RelayStreamEventRecord,
+    RunHost, RunSnapshot, SchedulerDispatchInput, SchedulerPoolFilters, SchedulerReleaseInput,
 };
 use crate::mcp_server::dispatch;
 use crate::tools::attachments::{
@@ -137,6 +138,46 @@ impl AuthConfig {
             .is_some_and(|v| !v.trim().is_empty())
             || !self.agent_tokens.is_empty()
     }
+}
+
+/// Host-only browser cookie used for enterprise dashboard read access.
+pub const OPERATOR_READ_COOKIE_NAME: &str = "__Host-agentd_operator_read";
+
+const OPERATOR_READ_COOKIE_CONTEXT: &[u8] = b"agentd-operator-read-cookie-v1\0";
+
+/// Derive the opaque, read-only dashboard credential from the operator token.
+///
+/// The value is never sent in a response body or exposed to dashboard script.
+#[must_use]
+pub fn operator_read_cookie_value(auth: &AuthConfig) -> Option<String> {
+    let token = auth
+        .api_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())?;
+    let mut digest = Sha256::new();
+    digest.update(OPERATOR_READ_COOKIE_CONTEXT);
+    digest.update(token.as_bytes());
+    Some(hex::encode(digest.finalize()))
+}
+
+/// Check a dashboard read cookie against the configured operator credential.
+#[must_use]
+pub fn operator_read_cookie_authorized(auth: &AuthConfig, headers: &HeaderMap) -> bool {
+    let Some(expected) = operator_read_cookie_value(auth) else {
+        return false;
+    };
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(';'))
+        .filter_map(|pair| pair.trim().split_once('='))
+        .filter(|(name, _)| *name == OPERATOR_READ_COOKIE_NAME)
+        .any(|(_, value)| {
+            let provided = value.trim().as_bytes();
+            provided.len() == expected.len() && bool::from(provided.ct_eq(expected.as_bytes()))
+        })
 }
 
 /// Build the surface `Router` (design §7.2).
@@ -1104,7 +1145,7 @@ async fn release_scheduler(
 }
 
 async fn enterprise_status(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(error) = require_operator_bearer(&state.auth, &headers) {
+    if let Err(error) = require_operator_read(&state.auth, &headers) {
         return error.into_response();
     }
     match state.host.enterprise_status(now_unix()).await {
@@ -1118,11 +1159,11 @@ async fn enterprise_task_explain(
     AxumPath(id): AxumPath<String>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(error) = require_operator_bearer(&state.auth, &headers) {
+    if let Err(error) = require_operator_read(&state.auth, &headers) {
         return error.into_response();
     }
     let id = id.trim();
-    if !id.starts_with("tr_") || id.len() > 128 {
+    if !valid_typed_ulid(id, "tr_") {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "invalid execution task id" })),
@@ -1142,6 +1183,26 @@ async fn enterprise_task_explain(
             .into_response(),
         Err(error) => enterprise_error_response(error),
     }
+}
+
+fn valid_typed_ulid(value: &str, prefix: &str) -> bool {
+    value.len() == prefix.len() + 26
+        && value.starts_with(prefix)
+        && value
+            .as_bytes()
+            .get(prefix.len())
+            .is_some_and(|byte| matches!(byte, b'0'..=b'7'))
+        && value[prefix.len()..].bytes().all(|byte| {
+            matches!(
+                byte,
+                b'0'..=b'9'
+                    | b'A'..=b'H'
+                    | b'J'..=b'K'
+                    | b'M'..=b'N'
+                    | b'P'..=b'T'
+                    | b'V'..=b'Z'
+            )
+        })
 }
 
 async fn enterprise_mutation(
@@ -1171,23 +1232,38 @@ fn parse_enterprise_mutation(operation: &str, body: Value) -> Result<EnterpriseM
     }
 
     match operation {
-        "declare-rollout" => decode::<WorkerImageRollout>(body).map(EnterpriseMutation::DeclareRollout),
-        "observe-rollout" => decode::<WorkerImageZoneObservation>(body)
-            .map(EnterpriseMutation::ObserveRollout),
-        "upsert-zone-pool" => decode::<ZonePoolPolicy>(body).map(EnterpriseMutation::UpsertZonePool),
-        "recommend-capacity" => decode::<CapacityObservation>(body)
-            .map(EnterpriseMutation::RecommendCapacity),
-        "create-replication-plan" => decode::<ArtifactReplicationPlan>(body)
-            .map(EnterpriseMutation::CreateReplicationPlan),
+        "declare-rollout" => {
+            decode::<WorkerImageRollout>(body).map(EnterpriseMutation::DeclareRollout)
+        }
+        "observe-rollout" => {
+            decode::<WorkerImageZoneObservation>(body).map(EnterpriseMutation::ObserveRollout)
+        }
+        "rollback-rollout" => {
+            decode::<WorkerImageRollback>(body).map(EnterpriseMutation::RollbackRollout)
+        }
+        "upsert-zone-pool" => {
+            decode::<ZonePoolPolicy>(body).map(EnterpriseMutation::UpsertZonePool)
+        }
+        "recommend-capacity" => {
+            decode::<CapacityObservation>(body).map(EnterpriseMutation::RecommendCapacity)
+        }
+        "create-replication-plan" => {
+            decode::<ArtifactReplicationPlan>(body).map(EnterpriseMutation::CreateReplicationPlan)
+        }
         "acknowledge-replica" => decode::<ArtifactReplicaAcknowledgement>(body)
             .map(EnterpriseMutation::AcknowledgeReplica),
-        "register-tenant-key" => decode::<TenantKeyVersion>(body)
-            .map(EnterpriseMutation::RegisterTenantKey),
-        "set-retention-policy" => decode::<RetentionPolicy>(body)
-            .map(EnterpriseMutation::SetRetentionPolicy),
+        "register-tenant-key" => {
+            decode::<TenantKeyVersion>(body).map(EnterpriseMutation::RegisterTenantKey)
+        }
+        "transition-tenant-key" => decode::<agentd_core::ports::TenantKeyTransition>(body)
+            .map(EnterpriseMutation::TransitionTenantKey),
+        "set-retention-policy" => {
+            decode::<RetentionPolicy>(body).map(EnterpriseMutation::SetRetentionPolicy)
+        }
         "place-legal-hold" => decode::<LegalHold>(body).map(EnterpriseMutation::PlaceLegalHold),
         "release-legal-hold" => {
             #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
             struct ReleaseLegalHoldBody {
                 legal_hold_id: String,
                 released_at: i64,
@@ -1197,14 +1273,18 @@ fn parse_enterprise_mutation(operation: &str, body: Value) -> Result<EnterpriseM
                 released_at: value.released_at,
             })
         }
-        "record-dr-checkpoint" => decode::<DisasterRecoveryCheckpoint>(body)
-            .map(EnterpriseMutation::RecordDrCheckpoint),
-        "record-dr-drill" => decode::<DisasterRecoveryDrill>(body)
-            .map(EnterpriseMutation::RecordDrDrill),
-        "register-load-model" => decode::<LoadModelRegistration>(body)
-            .map(EnterpriseMutation::RegisterLoadModel),
-        "record-service-level" => decode::<ServiceLevelMeasurement>(body)
-            .map(EnterpriseMutation::RecordServiceLevel),
+        "record-dr-checkpoint" => {
+            decode::<DisasterRecoveryCheckpoint>(body).map(EnterpriseMutation::RecordDrCheckpoint)
+        }
+        "record-dr-drill" => {
+            decode::<DisasterRecoveryDrill>(body).map(EnterpriseMutation::RecordDrDrill)
+        }
+        "register-load-model" => {
+            decode::<LoadModelRegistration>(body).map(EnterpriseMutation::RegisterLoadModel)
+        }
+        "record-service-level" => {
+            decode::<ServiceLevelMeasurement>(body).map(EnterpriseMutation::RecordServiceLevel)
+        }
         _ => Err("unknown enterprise mutation operation".to_string()),
     }
 }
@@ -1697,7 +1777,20 @@ fn require_operator_bearer(auth: &AuthConfig, headers: &HeaderMap) -> Result<(),
     let Some(expected) = auth.api_token.as_deref().filter(|v| !v.trim().is_empty()) else {
         return Ok(());
     };
-    if bearer_token(headers).as_deref() == Some(expected.trim()) {
+    let expected = expected.trim().as_bytes();
+    if bearer_token(headers).is_some_and(|provided| {
+        let provided = provided.as_bytes();
+        provided.len() == expected.len() && bool::from(provided.ct_eq(expected))
+    }) {
+        return Ok(());
+    }
+    Err(AuthRejection::BearerRequired)
+}
+
+fn require_operator_read(auth: &AuthConfig, headers: &HeaderMap) -> Result<(), AuthRejection> {
+    if require_operator_bearer(auth, headers).is_ok()
+        || operator_read_cookie_authorized(auth, headers)
+    {
         return Ok(());
     }
     Err(AuthRejection::BearerRequired)
@@ -1847,6 +1940,7 @@ fn enterprise_error_response(error: CoreError) -> Response {
         StatusCode::NOT_FOUND
     } else if message.contains("not the current leader")
         || message.contains("leadership is stale")
+        || message.contains("leadership fence")
         || message.contains("conflict")
     {
         StatusCode::CONFLICT

@@ -16,7 +16,7 @@ use agentd_core::ports::AgentBackend;
 use agentd_core::test_support::{FakeBackend, MempalStub, RecordingCommandRunner};
 use agentd_core::types::{AgentHandle, AgentId, BackendKind, CliKind, RunId, SpawnRequest};
 use agentd_store::{SqliteStore, run_repo};
-use agentd_surface::http::{AgentTokenMode, AuthConfig};
+use agentd_surface::http::{AgentTokenMode, AuthConfig, MediaConfig, OPERATOR_READ_COOKIE_NAME};
 use agentd_surface::mcp_server::dispatch;
 use axum::Router;
 use axum::body::Body;
@@ -314,6 +314,28 @@ async fn empty_auth_router(auth: AuthConfig) -> (Router, tempfile::TempDir, Arc<
     let backend = Arc::new(FakeBackend::new());
     let (app, dir, backend) = empty_router_with_backend_and_auth(Arc::clone(&backend), auth).await;
     (app, dir, backend)
+}
+
+async fn empty_enterprise_operator_router() -> (Router, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteStore::connect(&dir.path().join("agentd.db"))
+        .await
+        .expect("connect");
+    let host = ProductionRunHost::new(
+        store,
+        Box::new(FakeBackend::new()),
+        Box::new(RecordingCommandRunner::new()),
+        Box::new(MempalStub::new()),
+        Box::new(SystemClock),
+        workflows_dir(),
+    );
+    let app = daemon::build_enterprise_operator_router(
+        Arc::new(host),
+        auth_config(),
+        MediaConfig::new(dir.path().join("media")),
+    )
+    .expect("enterprise operator router");
+    (app, dir)
 }
 
 async fn empty_router_with_backend_and_auth(
@@ -2335,6 +2357,117 @@ async fn daemon_router_serves_dashboard_shell() {
         body.contains(r#"addEventListener("run_parked""#),
         "dashboard must listen to production run_parked events: {body}"
     );
+}
+
+#[tokio::test]
+async fn enterprise_operator_router_issues_read_only_browser_session() {
+    let (app, _dir) = empty_enterprise_operator_router().await;
+    let (health_status, _) = get(app.clone(), "/healthz").await;
+    assert_eq!(health_status, StatusCode::OK);
+    let (dashboard_status, _) = get(app.clone(), "/dashboard").await;
+    assert_eq!(dashboard_status, StatusCode::OK);
+    let (runs_status, _) = get(app.clone(), "/runs").await;
+    assert_eq!(runs_status, StatusCode::UNAUTHORIZED);
+
+    let missing = app
+        .clone()
+        .oneshot(
+            Request::post("/api/operator/session")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+
+    let wrong = app
+        .clone()
+        .oneshot(
+            Request::post("/api/operator/session")
+                .header("authorization", "Bearer wrong-secret")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+
+    let session = app
+        .clone()
+        .oneshot(
+            Request::post("/api/operator/session")
+                .header("authorization", "Bearer operator-secret")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(session.status(), StatusCode::OK);
+    assert_eq!(
+        session
+            .headers()
+            .get("cache-control")
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+    let set_cookie = session
+        .headers()
+        .get("set-cookie")
+        .and_then(|value| value.to_str().ok())
+        .expect("operator read cookie")
+        .to_string();
+    assert!(set_cookie.starts_with(&format!("{OPERATOR_READ_COOKIE_NAME}=")));
+    assert!(set_cookie.contains("; Path=/"));
+    assert!(set_cookie.contains("; Secure"));
+    assert!(set_cookie.contains("; HttpOnly"));
+    assert!(set_cookie.contains("; SameSite=Strict"));
+    assert!(!set_cookie.contains("operator-secret"));
+    assert!(!set_cookie.contains("Max-Age"));
+    assert!(!set_cookie.contains("Expires="));
+    assert!(!set_cookie.contains("Domain="));
+    let cookie = set_cookie.split(';').next().expect("cookie pair");
+    let session_body = session
+        .into_body()
+        .collect()
+        .await
+        .expect("session body")
+        .to_bytes();
+    assert!(
+        !session_body
+            .as_ref()
+            .windows("operator-secret".len())
+            .any(|window| { window == "operator-secret".as_bytes() })
+    );
+
+    let mut cookie_headers = HeaderMap::new();
+    cookie_headers.insert("cookie", cookie.parse().expect("cookie header"));
+    let (cookie_read_status, _) = get_with_headers(app.clone(), "/runs", cookie_headers).await;
+    assert_eq!(cookie_read_status, StatusCode::OK);
+
+    let cookie_write = app
+        .clone()
+        .oneshot(
+            Request::post("/runs")
+                .header("cookie", cookie)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"flow":"bogus"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(cookie_write.status(), StatusCode::UNAUTHORIZED);
+
+    let bearer_write = app
+        .oneshot(
+            Request::post("/runs")
+                .header("authorization", "Bearer operator-secret")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"flow":"bogus"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_ne!(bearer_write.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

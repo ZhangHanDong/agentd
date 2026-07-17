@@ -42,13 +42,17 @@ monotonically, and expired leaders cannot renew or mutate leader-only state.
 
 ### Storage
 
-Migration `0024` adds normalized tables for each enterprise resource and
-append-only rollout, scaling, replication, key-rotation, legal-hold, and DR
-history. The SQLite implementation is the standalone/reference adapter and
+Migration `0024` adds normalized tables for each enterprise resource. Migration
+`0025` preserves immutable tenant-key and replica transition history, `0026`
+records every leader-only mutation fence in the same write transaction as its
+state change, and `0027` preserves rollout observation/rollback, zone-policy,
+and retention-policy history while prohibiting destructive ledger mutation.
+The SQLite implementation is the standalone/reference adapter and
 exercises exact transaction semantics. The port is storage-neutral so an HA
-deployment can use a replicated SQL adapter without changing API or worker
-contracts. Kubernetes manifests require a shared durable-store endpoint and do
-not place a SQLite file on multiple replicas.
+deployment can provide a replicated adapter without changing API or worker
+contracts. The checked-in Kubernetes reference deliberately runs one replica
+with one RWO volume; it must not be scaled until the full durable-store
+composition is replaced.
 
 ### Specify Transport
 
@@ -82,9 +86,20 @@ task explain data. The dashboard adds a compact enterprise view for leadership,
 zones, backlog, replication, budget, failures, and SLO status. No endpoint emits
 credentials, prompt text, transcript bytes, or tenant key material.
 
-Checked-in Kubernetes assets include three control-plane replicas, zone-scoped
-pull workers, pod disruption budgets, deny-by-default network policy, HPA,
-workload identity, digest-only images, and Sigstore policy-controller intent.
+In enterprise composition, only health and the dashboard HTML shell are public.
+The operator bearer authorizes all surface methods; a bearer-authenticated
+session endpoint can issue a host-only Secure/HttpOnly/SameSite=Strict cookie
+for browser `GET`/`HEAD` requests. Dashboard code never stores the bearer or
+places it in a URL, and the cookie cannot authorize a mutation. Fleet routes
+remain outside this operator gate and retain their exact mTLS identity contract.
+
+Checked-in Kubernetes assets include one honest SQLite reference control plane,
+separate operator TLS and worker mTLS listeners, zone-scoped outbound pull
+workers, deny-by-default network policy, HPA, external CSI identity and
+Codex-executor contracts, per-lease disposable work directories, digest-only
+images, and Sigstore policy-controller intent. The six checked-in zone pools
+spread their replicas across hostnames. Three-replica control-plane deployment
+remains an external replicated-store integration and acceptance task.
 
 ## Failure Semantics
 

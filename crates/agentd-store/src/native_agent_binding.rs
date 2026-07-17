@@ -7,9 +7,9 @@ use agentd_core::types::{
 use serde_json::json;
 use sqlx::{Row, SqlitePool};
 
-use crate::{StoreError, agent_profile_repo, run_repo, task_repo};
 use crate::agent_profile_repo::AgentProfileCreate;
 use crate::util::now_unix;
+use crate::{StoreError, agent_profile_repo, run_repo, task_repo};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeRuntimeAuthority {
@@ -58,7 +58,9 @@ pub async fn ensure_native_runtime_authority(
                  VALUES (?, 'online', 'local.agentd', ?, 1, ?, ?)",
             )
             .bind(id.as_str())
-            .bind(serde_json::to_string(&json!({"authority": "native_local"}))?)
+            .bind(serde_json::to_string(
+                &json!({"authority": "native_local"}),
+            )?)
             .bind(now)
             .bind(now)
             .execute(&mut *transaction)

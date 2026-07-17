@@ -48,6 +48,8 @@ pub enum EnterpriseCmd {
     Rollout(EnterpriseMutationFileArgs),
     /// Record one zone's signed-image rollout observation.
     RolloutObserve(EnterpriseMutationFileArgs),
+    /// Roll back one declared or active worker image rollout.
+    RolloutRollback(EnterpriseMutationFileArgs),
     /// Create or update one zone pool policy.
     ZonePolicy(EnterpriseMutationFileArgs),
     /// Record one capacity observation and scaling recommendation.
@@ -58,6 +60,8 @@ pub enum EnterpriseCmd {
     ReplicaAck(EnterpriseMutationFileArgs),
     /// Register an opaque tenant KMS key/version reference.
     TenantKey(EnterpriseMutationFileArgs),
+    /// Transition a tenant key from active to retiring or retiring to retired.
+    TenantKeyTransition(EnterpriseMutationFileArgs),
     /// Set a versioned retention policy.
     Retention(EnterpriseMutationFileArgs),
     /// Place an immutable legal hold.
@@ -72,6 +76,10 @@ pub enum EnterpriseCmd {
     LoadModel(EnterpriseMutationFileArgs),
     /// Record one service-level and error-budget measurement.
     ServiceLevel(EnterpriseMutationFileArgs),
+    /// Enroll a stable worker, current incarnation, and public mTLS identity binding.
+    WorkerEnroll(EnterpriseMutationFileArgs),
+    /// Revoke one worker certificate fingerprint without deleting its history.
+    WorkerIdentityRevoke(EnterpriseMutationFileArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -82,6 +90,9 @@ pub struct EnterpriseDaemonArgs {
     /// Operator bearer token. Falls back to `AGENTD_API_TOKEN`.
     #[arg(long)]
     pub api_token: Option<String>,
+    /// PEM CA used to verify a private enterprise operator endpoint.
+    #[arg(long)]
+    pub server_ca_pem: Option<PathBuf>,
     /// Permit plain HTTP only for an explicit loopback development daemon.
     #[arg(long)]
     pub allow_loopback_http: bool,

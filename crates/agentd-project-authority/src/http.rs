@@ -46,8 +46,7 @@ impl HttpSpecifyAuthorityTransport {
             .is_some_and(|host| matches!(host, "localhost" | "127.0.0.1" | "::1"));
         if base_url.scheme() != "https" && !(allow_loopback_http && loopback) {
             return Err(ProjectAuthorityError::Invalid(
-                "Specify transport requires HTTPS except explicit loopback development"
-                    .to_string(),
+                "Specify transport requires HTTPS except explicit loopback development".to_string(),
             ));
         }
         if !base_url.username().is_empty()
@@ -55,7 +54,9 @@ impl HttpSpecifyAuthorityTransport {
             || base_url.query().is_some()
             || base_url.fragment().is_some()
             || authorization.trim().is_empty()
-            || authorization.chars().any(|character| matches!(character, '\r' | '\n'))
+            || authorization
+                .chars()
+                .any(|character| matches!(character, '\r' | '\n'))
             || timeout.is_zero()
             || timeout > Duration::from_secs(30)
         {
@@ -156,14 +157,16 @@ impl SpecifyAuthorityTransport for HttpSpecifyAuthorityTransport {
 
     async fn health(&self) -> Result<ProjectAuthorityHealth, ProjectAuthorityError> {
         let response = self
-            .authenticated(self.client.get(self.endpoint("v1/project-authority/health")?))
+            .authenticated(
+                self.client
+                    .get(self.endpoint("v1/project-authority/health")?),
+            )
             .send()
             .await
             .map_err(transport_error)?;
         let health: ProjectAuthorityHealth =
             decode_authority_response(response, "Specify health").await?;
-        if health.checked_at < 0
-            || health.availability == ProjectAuthorityAvailability::Unavailable
+        if health.checked_at < 0 || health.availability == ProjectAuthorityAvailability::Unavailable
         {
             return Err(ProjectAuthorityError::Unavailable(
                 "Specify health is unavailable".to_string(),

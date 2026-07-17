@@ -723,27 +723,51 @@ Exit gate:
 
 Depends on: AD-E2, AD-E4, and AD-E6.
 
-Implementation status (2026-07-17): AD-E7 code-complete candidate. Migration
-`0024`, `EnterpriseScalePort`, and the SQLite reference adapter add fenced
+Implementation status (2026-07-17): the in-repository AD-E7 candidate is
+implementation-complete and awaits the single deferred verification pass.
+Migrations `0024`-`0027`, `EnterpriseScalePort`, and the SQLite reference
+adapter add transactionally fenced
 control-plane membership/leadership, signed rollout and zone observations,
 zone policy/autoscaling recommendations, digest-only artifact replicas and
-tenant KMS references, retention/legal hold, DR checkpoints/drills, pinned load
-models, and SLO snapshots. Enterprise startup now has an authenticated
+tenant KMS references with forward key/replica transitions, rollout rollback,
+versioned zone/retention policy history, retention/legal hold, DR
+checkpoints/drills, pinned load models, and SLO snapshots. Every
+leader-only scale mutation validates and records the current term/fence in the
+same write transaction. Enterprise startup now has an authenticated
 control-plane-only profile, authenticated Specify HTTPS transport, leadership
 lifecycle, bounded status/explain/mutation HTTP APIs, `agentctl enterprise`,
-dashboard scale projections, and enterprise doctor checks. The Kubernetes
-profile describes three control-plane members, outbound-only zone workers,
-deny-by-default networking, signed-image admission, HPA, region/key contracts,
-and pinned load/retention inputs. Operations, DR, and guarded load-profile
-artifacts are checked in.
+dashboard scale projections, and enterprise doctor checks. The enterprise
+operator surface now has a composition-layer gate: only health and the HTML
+shell are public, a bearer-authenticated session endpoint issues a
+Secure/HttpOnly/SameSite=Strict read-only browser cookie, and all mutations
+remain bearer-only without putting credentials in JavaScript storage or URLs.
 
-This is not an AD-E7 or FSF-7 exit. The SQLite implementation is a reference
-adapter and must not be shared by multiple replicas; enterprise deployment
-still requires the production replicated durable-store adapter and real
-workload identity, KMS, object store, Matrix/Robrix, Specify, and OpenFab
-providers. No compile, test, Kubernetes, load, failure-injection, browser, or
-Codex runtime evidence has been accepted yet. Those checks and operator sign-off
-remain in the final manual checklist.
+The native fleet path now includes operator-authenticated certificate
+enrollment/revocation, exact SPIFFE incarnation binding, an Envoy worker mTLS
+listener that strips spoofable certificate headers, heartbeat attestation
+matching, and an outbound-only worker loop for heartbeat, pull, renewal,
+completion, and failure. The worker accepts a per-pod CSI identity descriptor,
+pins the configured server CA, and invokes a bounded external executor with an
+immutable `FleetAssignment` plus exact fenced-admission endpoints and TLS file
+paths. Every assignment receives a clean lease-specific work directory that is
+removed after execution; the checked-in profile names a Codex-only executor
+contract and does not persist a raw prompt or credential bytes. The Kubernetes
+profile deliberately runs one SQLite control-plane replica with an RWO volume,
+plus six outbound-only zone pools with hostname spreading, deny-by-default
+networking, signed-image admission, HPA, region/key contracts, and pinned
+load/retention inputs. A deployment preflight structurally gates the exact
+reference topology, rejects production placeholder leakage, optionally submits
+the render to Kubernetes server-side dry-run, and records a read-only manifest
+with a SHA-256 sidecar.
+
+This is not an AD-E7 or FSF-7 exit. The SQLite implementation is a
+single-authority reference adapter and must not be shared, copied, or scaled to
+multiple replicas. Three-replica HA remains unimplemented until a production
+adapter composes every durable state class over a replicated store; workload
+PKI/CSI, Codex executor CSI, KMS, object store, Matrix/Robrix, Specify, and
+OpenFab are also deployed dependencies. No compile, test, Kubernetes, load,
+failure-injection, browser, or Codex runtime evidence has been accepted yet.
+Those checks and operator sign-off remain in the final manual checklist.
 
 Purpose: scale the established contracts.
 

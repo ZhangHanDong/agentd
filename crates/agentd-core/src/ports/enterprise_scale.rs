@@ -86,6 +86,7 @@ string_enum!(ServiceLevelStatus {
 });
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ControlPlaneMember {
     pub instance_id: ControlPlaneInstanceId,
     pub heartbeat_sequence: u64,
@@ -99,12 +100,14 @@ pub struct ControlPlaneMember {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ControlPlaneHeartbeatRequest {
     pub idempotency_key: String,
     pub member: ControlPlaneMember,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ControlPlaneLeadershipRequest {
     pub instance_id: ControlPlaneInstanceId,
     pub idempotency_key: String,
@@ -113,6 +116,7 @@ pub struct ControlPlaneLeadershipRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ControlPlaneLeadershipRenewal {
     pub instance_id: ControlPlaneInstanceId,
     pub idempotency_key: String,
@@ -133,6 +137,15 @@ pub struct ControlPlaneLeadershipLease {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnterpriseMutationFence {
+    pub instance_id: ControlPlaneInstanceId,
+    pub term: u64,
+    pub fencing_token: u64,
+    pub observed_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkerImageRollout {
     pub rollout_id: WorkerImageRolloutId,
     pub image_digest: String,
@@ -145,6 +158,7 @@ pub struct WorkerImageRollout {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkerImageZoneObservation {
     pub rollout_id: WorkerImageRolloutId,
     pub zone: String,
@@ -156,6 +170,15 @@ pub struct WorkerImageZoneObservation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerImageRollback {
+    pub rollout_id: WorkerImageRolloutId,
+    pub reason_sha256: String,
+    pub rolled_back_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ZonePoolPolicy {
     pub pool_id: ZonePoolId,
     pub region: String,
@@ -173,6 +196,7 @@ pub struct ZonePoolPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CapacityObservation {
     pub pool_id: ZonePoolId,
     pub queue_depth: u64,
@@ -196,6 +220,7 @@ pub struct AutoscalingRecommendation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactReplicationPlan {
     pub replication_id: ArtifactReplicationId,
     pub execution_artifact_id: ExecutionArtifactId,
@@ -207,6 +232,7 @@ pub struct ArtifactReplicationPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactReplicaAcknowledgement {
     pub replication_id: ArtifactReplicationId,
     pub region: String,
@@ -218,6 +244,7 @@ pub struct ArtifactReplicaAcknowledgement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TenantKeyVersion {
     pub tenant_key_id: TenantKeyId,
     pub tenant_scope_sha256: String,
@@ -230,6 +257,15 @@ pub struct TenantKeyVersion {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TenantKeyTransition {
+    pub tenant_key_id: TenantKeyId,
+    pub target_status: TenantKeyStatus,
+    pub transitioned_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RetentionPolicy {
     pub tenant_scope_sha256: String,
     pub policy_version_sha256: String,
@@ -241,6 +277,7 @@ pub struct RetentionPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LegalHold {
     pub legal_hold_id: LegalHoldId,
     pub tenant_scope_sha256: String,
@@ -267,6 +304,7 @@ pub struct RetentionDecision {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DisasterRecoveryCheckpoint {
     pub checkpoint_id: DisasterRecoveryCheckpointId,
     pub region: String,
@@ -281,6 +319,7 @@ pub struct DisasterRecoveryCheckpoint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DisasterRecoveryDrill {
     pub drill_id: DisasterRecoveryDrillId,
     pub checkpoint_id: DisasterRecoveryCheckpointId,
@@ -295,6 +334,7 @@ pub struct DisasterRecoveryDrill {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LoadModelRegistration {
     pub load_model_id: LoadModelId,
     pub version: String,
@@ -311,6 +351,7 @@ pub struct LoadModelRegistration {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServiceLevelMeasurement {
     pub idempotency_key: String,
     pub tenant_scope_sha256: String,
@@ -405,48 +446,73 @@ pub trait EnterpriseScalePort: Send + Sync {
 
     async fn declare_worker_image_rollout(
         &self,
+        fence: &EnterpriseMutationFence,
         rollout: &WorkerImageRollout,
     ) -> Result<WorkerImageRollout, EnterpriseScaleError>;
 
     async fn observe_worker_image_zone(
         &self,
+        fence: &EnterpriseMutationFence,
         observation: &WorkerImageZoneObservation,
+    ) -> Result<WorkerImageRollout, EnterpriseScaleError>;
+
+    async fn rollback_worker_image_rollout(
+        &self,
+        fence: &EnterpriseMutationFence,
+        rollback: &WorkerImageRollback,
     ) -> Result<WorkerImageRollout, EnterpriseScaleError>;
 
     async fn upsert_zone_pool(
         &self,
+        fence: &EnterpriseMutationFence,
         policy: &ZonePoolPolicy,
     ) -> Result<ZonePoolPolicy, EnterpriseScaleError>;
 
     async fn recommend_capacity(
         &self,
+        fence: &EnterpriseMutationFence,
         observation: &CapacityObservation,
     ) -> Result<AutoscalingRecommendation, EnterpriseScaleError>;
 
     async fn create_replication_plan(
         &self,
+        fence: &EnterpriseMutationFence,
         plan: &ArtifactReplicationPlan,
     ) -> Result<ArtifactReplicationPlan, EnterpriseScaleError>;
 
     async fn acknowledge_artifact_replica(
         &self,
+        fence: &EnterpriseMutationFence,
         acknowledgement: &ArtifactReplicaAcknowledgement,
     ) -> Result<ArtifactReplicaAcknowledgement, EnterpriseScaleError>;
 
     async fn register_tenant_key(
         &self,
+        fence: &EnterpriseMutationFence,
         key: &TenantKeyVersion,
+    ) -> Result<TenantKeyVersion, EnterpriseScaleError>;
+
+    async fn transition_tenant_key(
+        &self,
+        fence: &EnterpriseMutationFence,
+        transition: &TenantKeyTransition,
     ) -> Result<TenantKeyVersion, EnterpriseScaleError>;
 
     async fn set_retention_policy(
         &self,
+        fence: &EnterpriseMutationFence,
         policy: &RetentionPolicy,
     ) -> Result<RetentionPolicy, EnterpriseScaleError>;
 
-    async fn place_legal_hold(&self, hold: &LegalHold) -> Result<LegalHold, EnterpriseScaleError>;
+    async fn place_legal_hold(
+        &self,
+        fence: &EnterpriseMutationFence,
+        hold: &LegalHold,
+    ) -> Result<LegalHold, EnterpriseScaleError>;
 
     async fn release_legal_hold(
         &self,
+        fence: &EnterpriseMutationFence,
         legal_hold_id: &LegalHoldId,
         released_at: i64,
     ) -> Result<LegalHold, EnterpriseScaleError>;
@@ -462,21 +528,25 @@ pub trait EnterpriseScalePort: Send + Sync {
 
     async fn record_dr_checkpoint(
         &self,
+        fence: &EnterpriseMutationFence,
         checkpoint: &DisasterRecoveryCheckpoint,
     ) -> Result<DisasterRecoveryCheckpoint, EnterpriseScaleError>;
 
     async fn record_dr_drill(
         &self,
+        fence: &EnterpriseMutationFence,
         drill: &DisasterRecoveryDrill,
     ) -> Result<DisasterRecoveryDrill, EnterpriseScaleError>;
 
     async fn register_load_model(
         &self,
+        fence: &EnterpriseMutationFence,
         model: &LoadModelRegistration,
     ) -> Result<LoadModelRegistration, EnterpriseScaleError>;
 
     async fn record_service_level(
         &self,
+        fence: &EnterpriseMutationFence,
         measurement: &ServiceLevelMeasurement,
     ) -> Result<ServiceLevelMeasurement, EnterpriseScaleError>;
 

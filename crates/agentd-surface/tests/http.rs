@@ -1354,9 +1354,29 @@ async fn dashboard_shell_uses_existing_read_only_endpoints() {
     assert!(body.contains(r"new EventSource(`/runs/${"), "{body}");
     assert!(body.contains(r"/events"), "{body}");
     assert!(!body.contains("POST /runs"), "{body}");
-    assert!(!body.contains(r#"method: "POST""#), "{body}");
+    assert_eq!(body.matches(r#"method: "POST""#).count(), 1, "{body}");
     assert!(!body.contains("tools/call"), "{body}");
     assert!(!body.to_lowercase().contains("specify"), "{body}");
+}
+
+#[tokio::test]
+async fn dashboard_shell_uses_an_http_only_operator_session_without_browser_token_storage() {
+    let resp = get(app(FakeRunHost::new()), "/dashboard").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+    assert!(body.contains(r#"id="operator-login" hidden"#), "{body}");
+    assert!(body.contains(r#"type="password""#), "{body}");
+    assert!(body.contains(r#"fetch("/api/operator/session""#), "{body}");
+    assert!(
+        body.contains(r#"Authorization: `Bearer ${token}`"#),
+        "{body}"
+    );
+    assert!(body.contains(r#"credentials: "same-origin""#), "{body}");
+    assert_eq!(body.matches(r#"method: "POST""#).count(), 1, "{body}");
+    assert!(!body.contains("localStorage"), "{body}");
+    assert!(!body.contains("sessionStorage"), "{body}");
+    assert!(!body.contains("access_token="), "{body}");
+    assert!(body.contains("new EventSource"), "{body}");
 }
 
 #[tokio::test]
@@ -1382,7 +1402,7 @@ async fn dashboard_shell_remains_read_only_after_production_event_alignment() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_string(resp).await;
     assert!(!body.contains("POST /runs"), "{body}");
-    assert!(!body.contains(r#"method: "POST""#), "{body}");
+    assert_eq!(body.matches(r#"method: "POST""#).count(), 1, "{body}");
     assert!(!body.contains("tools/call"), "{body}");
     assert!(!body.contains("Specify"), "{body}");
 }
@@ -1637,7 +1657,7 @@ async fn dashboard_shell_live_state_refresh_remains_read_only() {
     assert!(body.contains(r"new EventSource(`/runs/${"), "{body}");
     assert!(body.contains(r"/events"), "{body}");
     assert!(!body.contains("POST /runs"), "{body}");
-    assert!(!body.contains(r#"method: "POST""#), "{body}");
+    assert_eq!(body.matches(r#"method: "POST""#).count(), 1, "{body}");
     assert!(!body.contains("tools/call"), "{body}");
     assert!(!body.contains("Specify"), "{body}");
 }
@@ -1686,7 +1706,7 @@ async fn dashboard_shell_event_payload_formatting_remains_read_only() {
         "pretty-printed event data must preserve whitespace: {body}"
     );
     assert!(!body.contains("POST /runs"), "{body}");
-    assert!(!body.contains(r#"method: "POST""#), "{body}");
+    assert_eq!(body.matches(r#"method: "POST""#).count(), 1, "{body}");
     assert!(!body.contains("tools/call"), "{body}");
     assert!(!body.contains("Specify"), "{body}");
 }
@@ -1739,7 +1759,7 @@ async fn dashboard_shell_refresh_button_remains_read_only_and_keeps_event_tail()
         "refresh button must not recreate the event tail: {body}"
     );
     assert!(!body.contains("POST /runs"), "{body}");
-    assert!(!body.contains(r#"method: "POST""#), "{body}");
+    assert_eq!(body.matches(r#"method: "POST""#).count(), 1, "{body}");
     assert!(!body.contains("tools/call"), "{body}");
     assert!(!body.contains("Specify"), "{body}");
 }
