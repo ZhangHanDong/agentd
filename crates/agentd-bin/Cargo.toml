@@ -28,6 +28,7 @@ path = "src/main.rs"
 [dependencies]
 agentd-core = { path = "../agentd-core" }
 agentd-matrix = { path = "../agentd-matrix" }
+agentd-project-authority = { path = "../agentd-project-authority" }
 agentd-runtime = { path = "../agentd-runtime" }
 agentd-security = { path = "../agentd-security" }
 agentd-store = { path = "../agentd-store" }
@@ -56,3 +57,4 @@ tempfile = { workspace = true }
 # Drive the assembled axum router in-process (no socket) + read the response body.
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+wiremock = { workspace = true }

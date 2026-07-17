@@ -35,6 +35,7 @@ async fn production_host_composes_native_runtime_and_runs_startup_recovery() {
         api_token: None,
         agent_tokens: Vec::new(),
         agent_token_mode: "audit".to_string(),
+        enterprise: Default::default(),
     };
     std::fs::create_dir_all(&config.workflows_dir).expect("workflows");
 

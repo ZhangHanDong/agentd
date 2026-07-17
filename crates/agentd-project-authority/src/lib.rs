@@ -4,11 +4,13 @@
 #![warn(clippy::unwrap_used, clippy::panic)]
 
 mod control_plane;
+mod http;
 mod local;
 mod specify;
 
 pub use control_plane::{
     PinnedProjectSnapshot, ProjectAuthorityControlPlane, RecoveryAuthorization, RecoveryInputs,
 };
+pub use http::HttpSpecifyAuthorityTransport;
 pub use local::LocalProjectAuthority;
 pub use specify::{SpecifyAuthorityTransport, SpecifyProjectAuthority};

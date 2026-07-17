@@ -33,11 +33,11 @@
 **Interfaces:**
 - Produces `EnterpriseScalePort`, `SqliteEnterpriseScaleControlPlane`, leadership, rollout, zone-pool, replication, tenant-key, compliance, DR, load-model, and snapshot contracts.
 
-- [ ] Define bounded typed resources, transitions, denials, and idempotency rules.
-- [ ] Add additive schema `0024` with immutable history and monotonic leadership fencing.
-- [ ] Implement transactionally fenced mutations and bounded read models.
-- [ ] Author focused tests for conflicting replay, stale leadership, rollout health, scaling bounds, legal hold, replicas, and DR.
-- [ ] Commit without executing tests.
+- [x] Define bounded typed resources, transitions, denials, and idempotency rules.
+- [x] Add additive schema `0024` with immutable history and monotonic leadership fencing.
+- [x] Implement transactionally fenced mutations and bounded read models.
+- [x] Author focused tests for conflicting replay, stale leadership, rollout health, scaling bounds, legal hold, replicas, and DR.
+- [x] Commit without executing tests.
 
 ### Task 2: Authenticated Specify HTTPS And HA Composition
 
@@ -53,11 +53,11 @@
 **Interfaces:**
 - Produces `HttpSpecifyAuthorityTransport`, explicit enterprise configuration validation, instance heartbeat/leadership lifecycle, and fail-closed startup.
 
-- [ ] Implement HTTPS-only bounded authenticated resolve/refresh/health transport.
-- [ ] Add explicit Specify URL/authority/workload-token and control-plane instance configuration.
-- [ ] Compose enterprise state without local-authority fallback and run leadership heartbeat/renewal.
-- [ ] Author transport and startup contract tests for final execution.
-- [ ] Commit without executing tests.
+- [x] Implement HTTPS-only bounded authenticated resolve/refresh/health transport.
+- [x] Add explicit Specify URL/authority/workload-token and control-plane instance configuration.
+- [x] Compose enterprise state without local-authority fallback and run leadership heartbeat/renewal.
+- [x] Author transport and startup contract tests for final execution.
+- [x] Commit without executing tests.
 
 ### Task 3: Kubernetes Fleet, Rollout, Autoscaling, And Regions
 

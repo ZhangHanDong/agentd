@@ -279,6 +279,70 @@ pub struct DaemonConfig {
     /// Per-agent token enforcement mode: hard or audit.
     #[arg(long, default_value = "audit", global = true)]
     pub agent_token_mode: String,
+
+    /// Enterprise Specify, region, and HA coordination configuration.
+    #[command(flatten)]
+    pub enterprise: EnterpriseDaemonConfig,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct EnterpriseDaemonConfig {
+    /// Stable enterprise control-plane instance id (`ci_<ULID>`).
+    #[arg(long, global = true)]
+    pub control_plane_instance_id: Option<String>,
+
+    /// Enterprise deployment region.
+    #[arg(long, global = true)]
+    pub enterprise_region: Option<String>,
+
+    /// Enterprise deployment zone.
+    #[arg(long, global = true)]
+    pub enterprise_zone: Option<String>,
+
+    /// Public control-plane endpoint. Only its SHA-256 is persisted.
+    #[arg(long, global = true)]
+    pub control_plane_endpoint: Option<String>,
+
+    /// Specify project-authority HTTPS base URL.
+    #[arg(long, global = true)]
+    pub specify_url: Option<String>,
+
+    /// Expected immutable Specify authority key.
+    #[arg(long, global = true)]
+    pub specify_authority_key: Option<String>,
+
+    /// File containing the Specify workload Authorization header value.
+    #[arg(long, global = true)]
+    pub specify_authorization_file: Option<PathBuf>,
+
+    /// Permit HTTP only for an explicit loopback Specify development endpoint.
+    #[arg(long, global = true)]
+    pub allow_loopback_specify_http: bool,
+
+    /// Enterprise control-plane heartbeat interval.
+    #[arg(long, default_value_t = 10, global = true)]
+    pub control_plane_heartbeat_seconds: u64,
+
+    /// Enterprise leadership lease duration.
+    #[arg(long, default_value_t = 30, global = true)]
+    pub control_plane_lease_seconds: u64,
+}
+
+impl Default for EnterpriseDaemonConfig {
+    fn default() -> Self {
+        Self {
+            control_plane_instance_id: None,
+            enterprise_region: None,
+            enterprise_zone: None,
+            control_plane_endpoint: None,
+            specify_url: None,
+            specify_authority_key: None,
+            specify_authorization_file: None,
+            allow_loopback_specify_http: false,
+            control_plane_heartbeat_seconds: 10,
+            control_plane_lease_seconds: 30,
+        }
+    }
 }
 
 impl DaemonConfig {

@@ -1206,6 +1206,7 @@ async fn enterprise_security_mode_rejects_missing_providers_and_open_auth() {
         api_token: Some("closed-listener".to_string()),
         agent_tokens: Vec::new(),
         agent_token_mode: "hard".to_string(),
+        enterprise: Default::default(),
     })
     .await
     .expect_err("missing enterprise providers reject daemon startup");
