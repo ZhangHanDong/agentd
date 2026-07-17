@@ -5,6 +5,7 @@
 
 mod agent;
 mod cli;
+mod cutover;
 mod flow;
 mod parity;
 mod run;
@@ -17,6 +18,7 @@ use clap::Parser;
 fn main() -> ExitCode {
     let cli = cli::Cli::parse();
     match cli.cmd {
+        cli::Cmd::Cutover(cutover_cmd) => cutover::run(&cutover_cmd),
         cli::Cmd::Agent(agent_cmd) => agent::run(&agent_cmd),
         cli::Cmd::Flow(flow_cmd) => flow::run(&flow_cmd),
         cli::Cmd::Run(run_cmd) => run::run(&run_cmd),

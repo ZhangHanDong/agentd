@@ -15,6 +15,9 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
+    /// Final offline import and native-authority cutover operations.
+    #[command(subcommand)]
+    Cutover(CutoverCmd),
     /// Agent registry and lifecycle operations.
     #[command(subcommand)]
     Agent(AgentCmd),
@@ -30,6 +33,157 @@ pub enum Cmd {
     /// Native runtime inspection and control.
     #[command(subcommand)]
     Runtime(RuntimeCmd),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CutoverCmd {
+    /// Freeze a canonical offline source digest and create a cutover run.
+    Plan(CutoverPlanArgs),
+    /// Import every supported agent-chat state surface.
+    Import(CutoverSourceStepArgs),
+    /// Compare normalized legacy and native decisions.
+    Shadow(CutoverSourceStepArgs),
+    /// Confirm all imported and source work is terminal.
+    Drain(CutoverSourceStepArgs),
+    /// Persist acknowledged project cursor handoffs from a JSON file.
+    Handoff(CutoverHandoffArgs),
+    /// Transfer production authority to agentd.
+    Activate(CutoverActivateArgs),
+    /// Record final legacy retirement after operator authorization.
+    Retire(CutoverMutationArgs),
+    /// Inspect one durable cutover run.
+    Inspect(CutoverInspectArgs),
+    /// Terminate a cutover and preserve rollback evidence.
+    Rollback(CutoverRollbackArgs),
+    /// Run bounded structured control-plane diagnostics.
+    Doctor(CutoverDoctorArgs),
+    /// Create a consistent SQLite backup and signed-by-digest manifest.
+    Backup(CutoverBackupArgs),
+    /// Restore a verified backup while the daemon is offline.
+    Restore(CutoverRestoreArgs),
+    /// Install a native-only service manifest and record its digest.
+    ServiceInstall(CutoverServiceInstallArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CutoverPlanArgs {
+    #[arg(long)]
+    pub agent_chat: PathBuf,
+    #[arg(long)]
+    pub db_path: PathBuf,
+    #[arg(long, default_value_t = 86_400)]
+    pub rollback_window_seconds: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct CutoverSourceStepArgs {
+    pub cutover_id: String,
+    #[arg(long)]
+    pub agent_chat: PathBuf,
+    #[arg(long)]
+    pub db_path: PathBuf,
+    #[arg(long)]
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Args)]
+pub struct CutoverHandoffArgs {
+    pub cutover_id: String,
+    #[arg(long)]
+    pub handoffs_file: PathBuf,
+    #[arg(long)]
+    pub db_path: PathBuf,
+    #[arg(long)]
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Args)]
+pub struct CutoverActivateArgs {
+    pub cutover_id: String,
+    #[arg(long)]
+    pub agent_chat: PathBuf,
+    #[arg(long)]
+    pub db_path: PathBuf,
+    #[arg(long, default_value_t = 0)]
+    pub required_project_handoffs: u32,
+    #[arg(long)]
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Args)]
+pub struct CutoverMutationArgs {
+    pub cutover_id: String,
+    #[arg(long)]
+    pub db_path: PathBuf,
+    #[arg(long)]
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Args)]
+pub struct CutoverInspectArgs {
+    pub cutover_id: String,
+    #[arg(long)]
+    pub db_path: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct CutoverRollbackArgs {
+    pub cutover_id: String,
+    #[arg(long)]
+    pub db_path: PathBuf,
+    #[arg(long)]
+    pub idempotency_key: String,
+    #[arg(long)]
+    pub reason: String,
+}
+
+#[derive(Debug, Args)]
+pub struct CutoverDoctorArgs {
+    #[arg(long)]
+    pub db_path: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct CutoverBackupArgs {
+    pub cutover_id: String,
+    #[arg(long)]
+    pub db_path: PathBuf,
+    #[arg(long)]
+    pub output: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct CutoverRestoreArgs {
+    #[arg(long)]
+    pub db_path: PathBuf,
+    #[arg(long)]
+    pub backup: PathBuf,
+    #[arg(long)]
+    pub manifest: PathBuf,
+    #[arg(long, default_value = "127.0.0.1:8787")]
+    pub daemon_address: String,
+}
+
+#[derive(Debug, Args)]
+pub struct CutoverServiceInstallArgs {
+    pub cutover_id: String,
+    #[arg(long)]
+    pub db_path: PathBuf,
+    #[arg(long, value_enum)]
+    pub model: CutoverServiceModel,
+    #[arg(long)]
+    pub target: PathBuf,
+    #[arg(long)]
+    pub agentd_bin: PathBuf,
+    #[arg(long, default_value_t = 8787)]
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum CutoverServiceModel {
+    Local,
+    Team,
+    Fleet,
 }
 
 #[derive(Debug, Subcommand)]

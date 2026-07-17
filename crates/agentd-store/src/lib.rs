@@ -34,6 +34,7 @@ pub mod message_repo;
 pub mod native_runtime_control_plane;
 pub mod outbox_repo;
 pub mod outcome_repo;
+pub mod operator;
 pub mod paths;
 pub mod pool;
 pub mod principal_repo;
@@ -56,6 +57,7 @@ pub use cutover_service::{
     CutoverActivationReport, CutoverDrainReport, CutoverImportReport, CutoverService,
     CutoverShadowMismatch, CutoverShadowReport,
 };
+pub use operator::{DoctorCheck, DoctorReport, DoctorStatus, run_doctor};
 pub use error::StoreError;
 pub use native_runtime_control_plane::SqliteNativeRuntimeControlPlane;
 pub use store::SqliteStore;
