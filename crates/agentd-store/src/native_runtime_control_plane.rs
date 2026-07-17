@@ -13,7 +13,9 @@ use agentd_core::types::{
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use sqlx::{Row, Sqlite, SqlitePool, Transaction};
+use sqlx::{Row, SqliteConnection, SqlitePool};
+
+use crate::util::SqliteImmediateTransaction;
 
 /// `SQLite` implementation of the native runtime durable contract.
 #[derive(Debug, Clone)]
@@ -50,7 +52,9 @@ impl RuntimeEventPort for SqliteNativeRuntimeControlPlane {
             };
         }
         let payload_json = serde_json::to_string(&event.payload).map_err(invalid_json)?;
-        let mut transaction = self.pool.begin().await.map_err(storage_error)?;
+        let mut transaction = SqliteImmediateTransaction::begin(&self.pool)
+            .await
+            .map_err(storage_error)?;
         require_attempt_session(&mut transaction, &event.attempt_id, &event.session_id).await?;
         let event_index: i64 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(event_index), 0) + 1 FROM native_runtime_events \
@@ -224,7 +228,9 @@ impl RuntimeLedgerPort for SqliteNativeRuntimeControlPlane {
                 ))
             };
         }
-        let mut transaction = self.pool.begin().await.map_err(storage_error)?;
+        let mut transaction = SqliteImmediateTransaction::begin(&self.pool)
+            .await
+            .map_err(storage_error)?;
         let session = sqlx::query(
             "SELECT status, record_version, current_attempt_id FROM runtime_sessions \
              WHERE id = ? AND provider IS NOT NULL",
@@ -346,7 +352,9 @@ impl RuntimeLedgerPort for SqliteNativeRuntimeControlPlane {
                 "runtime attempt cannot become running".to_string(),
             ));
         }
-        let mut transaction = self.pool.begin().await.map_err(storage_error)?;
+        let mut transaction = SqliteImmediateTransaction::begin(&self.pool)
+            .await
+            .map_err(storage_error)?;
         let updated_attempt = sqlx::query(
             "UPDATE runtime_attempts SET status = 'running', pid = ?, native_session_ref = ? \
              WHERE id = ? AND runtime_session_id = ? AND status = 'starting' AND is_current = 1",
@@ -410,7 +418,9 @@ impl RuntimeLedgerPort for SqliteNativeRuntimeControlPlane {
                 ))
             };
         }
-        let mut transaction = self.pool.begin().await.map_err(storage_error)?;
+        let mut transaction = SqliteImmediateTransaction::begin(&self.pool)
+            .await
+            .map_err(storage_error)?;
         sqlx::query(
             "UPDATE runtime_attempts SET native_session_ref = ? \
              WHERE id = ? AND runtime_session_id = ? AND is_current = 1 \
@@ -479,7 +489,9 @@ impl RuntimeLedgerPort for SqliteNativeRuntimeControlPlane {
         } else {
             RuntimeSessionStatus::Lost
         };
-        let mut transaction = self.pool.begin().await.map_err(storage_error)?;
+        let mut transaction = SqliteImmediateTransaction::begin(&self.pool)
+            .await
+            .map_err(storage_error)?;
         let updated_attempt = sqlx::query(
             "UPDATE runtime_attempts SET status = 'gone', is_current = 0, \
              native_session_ref = COALESCE(native_session_ref, ?), finished_at = ?, \
@@ -546,7 +558,9 @@ impl RuntimeLedgerPort for SqliteNativeRuntimeControlPlane {
                 "runtime report does not name the current attempt".to_string(),
             ));
         }
-        let mut transaction = self.pool.begin().await.map_err(storage_error)?;
+        let mut transaction = SqliteImmediateTransaction::begin(&self.pool)
+            .await
+            .map_err(storage_error)?;
         insert_transcript(&mut transaction, report).await?;
         let updated_attempt = sqlx::query(
             "UPDATE runtime_attempts SET status = 'exited', is_current = 0, finished_at = ?, \
@@ -897,7 +911,7 @@ fn event_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<RuntimeEvent, NativeR
 }
 
 async fn require_attempt_session(
-    transaction: &mut Transaction<'_, Sqlite>,
+    transaction: &mut SqliteConnection,
     attempt_id: &RuntimeAttemptId,
     session_id: &RuntimeSessionId,
 ) -> Result<(), NativeRuntimeError> {
@@ -907,7 +921,7 @@ async fn require_attempt_session(
     )
     .bind(attempt_id.as_str())
     .bind(session_id.as_str())
-    .fetch_optional(&mut **transaction)
+    .fetch_optional(&mut *transaction)
     .await
     .map_err(storage_error)?;
     if found == Some(1) {
@@ -920,7 +934,7 @@ async fn require_attempt_session(
 }
 
 async fn insert_transcript(
-    transaction: &mut Transaction<'_, Sqlite>,
+    transaction: &mut SqliteConnection,
     report: &RuntimeShutdownReport,
 ) -> Result<(), NativeRuntimeError> {
     let existing = sqlx::query(
@@ -928,7 +942,7 @@ async fn insert_transcript(
          size_bytes, truncated, archived_at FROM runtime_transcript_objects WHERE id = ?",
     )
     .bind(report.transcript.id.as_str())
-    .fetch_optional(&mut **transaction)
+    .fetch_optional(&mut *transaction)
     .await
     .map_err(storage_error)?;
     if let Some(existing) = existing {
@@ -961,7 +975,7 @@ async fn insert_transcript(
     .bind(to_i64(report.transcript.size_bytes, "transcript size")?)
     .bind(i64::from(report.transcript.truncated))
     .bind(report.transcript.archived_at)
-    .execute(&mut **transaction)
+    .execute(&mut *transaction)
     .await
     .map_err(storage_error)?;
     Ok(())

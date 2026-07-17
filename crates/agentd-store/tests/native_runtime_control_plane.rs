@@ -164,17 +164,35 @@ async fn native_runtime_ledger_keeps_session_identity_global_events_and_transcri
         input_sha256: hex::encode(Sha256::digest(b"prompt")),
         byte_count: 6,
     };
-    let first = fixture
-        .control_plane
-        .append_runtime_event(&event(
-            &session_id,
-            &attempt_id,
-            RuntimeEventKind::InputAccepted,
-            input_payload,
-            12,
-        ))
+    let input_event = event(
+        &session_id,
+        &attempt_id,
+        RuntimeEventKind::InputAccepted,
+        input_payload,
+        12,
+    );
+    let mut competing_writer = fixture.pool.acquire().await.expect("competing writer");
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *competing_writer)
         .await
-        .expect("input event");
+        .expect("begin competing write");
+    sqlx::query("UPDATE task_runs SET started_at = started_at + 1 WHERE id = ?")
+        .bind(fixture.task_id.as_str())
+        .execute(&mut *competing_writer)
+        .await
+        .expect("competing write");
+    let control_plane = fixture.control_plane.clone();
+    let append =
+        tokio::spawn(async move { control_plane.append_runtime_event(&input_event).await });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    sqlx::query("COMMIT")
+        .execute(&mut *competing_writer)
+        .await
+        .expect("commit competing write");
+    let first = append
+        .await
+        .expect("join concurrent append")
+        .expect("input event after competing write");
     let second = fixture
         .control_plane
         .append_runtime_event(&event(
