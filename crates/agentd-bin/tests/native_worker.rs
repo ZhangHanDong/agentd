@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use agentd_bin::native_worker::{AgentdWorker, codex_resume_config};
+use agentd_bin::native_worker::{
+    AgentdWorker, NativeRecoveryRegistry, NativeRecoveryRequest, codex_resume_config,
+};
 use agentd_core::types::{
     AgentProfileId, NodeId, RunId, RuntimeSessionId, RuntimeSessionStatus, WorkerId,
     WorkerIncarnationId,
@@ -16,6 +18,19 @@ fn codex_resume_config_uses_persisted_thread_reference() {
     let config = codex_resume_config(NativeProcessConfig::default(), "thread-42".into());
     assert_eq!(config.args, ["exec", "resume", "thread-42"]);
     assert_eq!(config.native_session_ref.as_deref(), Some("thread-42"));
+}
+
+#[test]
+fn native_recovery_registry_rejects_empty_provider_command() {
+    let registry = NativeRecoveryRegistry::new();
+    let error = registry
+        .register(NativeRecoveryRequest {
+            session_id: RuntimeSessionId::new(),
+            worker_incarnation_id: WorkerIncarnationId::new(),
+            config: NativeProcessConfig::default(),
+        })
+        .expect_err("empty provider command");
+    assert!(error.to_string().contains("provider program is required"));
 }
 use serde_json::json;
 
