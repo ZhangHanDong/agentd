@@ -90,6 +90,14 @@ pub struct WorkerFleetService {
     native_worker: AgentdWorker,
 }
 
+impl std::fmt::Debug for WorkerFleetService {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WorkerFleetService")
+            .finish_non_exhaustive()
+    }
+}
+
 impl WorkerFleetService {
     #[must_use]
     pub fn new(fleet: Arc<dyn WorkerFleetPort>, native_worker: AgentdWorker) -> Self {
