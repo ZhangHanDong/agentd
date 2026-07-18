@@ -20,6 +20,8 @@ pub struct OperationalDoctorReport {
     pub audit_events: i64,
     pub matrix_rooms: i64,
     pub matrix_events: i64,
+    pub projects: i64,
+    pub queued_tasks: i64,
     pub ready: bool,
 }
 
@@ -76,6 +78,12 @@ impl OperationalDoctor {
         let audit_events = count(&self.pool, "SELECT COUNT(*) FROM execution_audit_events").await?;
         let matrix_rooms = count(&self.pool, "SELECT COUNT(*) FROM matrix_bridge_rooms").await?;
         let matrix_events = count(&self.pool, "SELECT COUNT(*) FROM matrix_bridge_events").await?;
+        let projects = count(&self.pool, "SELECT COUNT(*) FROM projects").await?;
+        let queued_tasks = count(
+            &self.pool,
+            "SELECT COUNT(*) FROM task_runs WHERE status = 'queued' AND finished_at IS NULL",
+        )
+        .await?;
         let ready = runtime_resume_pending == 0 && recovery_pending == 0;
         Ok(OperationalDoctorReport {
             checked_at: now_unix(),
@@ -90,6 +98,8 @@ impl OperationalDoctor {
             audit_events,
             matrix_rooms,
             matrix_events,
+            projects,
+            queued_tasks,
             ready,
         })
     }

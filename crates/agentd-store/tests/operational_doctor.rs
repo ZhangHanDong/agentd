@@ -13,6 +13,8 @@ async fn operational_doctor_reports_control_plane_domains_without_raw_logs() {
         .await
         .expect("doctor");
     assert_eq!(report.workers_online, 0);
+    assert_eq!(report.projects, 0);
+    assert_eq!(report.queued_tasks, 0);
     assert_eq!(report.active_leases, 0);
     assert_eq!(report.runtime_resume_pending, 0);
     assert_eq!(report.matrix_rooms, 0);
