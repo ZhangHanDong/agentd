@@ -21,6 +21,7 @@ async fn main() -> ExitCode {
         .unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
     let result: Result<(), Box<dyn std::error::Error>> = match cli.command {
+        Some(AgentdCommand::Doctor) => run_doctor(&cli.config).await,
         Some(AgentdCommand::CleanupWorktrees(args)) => {
             match daemon::cleanup_failed_worktrees_from_config(&cli.config, args.execute).await {
                 Ok(plan) => {
@@ -103,6 +104,15 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+async fn run_doctor(config: &agentd_bin::DaemonConfig) -> Result<(), Box<dyn std::error::Error>> {
+    let store = agentd_store::SqliteStore::connect(&config.db_path).await?;
+    let report = agentd_store::doctor::OperationalDoctor::new(store.pool().clone())
+        .check()
+        .await?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
 }
 
 fn run_matrix_client_bridge_preflight_command(
