@@ -12,7 +12,8 @@ use agentd_core::ports::{
     ExecutionEvidenceLinks, WorkerArtifactAcknowledgement, WorkerArtifactReport,
 };
 use agentd_core::types::{
-    ExecutionArtifactId, RuntimeAttemptId, RuntimeSessionId, TaskLeaseClaim, WorkerIncarnationId,
+    ExecutionArtifactId, RuntimeAttemptId, RuntimeSessionId, RuntimeSessionStatus, TaskLeaseClaim,
+    WorkerIncarnationId,
 };
 use agentd_store::runtime_session_repo::{self, RuntimeAttemptCreate};
 use agentd_store::{SqliteStore, StoreError};
@@ -164,6 +165,26 @@ impl AgentdWorker {
             }
         }
         self.start(session_id, worker_incarnation_id, config).await
+    }
+
+    /// Recover a session only when durable control state explicitly requests it.
+    pub async fn recover_if_pending(
+        &self,
+        session_id: RuntimeSessionId,
+        worker_incarnation_id: WorkerIncarnationId,
+        config: NativeProcessConfig,
+    ) -> Result<Option<AgentdWorkerHandle>, NativeWorkerError> {
+        let Some(session) =
+            runtime_session_repo::get_session(self.store.pool(), &session_id).await?
+        else {
+            return Ok(None);
+        };
+        if session.status != RuntimeSessionStatus::ResumePending {
+            return Ok(None);
+        }
+        self.resume(session_id, worker_incarnation_id, config)
+            .await
+            .map(Some)
     }
 }
 
