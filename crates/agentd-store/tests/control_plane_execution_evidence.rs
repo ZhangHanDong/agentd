@@ -612,6 +612,16 @@ async fn worker_artifact_publish_requires_current_lease_and_audits_rejection() {
         .await
         .expect("current worker artifact");
     assert_eq!(accepted.publish, artifact);
+    let acknowledgement = control_plane
+        .acknowledge_worker_artifact(&WorkerArtifactReport {
+            claim: first_grant.claim(),
+            observed_at: 111,
+            artifact: artifact.clone(),
+        })
+        .await
+        .expect("worker artifact acknowledgement");
+    assert_eq!(acknowledgement.artifact.publish, artifact);
+    assert!(acknowledgement.accepted_at > 0);
 
     lease_port
         .release(&TaskLeaseCloseRequest {

@@ -10,7 +10,7 @@ use agentd_core::ports::{
     ExecutionAuditRecord, ExecutionEvidenceError, ExecutionEvidenceLinks, ExecutionSnapshotLink,
     TaskLeaseError, TaskLeasePort, TaskLeaseRejectionReason, UsageLedgerPort, UsageMeasurement,
     UsageMetric, UsagePage, UsageReadRequest, UsageRecord, UsageTotal, UsageTotals,
-    WorkerArtifactReport, WorkerUsageReport,
+    WorkerArtifactAcknowledgement, WorkerArtifactReport, WorkerUsageReport,
 };
 use agentd_core::types::{AuditEventId, ExecutionArtifactId, RunId, TaskLeaseClaim};
 use serde::{Deserialize, Serialize};
@@ -156,6 +156,17 @@ where
         )
         .await?;
         self.publish_artifact(&request.artifact).await
+    }
+
+    async fn acknowledge_worker_artifact(
+        &self,
+        request: &WorkerArtifactReport,
+    ) -> Result<WorkerArtifactAcknowledgement, ExecutionEvidenceError> {
+        let artifact = self.publish_worker_artifact(request).await?;
+        Ok(WorkerArtifactAcknowledgement {
+            artifact,
+            accepted_at: crate::util::now_unix(),
+        })
     }
 
     async fn get_artifact(

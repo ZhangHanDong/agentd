@@ -264,6 +264,12 @@ pub struct WorkerArtifactReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkerArtifactAcknowledgement {
+    pub artifact: ExecutionArtifactRecord,
+    pub accepted_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkerUsageReport {
     pub claim: TaskLeaseClaim,
     pub observed_at: i64,
@@ -350,6 +356,11 @@ pub trait ArtifactIndexPort: Send + Sync {
         &self,
         request: &WorkerArtifactReport,
     ) -> Result<ExecutionArtifactRecord, ExecutionEvidenceError>;
+
+    async fn acknowledge_worker_artifact(
+        &self,
+        request: &WorkerArtifactReport,
+    ) -> Result<WorkerArtifactAcknowledgement, ExecutionEvidenceError>;
 
     async fn get_artifact(
         &self,

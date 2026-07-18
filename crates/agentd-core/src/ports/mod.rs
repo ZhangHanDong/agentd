@@ -30,7 +30,7 @@ pub use execution_evidence::{
     ExecutionAuditRecord, ExecutionEvidenceError, ExecutionEvidenceLinks,
     ExecutionEvidenceValidationError, ExecutionSnapshotLink, PageLimit, UsageLedgerPort,
     UsageMeasurement, UsageMetric, UsagePage, UsageReadRequest, UsageRecord, UsageTotal,
-    UsageTotals, WorkerArtifactReport, WorkerUsageReport,
+    UsageTotals, WorkerArtifactAcknowledgement, WorkerArtifactReport, WorkerUsageReport,
 };
 pub use mempal::{DrawerHit, MempalClient};
 pub use project_authority::{
