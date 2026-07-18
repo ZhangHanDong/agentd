@@ -112,7 +112,7 @@ struct CodexRecoveryRequest {
     env: Vec<(String, String)>,
 }
 
-fn recovery_router(service: Arc<WorkerFleetService>, token: String) -> Router {
+pub fn recovery_router(service: Arc<WorkerFleetService>, token: String) -> Router {
     Router::new()
         .route("/api/runtime/recover", post(register_codex_recovery))
         .with_state(RecoveryApiState { service, token })
