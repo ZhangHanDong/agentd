@@ -260,3 +260,62 @@ async fn runtime_session_rejects_terminal_or_stale_worker_attempt() {
         .expect("count attempts");
     assert_eq!(count, 0);
 }
+
+#[tokio::test]
+async fn runtime_attempt_reconciliation_persists_running_and_exit_outcomes() {
+    let fixture = fixture().await;
+    let session_id = RuntimeSessionId::new();
+    runtime_session_repo::create_session(
+        fixture.store.pool(),
+        session(session_id.clone(), &fixture),
+    )
+    .await
+    .expect("session");
+    let attempt_id = RuntimeAttemptId::new();
+    runtime_session_repo::start_attempt(
+        fixture.store.pool(),
+        &session_id,
+        attempt(attempt_id.clone(), fixture.incarnation_id.clone(), "native"),
+    )
+    .await
+    .expect("attempt");
+
+    let running = runtime_session_repo::mark_attempt_running(
+        fixture.store.pool(),
+        &session_id,
+        &attempt_id,
+        Some(4321),
+    )
+    .await
+    .expect("running");
+    assert_eq!(running.status, RuntimeAttemptStatus::Running);
+    assert_eq!(running.pid, Some(4321));
+    assert_eq!(
+        runtime_session_repo::get_session(fixture.store.pool(), &session_id)
+            .await
+            .expect("session")
+            .expect("exists")
+            .status,
+        RuntimeSessionStatus::Running
+    );
+
+    let exited = runtime_session_repo::mark_attempt_exited(
+        fixture.store.pool(),
+        &session_id,
+        &attempt_id,
+        Some(17),
+        Some("process_exit"),
+    )
+    .await
+    .expect("exited");
+    assert_eq!(exited.status, RuntimeAttemptStatus::Exited);
+    assert!(!exited.is_current);
+    assert_eq!(
+        runtime_session_repo::get_session(fixture.store.pool(), &session_id)
+            .await
+            .expect("session")
+            .expect("exists")
+            .status,
+        RuntimeSessionStatus::Failed
+    );
+}

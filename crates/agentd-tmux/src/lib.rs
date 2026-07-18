@@ -13,6 +13,7 @@ pub mod backend;
 pub mod config;
 pub mod discovery;
 pub mod error;
+pub mod native;
 pub mod pool;
 pub mod runner;
 

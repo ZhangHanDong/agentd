@@ -21,6 +21,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 async-trait = "0.1"
 sha2 = "0.10"
+portable-pty = "0.9"
 
 [dev-dependencies]
 # Self path dep enabling agentd-core's test-support so tmux tests inject the

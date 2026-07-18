@@ -288,6 +288,158 @@ async fn insert_attempt(
     Ok(())
 }
 
+/// Reconcile a successfully spawned native process into the running state.
+pub async fn mark_attempt_running(
+    pool: &SqlitePool,
+    session_id: &RuntimeSessionId,
+    attempt_id: &RuntimeAttemptId,
+    pid: Option<u32>,
+) -> Result<RuntimeAttemptRecord, StoreError> {
+    let mut tx = pool.begin().await?;
+    let attempt = current_attempt_in_tx(&mut tx, session_id, attempt_id).await?;
+    if attempt.status != RuntimeAttemptStatus::Starting {
+        return Err(StoreError::Conflict(
+            "runtime attempt is not starting".to_string(),
+        ));
+    }
+    let session = session_in_tx(&mut tx, session_id).await?;
+    if session.status != RuntimeSessionStatus::Starting {
+        return Err(StoreError::Conflict(
+            "runtime session is not starting".to_string(),
+        ));
+    }
+    let now = now_unix();
+    sqlx::query(
+        "UPDATE runtime_attempts SET status = 'running', pid = COALESCE(?, pid) \
+         WHERE id = ? AND runtime_session_id = ? AND is_current = 1 AND status = 'starting'",
+    )
+    .bind(pid.map(i64::from))
+    .bind(attempt_id.as_str())
+    .bind(session_id.as_str())
+    .execute(&mut *tx)
+    .await?;
+    let updated = sqlx::query(
+        "UPDATE runtime_sessions SET status = 'running', record_version = record_version + 1, \
+         updated_at = ? WHERE id = ? AND status = 'starting' AND record_version = ?",
+    )
+    .bind(now)
+    .bind(session_id.as_str())
+    .bind(session.record_version)
+    .execute(&mut *tx)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(StoreError::Conflict(
+            "runtime session changed concurrently".to_string(),
+        ));
+    }
+    tx.commit().await?;
+    get_attempt(pool, attempt_id)
+        .await?
+        .ok_or(StoreError::NotFound)
+}
+
+/// Reconcile a native process exit and close its logical runtime session.
+pub async fn mark_attempt_exited(
+    pool: &SqlitePool,
+    session_id: &RuntimeSessionId,
+    attempt_id: &RuntimeAttemptId,
+    exit_code: Option<i32>,
+    reason: Option<&str>,
+) -> Result<RuntimeAttemptRecord, StoreError> {
+    let mut tx = pool.begin().await?;
+    let attempt = current_attempt_in_tx(&mut tx, session_id, attempt_id).await?;
+    if attempt.status != RuntimeAttemptStatus::Starting
+        && attempt.status != RuntimeAttemptStatus::Running
+    {
+        return Err(StoreError::Conflict(
+            "runtime attempt is not active".to_string(),
+        ));
+    }
+    let session = session_in_tx(&mut tx, session_id).await?;
+    if session.status != RuntimeSessionStatus::Starting
+        && session.status != RuntimeSessionStatus::Running
+    {
+        return Err(StoreError::Conflict(
+            "runtime session is not active".to_string(),
+        ));
+    }
+    let now = now_unix();
+    let target = if exit_code == Some(0) {
+        RuntimeSessionStatus::Completed
+    } else {
+        RuntimeSessionStatus::Failed
+    };
+    sqlx::query(
+        "UPDATE runtime_attempts SET status = 'exited', is_current = 0, finished_at = ?, \
+         superseded_at = ? WHERE id = ? AND runtime_session_id = ? AND is_current = 1",
+    )
+    .bind(now)
+    .bind(now)
+    .bind(attempt_id.as_str())
+    .bind(session_id.as_str())
+    .execute(&mut *tx)
+    .await?;
+    let terminal_reason =
+        reason.or_else(|| exit_code.map(|code| if code == 0 { "exited" } else { "failed" }));
+    let updated = sqlx::query(
+        "UPDATE runtime_sessions SET status = ?, record_version = record_version + 1, \
+         terminal_reason = ?, updated_at = ? WHERE id = ? AND status = ? AND record_version = ?",
+    )
+    .bind(target.as_str())
+    .bind(terminal_reason)
+    .bind(now)
+    .bind(session_id.as_str())
+    .bind(session.status.as_str())
+    .bind(session.record_version)
+    .execute(&mut *tx)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(StoreError::Conflict(
+            "runtime session changed concurrently".to_string(),
+        ));
+    }
+    tx.commit().await?;
+    get_attempt(pool, attempt_id)
+        .await?
+        .ok_or(StoreError::NotFound)
+}
+
+async fn session_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    session_id: &RuntimeSessionId,
+) -> Result<RuntimeSessionRecord, StoreError> {
+    let row = sqlx::query(
+        "SELECT id, execution_task_id, agent_profile_id, snapshot_authority_key, \
+         snapshot_resource_kind, snapshot_resource_id, snapshot_resource_version, \
+         snapshot_content_sha256, status, record_version, terminal_reason, created_at, updated_at \
+         FROM runtime_sessions WHERE id = ?",
+    )
+    .bind(session_id.as_str())
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or(StoreError::NotFound)?;
+    row_to_session(&row)
+}
+
+async fn current_attempt_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    session_id: &RuntimeSessionId,
+    attempt_id: &RuntimeAttemptId,
+) -> Result<RuntimeAttemptRecord, StoreError> {
+    let row = sqlx::query(
+        "SELECT id, runtime_session_id, worker_incarnation_id, status, backend_target, \
+         session_name, pane_id, pid, native_session_ref, workdir, is_current, started_at, \
+         finished_at, superseded_at FROM runtime_attempts \
+         WHERE id = ? AND runtime_session_id = ? AND is_current = 1",
+    )
+    .bind(attempt_id.as_str())
+    .bind(session_id.as_str())
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or(StoreError::NotFound)?;
+    row_to_attempt(&row)
+}
+
 /// Mark the current attempt gone and move its logical session to
 /// `resume_pending` atomically.
 ///
@@ -468,6 +620,24 @@ pub async fn current_attempt(
          session_name, pane_id, pid, native_session_ref, workdir, is_current, started_at, \
          finished_at, superseded_at FROM runtime_attempts \
          WHERE runtime_session_id = ? AND is_current = 1",
+    )
+    .bind(session_id.as_str())
+    .fetch_optional(pool)
+    .await?;
+    row.as_ref().map(row_to_attempt).transpose()
+}
+
+/// Read the most recent attempt, including a gone attempt that supplies the
+/// provider-native reference needed for session restoration.
+pub async fn latest_attempt(
+    pool: &SqlitePool,
+    session_id: &RuntimeSessionId,
+) -> Result<Option<RuntimeAttemptRecord>, StoreError> {
+    let row = sqlx::query(
+        "SELECT id, runtime_session_id, worker_incarnation_id, status, backend_target, \
+         session_name, pane_id, pid, native_session_ref, workdir, is_current, started_at, \
+         finished_at, superseded_at FROM runtime_attempts \
+         WHERE runtime_session_id = ? ORDER BY started_at DESC, id DESC LIMIT 1",
     )
     .bind(session_id.as_str())
     .fetch_optional(pool)
