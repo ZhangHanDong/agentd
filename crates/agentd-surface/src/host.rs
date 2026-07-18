@@ -908,6 +908,13 @@ pub trait RunHost: Send + Sync {
     /// [`CoreError`] on a store failure.
     async fn list_runs(&self) -> Result<Vec<RunSummary>, CoreError>;
 
+    /// Return structured durable control-plane diagnostics for operators.
+    async fn operational_doctor(&self) -> Result<Value, CoreError> {
+        Err(CoreError::Backend(
+            "operational doctor is not configured".to_string(),
+        ))
+    }
+
     /// Create and start a run of `flow` (`"draft"`/`"execute"`) as `run_id` with
     /// an initial `context`, executing from the start node to the first park (or
     /// completion). The daemon's `POST /runs` control path; the host records the

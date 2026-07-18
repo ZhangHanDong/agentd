@@ -1261,6 +1261,14 @@ impl RunHost for ProductionRunHost {
             .collect())
     }
 
+    async fn operational_doctor(&self) -> Result<Value, CoreError> {
+        let report = agentd_store::doctor::OperationalDoctor::new(self.store.pool().clone())
+            .check()
+            .await
+            .map_err(|error| CoreError::Store(error.to_string()))?;
+        serde_json::to_value(report).map_err(|error| CoreError::Store(error.to_string()))
+    }
+
     async fn start_workflow(
         &self,
         flow: &str,

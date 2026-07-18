@@ -132,6 +132,7 @@ impl AuthConfig {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/api/doctor", get(get_doctor))
         .route("/dashboard", get(dashboard))
         .route("/dashboard/", get(dashboard))
         .route("/runs", post(start_run).get(get_runs))
@@ -1715,6 +1716,20 @@ fn progress_kind(progress: &RunProgress) -> &'static str {
 #[allow(clippy::unused_async)] // axum handlers are async; this one has nothing to await
 async fn healthz() -> &'static str {
     "ok"
+}
+
+async fn get_doctor(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(err) = require_operator_bearer(&state.auth, &headers) {
+        return err.into_response();
+    }
+    match state.host.operational_doctor().await {
+        Ok(report) => Json(report).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": error.to_string() })),
+        )
+            .into_response(),
+    }
 }
 
 /// `GET /runs/:id` — the `query_run` snapshot as JSON; `not_found` → 404.
