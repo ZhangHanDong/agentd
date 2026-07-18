@@ -25,6 +25,13 @@ pub struct OperationalDoctorReport {
     pub ready: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationalRemediationReport {
+    pub observed_at: i64,
+    pub workers_marked_offline: u64,
+    pub leases_expired: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct OperationalDoctor {
     pool: SqlitePool,
@@ -101,6 +108,30 @@ impl OperationalDoctor {
             projects,
             queued_tasks,
             ready,
+        })
+    }
+
+    pub async fn remediate(
+        &self,
+        observed_at: i64,
+        heartbeat_timeout_secs: i64,
+    ) -> Result<OperationalRemediationReport, StoreError> {
+        let workers_marked_offline = crate::worker_repo::mark_stale_workers_offline(
+            &self.pool,
+            observed_at.saturating_sub(heartbeat_timeout_secs),
+        )
+        .await?;
+        let leases_expired = {
+            use agentd_core::ports::TaskLeasePort;
+            crate::task_lease_control_plane::SqliteTaskLeaseControlPlane::new(self.pool.clone())
+                .expire_due(observed_at)
+                .await
+                .map_err(|error| StoreError::Invariant(error.to_string()))?
+        };
+        Ok(OperationalRemediationReport {
+            observed_at,
+            workers_marked_offline,
+            leases_expired,
         })
     }
 }

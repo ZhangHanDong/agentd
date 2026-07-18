@@ -21,7 +21,7 @@ async fn main() -> ExitCode {
         .unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
     let result: Result<(), Box<dyn std::error::Error>> = match cli.command {
-        Some(AgentdCommand::Doctor) => run_doctor(&cli.config).await,
+        Some(AgentdCommand::Doctor(args)) => run_doctor(&cli.config, args.repair).await,
         Some(AgentdCommand::CleanupWorktrees(args)) => {
             match daemon::cleanup_failed_worktrees_from_config(&cli.config, args.execute).await {
                 Ok(plan) => {
@@ -106,12 +106,22 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run_doctor(config: &agentd_bin::DaemonConfig) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_doctor(
+    config: &agentd_bin::DaemonConfig,
+    repair: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let store = agentd_store::SqliteStore::connect(&config.db_path).await?;
     let report = agentd_store::doctor::OperationalDoctor::new(store.pool().clone())
         .check()
         .await?;
-    println!("{}", serde_json::to_string_pretty(&report)?);
+    if repair {
+        let remediation = agentd_store::doctor::OperationalDoctor::new(store.pool().clone())
+            .remediate(report.checked_at, 30)
+            .await?;
+        println!("{}", serde_json::to_string_pretty(&remediation)?);
+    } else {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    }
     Ok(())
 }
 

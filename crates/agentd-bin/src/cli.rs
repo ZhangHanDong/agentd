@@ -24,7 +24,7 @@ pub struct AgentdCli {
 #[allow(clippy::large_enum_variant)]
 pub enum AgentdCommand {
     /// Print structured durable control-plane health and recovery diagnostics.
-    Doctor,
+    Doctor(DoctorArgs),
     /// List or release failed-run worktrees.
     CleanupWorktrees(CleanupWorktreesArgs),
     /// Validate Matrix client bridge service configuration and homeserver reachability.
@@ -35,6 +35,13 @@ pub enum AgentdCommand {
     MatrixBridgeOnce(MatrixBridgeOnceArgs),
     /// Serve the agent-facing MCP dispatcher over line-delimited stdio JSON-RPC.
     McpStdio(McpStdioArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct DoctorArgs {
+    /// Apply bounded durable liveness and lease-expiry remediation after reporting.
+    #[arg(long)]
+    pub repair: bool,
 }
 
 /// Arguments for `agentd cleanup-worktrees`.
@@ -332,7 +339,7 @@ mod tests {
     #[test]
     fn parses_doctor_command() {
         let cli = AgentdCli::parse_from(["agentd", "doctor"]);
-        assert!(matches!(cli.command, Some(AgentdCommand::Doctor)));
+        assert!(matches!(cli.command, Some(AgentdCommand::Doctor(args)) if !args.repair));
     }
 
     fn matrix_bridge_once_args(cli: &AgentdCli) -> &MatrixBridgeOnceArgs {
