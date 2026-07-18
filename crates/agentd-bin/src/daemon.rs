@@ -27,6 +27,7 @@ use crate::host::{
     AgentLifecycle, AgentLifecycleShutdown, AgentLifecycleShutdownReport, ProductionRunHost,
 };
 use crate::mempal::OfflineMempal;
+use crate::native_worker::{AgentdWorker, NativeRecoveryRegistry};
 
 /// Build the HTTP/SSE router over a host (testable via `tower::oneshot`).
 pub fn build_router(host: Arc<dyn RunHost>) -> Router {
@@ -71,9 +72,15 @@ pub fn build_router_with_worker_fleet(
 }
 
 /// Run one durable worker-fleet maintenance tick.
-pub async fn worker_fleet_tick(fleet: &dyn WorkerFleetPort, observed_at: i64) {
+pub async fn worker_fleet_tick(
+    fleet: &dyn WorkerFleetPort,
+    recovery_registry: &NativeRecoveryRegistry,
+    native_worker: &AgentdWorker,
+    observed_at: i64,
+) {
     let _ = fleet.recover_offline(observed_at - 30).await;
     let _ = fleet.expire_due(observed_at).await;
+    let _ = recovery_registry.recover_one(native_worker).await;
 }
 
 fn unix_now() -> i64 {
@@ -83,12 +90,22 @@ fn unix_now() -> i64 {
         .as_secs() as i64
 }
 
-fn spawn_worker_fleet_supervisor(fleet: Arc<dyn WorkerFleetPort>) -> tokio::task::JoinHandle<()> {
+fn spawn_worker_fleet_supervisor(
+    fleet: Arc<dyn WorkerFleetPort>,
+    recovery_registry: Arc<NativeRecoveryRegistry>,
+    native_worker: AgentdWorker,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         loop {
             interval.tick().await;
-            worker_fleet_tick(fleet.as_ref(), unix_now()).await;
+            worker_fleet_tick(
+                fleet.as_ref(),
+                recovery_registry.as_ref(),
+                &native_worker,
+                unix_now(),
+            )
+            .await;
         }
     })
 }
@@ -303,7 +320,10 @@ pub async fn serve(config: DaemonConfig) -> Result<(), Box<dyn std::error::Error
     let media_dir = media_dir_for_db(&config.db_path);
     let auth = config.auth_config();
     let supervisor_fleet = Arc::new(SqliteWorkerFleet::new(host.store().pool().clone()));
-    let _supervisor = spawn_worker_fleet_supervisor(supervisor_fleet);
+    let recovery_registry = Arc::new(NativeRecoveryRegistry::new());
+    let native_worker = AgentdWorker::new(host.store().clone());
+    let _supervisor =
+        spawn_worker_fleet_supervisor(supervisor_fleet, recovery_registry, native_worker);
     let fleet = SqliteWorkerFleet::new(host.store().pool().clone());
     let fleet = match auth.api_token.clone() {
         Some(token) => Arc::new(fleet.with_auth_proof(token)),
