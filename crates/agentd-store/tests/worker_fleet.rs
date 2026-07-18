@@ -1,9 +1,11 @@
 use agentd_core::ports::{
-    WorkerFleetHeartbeat, WorkerFleetHeartbeatResult, WorkerFleetPort, WorkerFleetRegisterRequest,
+    WorkerFleetDrainRequest, WorkerFleetHeartbeat, WorkerFleetHeartbeatResult, WorkerFleetPort,
+    WorkerFleetRegisterRequest,
 };
-use agentd_core::types::{WorkerId, WorkerIncarnationId};
+use agentd_core::types::{WorkerId, WorkerIncarnationId, WorkerStatus};
 use agentd_store::SqliteStore;
 use agentd_store::worker_fleet::SqliteWorkerFleet;
+use agentd_store::worker_repo;
 use serde_json::json;
 
 #[tokio::test]
@@ -63,4 +65,53 @@ async fn worker_fleet_registers_and_rejects_stale_incarnation_heartbeats() {
             .expect("stale heartbeat"),
         WorkerFleetHeartbeatResult::Stale
     );
+}
+
+#[tokio::test]
+async fn worker_fleet_can_drain_and_resume_current_incarnation() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteStore::connect(&dir.path().join("agentd.db"))
+        .await
+        .expect("store");
+    let fleet = SqliteWorkerFleet::new(store.pool().clone());
+    let worker_id = WorkerId::new();
+    let incarnation_id = WorkerIncarnationId::new();
+    fleet
+        .register(&WorkerFleetRegisterRequest {
+            worker_id: worker_id.clone(),
+            trust_domain: "local".into(),
+            labels: json!({}),
+            incarnation_id: incarnation_id.clone(),
+            daemon_version: "test".into(),
+            host_name: "host".into(),
+            network_zone: None,
+            capabilities: json!({}),
+        })
+        .await
+        .expect("register");
+
+    fleet
+        .set_drain(&WorkerFleetDrainRequest {
+            worker_id: worker_id.clone(),
+            incarnation_id: incarnation_id.clone(),
+            drain: true,
+        })
+        .await
+        .expect("drain");
+    assert_eq!(
+        worker_repo::get_worker(store.pool(), &worker_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        WorkerStatus::Draining
+    );
+    fleet
+        .set_drain(&WorkerFleetDrainRequest {
+            worker_id,
+            incarnation_id,
+            drain: false,
+        })
+        .await
+        .expect("resume");
 }

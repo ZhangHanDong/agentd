@@ -33,6 +33,13 @@ pub struct WorkerFleetHeartbeat {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerFleetDrainRequest {
+    pub worker_id: WorkerId,
+    pub incarnation_id: WorkerIncarnationId,
+    pub drain: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkerFleetHeartbeatResult {
     Accepted { last_seen_at: i64 },
     Stale,
@@ -61,4 +68,6 @@ pub trait WorkerFleetPort: TaskLeasePort + Send + Sync {
         &self,
         request: &WorkerFleetHeartbeat,
     ) -> Result<WorkerFleetHeartbeatResult, WorkerFleetError>;
+
+    async fn set_drain(&self, request: &WorkerFleetDrainRequest) -> Result<(), WorkerFleetError>;
 }

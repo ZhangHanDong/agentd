@@ -2,10 +2,11 @@
 
 use agentd_core::ports::{
     TaskLeaseCloseRequest, TaskLeaseDispatchRequest, TaskLeaseError, TaskLeasePort,
-    TaskLeaseRenewRequest, WorkerFleetError, WorkerFleetHeartbeat, WorkerFleetHeartbeatResult,
-    WorkerFleetPort, WorkerFleetRegisterRequest, WorkerFleetRegistration,
+    TaskLeaseRenewRequest, WorkerFleetDrainRequest, WorkerFleetError, WorkerFleetHeartbeat,
+    WorkerFleetHeartbeatResult, WorkerFleetPort, WorkerFleetRegisterRequest,
+    WorkerFleetRegistration,
 };
-use agentd_core::types::TaskLeaseGrant;
+use agentd_core::types::{TaskLeaseGrant, WorkerStatus};
 use sqlx::SqlitePool;
 
 use crate::task_lease_control_plane::SqliteTaskLeaseControlPlane;
@@ -91,6 +92,27 @@ impl WorkerFleetPort for SqliteWorkerFleet {
             }),
             WorkerHeartbeatOutcome::Stale => Ok(WorkerFleetHeartbeatResult::Stale),
         }
+    }
+
+    async fn set_drain(&self, request: &WorkerFleetDrainRequest) -> Result<(), WorkerFleetError> {
+        let incarnation = worker_repo::get_incarnation(&self.pool, &request.incarnation_id)
+            .await
+            .map_err(storage_error)?
+            .ok_or_else(|| WorkerFleetError::NotFound(request.incarnation_id.to_string()))?;
+        if incarnation.worker_id != request.worker_id || !incarnation.is_current {
+            return Err(WorkerFleetError::Conflict(
+                "stale worker incarnation".to_string(),
+            ));
+        }
+        let target = if request.drain {
+            WorkerStatus::Draining
+        } else {
+            WorkerStatus::Online
+        };
+        worker_repo::transition_worker_status(&self.pool, &request.worker_id, target)
+            .await
+            .map(|_| ())
+            .map_err(storage_error)
     }
 }
 
