@@ -4,9 +4,10 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agentd_core::CoreError;
-use agentd_core::ports::{AgentAllocation, AgentBackend, WorktreeAllocator};
+use agentd_core::ports::{AgentAllocation, AgentBackend, WorkerFleetPort, WorktreeAllocator};
 use agentd_core::types::{AgentHandle, SpawnRequest};
 use agentd_store::worker_fleet::SqliteWorkerFleet;
 use agentd_store::{FailedWorktreeCleanupCandidate, SqliteStore};
@@ -67,6 +68,29 @@ pub fn build_router_with_worker_fleet(
     fleet: Arc<dyn agentd_core::ports::WorkerFleetPort>,
 ) -> Router {
     build_router_with_auth_and_media(host, auth, media).merge(worker_fleet_router(fleet))
+}
+
+/// Run one durable worker-fleet maintenance tick.
+pub async fn worker_fleet_tick(fleet: &dyn WorkerFleetPort, observed_at: i64) {
+    let _ = fleet.recover_offline(observed_at - 30).await;
+    let _ = fleet.expire_due(observed_at).await;
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+fn spawn_worker_fleet_supervisor(fleet: Arc<dyn WorkerFleetPort>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            worker_fleet_tick(fleet.as_ref(), unix_now()).await;
+        }
+    })
 }
 
 /// Production media root colocated with the daemon database.
@@ -278,6 +302,8 @@ pub async fn serve(config: DaemonConfig) -> Result<(), Box<dyn std::error::Error
     }
     let media_dir = media_dir_for_db(&config.db_path);
     let auth = config.auth_config();
+    let supervisor_fleet = Arc::new(SqliteWorkerFleet::new(host.store().pool().clone()));
+    let _supervisor = spawn_worker_fleet_supervisor(supervisor_fleet);
     let fleet = SqliteWorkerFleet::new(host.store().pool().clone());
     let fleet = match auth.api_token.clone() {
         Some(token) => Arc::new(fleet.with_auth_proof(token)),
