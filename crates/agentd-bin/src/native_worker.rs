@@ -72,6 +72,17 @@ impl NativeRecoveryRegistry {
                 "provider program is required".into(),
             ));
         }
+        let provider = request
+            .config
+            .program
+            .rsplit('/')
+            .next()
+            .unwrap_or_default();
+        if !matches!(provider, "codex" | "claude" | "claude-code") {
+            return Err(NativeWorkerError::InvalidRecovery(format!(
+                "unsupported provider executable: {provider}"
+            )));
+        }
         if let Ok(mut requests) = self.requests.lock() {
             if let Some(existing) = requests
                 .iter_mut()

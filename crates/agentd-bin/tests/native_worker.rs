@@ -32,6 +32,26 @@ fn native_recovery_registry_rejects_empty_provider_command() {
         .expect_err("empty provider command");
     assert!(error.to_string().contains("provider program is required"));
 }
+
+#[test]
+fn native_recovery_registry_rejects_arbitrary_shell_command() {
+    let registry = NativeRecoveryRegistry::new();
+    let error = registry
+        .register(NativeRecoveryRequest {
+            session_id: RuntimeSessionId::new(),
+            worker_incarnation_id: WorkerIncarnationId::new(),
+            config: NativeProcessConfig {
+                program: "sh".into(),
+                ..NativeProcessConfig::default()
+            },
+        })
+        .expect_err("shell command");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported provider executable")
+    );
+}
 use serde_json::json;
 
 #[tokio::test]
