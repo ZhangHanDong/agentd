@@ -5,6 +5,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use agentd_core::ports::{
@@ -43,6 +44,67 @@ impl From<ExecutionEvidenceError> for NativeWorkerError {
 #[derive(Debug, Clone)]
 pub struct AgentdWorker {
     store: SqliteStore,
+}
+
+#[derive(Debug, Clone)]
+pub struct NativeRecoveryRequest {
+    pub session_id: RuntimeSessionId,
+    pub worker_incarnation_id: WorkerIncarnationId,
+    pub config: NativeProcessConfig,
+}
+
+#[derive(Debug, Default)]
+pub struct NativeRecoveryRegistry {
+    requests: Mutex<Vec<NativeRecoveryRequest>>,
+}
+
+impl NativeRecoveryRegistry {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register(&self, request: NativeRecoveryRequest) {
+        if let Ok(mut requests) = self.requests.lock() {
+            if let Some(existing) = requests
+                .iter_mut()
+                .find(|existing| existing.session_id == request.session_id)
+            {
+                *existing = request;
+            } else {
+                requests.push(request);
+            }
+        }
+    }
+
+    pub async fn recover_one(
+        &self,
+        worker: &AgentdWorker,
+    ) -> Result<Option<AgentdWorkerHandle>, NativeWorkerError> {
+        let request = self
+            .requests
+            .lock()
+            .map_err(|_| NativeWorkerError::Join("recovery registry lock poisoned".into()))?
+            .first()
+            .cloned();
+        let Some(request) = request else {
+            return Ok(None);
+        };
+        let handle = worker
+            .recover_if_pending(
+                request.session_id.clone(),
+                request.worker_incarnation_id,
+                request.config,
+            )
+            .await?;
+        if handle.is_some() {
+            self.requests
+                .lock()
+                .map_err(|_| NativeWorkerError::Join("recovery registry lock poisoned".into()))?
+                .retain(|item| item.session_id != request.session_id);
+        }
+        Ok(handle)
+    }
 }
 
 /// Build the provider-native Codex resume invocation from a persisted thread id.
