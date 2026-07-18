@@ -10,7 +10,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use portable_pty::{Child, CommandBuilder, PtySize, native_pty_system};
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -61,6 +61,8 @@ pub enum NativeRuntimeError {
     Timeout,
     #[error("native runtime lock poisoned")]
     Poisoned,
+    #[error("native runtime is already terminal")]
+    AlreadyTerminal,
 }
 
 #[derive(Debug)]
@@ -80,6 +82,7 @@ struct SharedState {
 pub struct NativeRuntime {
     shared: Arc<SharedState>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    child: Arc<Mutex<Option<Box<dyn Child + Send + Sync>>>>,
 }
 
 impl std::fmt::Debug for NativeRuntime {
@@ -113,10 +116,11 @@ impl NativeRuntime {
         for (key, value) in &config.env {
             command.env(key, value);
         }
-        let mut child = pair
+        let child = pair
             .slave
             .spawn_command(command)
             .map_err(|e| NativeRuntimeError::Spawn(e.to_string()))?;
+        let child = Arc::new(Mutex::new(Some(child)));
         let mut reader = pair
             .master
             .try_clone_reader()
@@ -162,10 +166,18 @@ impl NativeRuntime {
             .map_err(|e| NativeRuntimeError::Pty(e.to_string()))?;
 
         let wait_shared = Arc::clone(&shared);
+        let wait_child = Arc::clone(&child);
         thread::Builder::new()
             .name("agentd-native-process-waiter".into())
             .spawn(move || {
-                let result = child.wait();
+                let result = wait_child
+                    .lock()
+                    .ok()
+                    .and_then(|mut child| child.take())
+                    .map_or_else(
+                        || Err(std::io::Error::other("child handle unavailable")),
+                        |mut child| child.wait(),
+                    );
                 let mut state = match wait_shared.state.lock() {
                     Ok(state) => state,
                     Err(_) => return,
@@ -192,6 +204,7 @@ impl NativeRuntime {
         Ok(Self {
             shared,
             writer: Arc::new(Mutex::new(writer)),
+            child,
         })
     }
 
@@ -233,6 +246,20 @@ impl NativeRuntime {
             .map_err(|_| NativeRuntimeError::Poisoned)?
             .write_all(input)
             .map_err(|e| NativeRuntimeError::Pty(e.to_string()))
+    }
+
+    /// Terminate the child process and let the waiter reconcile its exit event.
+    pub fn terminate(&self) -> Result<(), NativeRuntimeError> {
+        let mut child = self
+            .child
+            .lock()
+            .map_err(|_| NativeRuntimeError::Poisoned)?;
+        let Some(child) = child.as_mut() else {
+            return Err(NativeRuntimeError::AlreadyTerminal);
+        };
+        child
+            .kill()
+            .map_err(|error| NativeRuntimeError::Pty(error.to_string()))
     }
 
     pub fn wait(&self, timeout: Duration) -> Result<NativeProcessEvent, NativeRuntimeError> {

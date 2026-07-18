@@ -65,3 +65,16 @@ fn native_runtime_writes_input_to_the_pty() {
             .any(|window| { window == b"echo:hello" })
     );
 }
+
+#[test]
+fn native_runtime_can_terminate_a_running_child() {
+    let runtime = NativeRuntime::spawn(NativeProcessConfig {
+        program: "sh".into(),
+        args: vec!["-c".into(), "sleep 30".into()],
+        ..NativeProcessConfig::default()
+    })
+    .expect("spawn");
+    runtime.terminate().expect("terminate");
+    let event = runtime.wait(Duration::from_secs(2)).expect("wait");
+    assert!(matches!(event, NativeProcessEvent::Exited { .. }));
+}

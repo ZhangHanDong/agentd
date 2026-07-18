@@ -168,6 +168,12 @@ impl AgentdWorkerHandle {
         self.runtime.native_session_ref()
     }
 
+    /// Request process termination; callers should still call `wait` to
+    /// reconcile the durable attempt outcome.
+    pub fn terminate(&self) -> Result<(), NativeWorkerError> {
+        self.runtime.terminate().map_err(NativeWorkerError::Native)
+    }
+
     /// Wait for the native process and atomically reconcile its terminal state.
     pub async fn wait(&self, timeout: Duration) -> Result<NativeProcessEvent, NativeWorkerError> {
         let runtime = Arc::clone(&self.runtime);
