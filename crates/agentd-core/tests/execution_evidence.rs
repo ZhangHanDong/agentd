@@ -7,7 +7,8 @@ use agentd_core::ports::{
     ExecutionArtifactPublish, ExecutionArtifactRecord, ExecutionAuditAppend, ExecutionAuditPort,
     ExecutionAuditRecord, ExecutionEvidenceError, ExecutionEvidenceLinks, ExecutionSnapshotLink,
     PageLimit, UsageLedgerPort, UsageMeasurement, UsageMetric, UsagePage, UsageReadRequest,
-    UsageRecord, UsageTotal, UsageTotals, WorkerArtifactReport, WorkerUsageReport,
+    UsageRecord, UsageTotal, UsageTotals, WorkerArtifactAcknowledgement, WorkerArtifactReport,
+    WorkerUsageReport,
 };
 use agentd_core::types::{
     AuditEventId, ExecutionArtifactId, FencingToken, LeaseId, RunId, TaskLeaseClaim, TaskRunId,
@@ -140,6 +141,17 @@ impl ArtifactIndexPort for RecordingPorts {
     ) -> Result<ExecutionArtifactRecord, ExecutionEvidenceError> {
         self.record(format!("artifact.worker:{}", request.claim.lease_id));
         Ok(artifact_record())
+    }
+
+    async fn acknowledge_worker_artifact(
+        &self,
+        request: &WorkerArtifactReport,
+    ) -> Result<WorkerArtifactAcknowledgement, ExecutionEvidenceError> {
+        self.record(format!("artifact.ack:{}", request.claim.lease_id));
+        Ok(WorkerArtifactAcknowledgement {
+            artifact: artifact_record(),
+            accepted_at: 1,
+        })
     }
 
     async fn get_artifact(
