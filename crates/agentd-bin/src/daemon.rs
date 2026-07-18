@@ -115,6 +115,26 @@ impl WorkerFleetService {
         self.recovery_registry.register(request)
     }
 
+    pub fn register_codex_recovery(
+        &self,
+        session_id: agentd_core::types::RuntimeSessionId,
+        worker_incarnation_id: agentd_core::types::WorkerIncarnationId,
+        cwd: Option<String>,
+        env: Vec<(String, String)>,
+    ) -> Result<(), crate::native_worker::NativeWorkerError> {
+        self.register_recovery(crate::native_worker::NativeRecoveryRequest {
+            session_id,
+            worker_incarnation_id,
+            config: agentd_tmux::native::NativeProcessConfig {
+                program: "codex".into(),
+                args: Vec::new(),
+                cwd,
+                env,
+                ..agentd_tmux::native::NativeProcessConfig::default()
+            },
+        })
+    }
+
     pub fn start(self) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(5));
