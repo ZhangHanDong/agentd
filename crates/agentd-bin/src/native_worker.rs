@@ -3,6 +3,7 @@
 //! `agentd-tmux::native` owns disposable PTY resources. This module binds that
 //! resource lifecycle to the durable runtime session/attempt repositories.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -172,6 +173,13 @@ impl AgentdWorkerHandle {
     /// reconcile the durable attempt outcome.
     pub fn terminate(&self) -> Result<(), NativeWorkerError> {
         self.runtime.terminate().map_err(NativeWorkerError::Native)
+    }
+
+    /// Persist the bounded PTY output for a later artifact publish/ack.
+    pub fn spool_output(&self, path: impl AsRef<Path>) -> Result<(), NativeWorkerError> {
+        self.runtime
+            .spool_output(path)
+            .map_err(NativeWorkerError::Native)
     }
 
     /// Terminate the process and reconcile its durable attempt in one operation.
