@@ -174,6 +174,15 @@ impl AgentdWorkerHandle {
         self.runtime.terminate().map_err(NativeWorkerError::Native)
     }
 
+    /// Terminate the process and reconcile its durable attempt in one operation.
+    pub async fn terminate_and_reconcile(
+        &self,
+        timeout: Duration,
+    ) -> Result<NativeProcessEvent, NativeWorkerError> {
+        self.terminate()?;
+        self.wait(timeout).await
+    }
+
     /// Wait for the native process and atomically reconcile its terminal state.
     pub async fn wait(&self, timeout: Duration) -> Result<NativeProcessEvent, NativeWorkerError> {
         let runtime = Arc::clone(&self.runtime);
