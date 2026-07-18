@@ -7,9 +7,12 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agentd_core::ports::{ExecutionArtifactKind, ExecutionArtifactPublish, ExecutionEvidenceLinks};
+use agentd_core::ports::{
+    ArtifactIndexPort, ExecutionArtifactKind, ExecutionArtifactPublish, ExecutionEvidenceError,
+    ExecutionEvidenceLinks, WorkerArtifactAcknowledgement, WorkerArtifactReport,
+};
 use agentd_core::types::{
-    ExecutionArtifactId, RuntimeAttemptId, RuntimeSessionId, WorkerIncarnationId,
+    ExecutionArtifactId, RuntimeAttemptId, RuntimeSessionId, TaskLeaseClaim, WorkerIncarnationId,
 };
 use agentd_store::runtime_session_repo::{self, RuntimeAttemptCreate};
 use agentd_store::{SqliteStore, StoreError};
@@ -26,6 +29,14 @@ pub enum NativeWorkerError {
     Native(#[from] NativeRuntimeError),
     #[error("native worker blocking task failed: {0}")]
     Join(String),
+    #[error("artifact acknowledgement failed: {0}")]
+    Evidence(String),
+}
+
+impl From<ExecutionEvidenceError> for NativeWorkerError {
+    fn from(error: ExecutionEvidenceError) -> Self {
+        Self::Evidence(error.to_string())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -208,6 +219,23 @@ impl AgentdWorkerHandle {
             provenance,
             links,
         }
+    }
+
+    /// Publish a spooled artifact through the fenced evidence port.
+    pub async fn acknowledge_spooled_artifact<P: ArtifactIndexPort + ?Sized>(
+        &self,
+        port: &P,
+        claim: TaskLeaseClaim,
+        observed_at: i64,
+        artifact: ExecutionArtifactPublish,
+    ) -> Result<WorkerArtifactAcknowledgement, NativeWorkerError> {
+        port.acknowledge_worker_artifact(&WorkerArtifactReport {
+            claim,
+            observed_at,
+            artifact,
+        })
+        .await
+        .map_err(NativeWorkerError::from)
     }
 
     /// Terminate the process and reconcile its durable attempt in one operation.
