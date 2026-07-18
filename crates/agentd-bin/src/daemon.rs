@@ -19,6 +19,12 @@ use agentd_tmux::{
     WorktreePool,
 };
 use axum::Router;
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::{Json, routing::post};
+use serde::Deserialize;
+use serde_json::json;
 
 use crate::agent_mcp_context::{McpStdioContextBackend, mcp_stdio_command_from_current_process};
 use crate::cli::DaemonConfig;
@@ -88,6 +94,61 @@ pub struct WorkerFleetService {
     fleet: Arc<dyn WorkerFleetPort>,
     recovery_registry: Arc<NativeRecoveryRegistry>,
     native_worker: AgentdWorker,
+}
+
+#[derive(Clone)]
+struct RecoveryApiState {
+    service: Arc<WorkerFleetService>,
+    token: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexRecoveryRequest {
+    session_id: String,
+    worker_incarnation_id: String,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    env: Vec<(String, String)>,
+}
+
+fn recovery_router(service: Arc<WorkerFleetService>, token: String) -> Router {
+    Router::new()
+        .route("/api/runtime/recover", post(register_codex_recovery))
+        .with_state(RecoveryApiState { service, token })
+}
+
+async fn register_codex_recovery(
+    State(state): State<RecoveryApiState>,
+    headers: HeaderMap,
+    Json(request): Json<CodexRecoveryRequest>,
+) -> Response {
+    let expected = format!("Bearer {}", state.token);
+    if headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        != Some(expected.as_str())
+    {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    }
+    let result = state.service.register_codex_recovery(
+        agentd_core::types::RuntimeSessionId::from_string(request.session_id),
+        agentd_core::types::WorkerIncarnationId::from_string(request.worker_incarnation_id),
+        request.cwd,
+        request.env,
+    );
+    match result {
+        Ok(()) => (StatusCode::ACCEPTED, Json(json!({ "accepted": true }))).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": error.to_string() })),
+        )
+            .into_response(),
+    }
 }
 
 impl std::fmt::Debug for WorkerFleetService {
@@ -370,14 +431,24 @@ pub async fn serve(config: DaemonConfig) -> Result<(), Box<dyn std::error::Error
     let auth = config.auth_config();
     let supervisor_fleet = Arc::new(SqliteWorkerFleet::new(host.store().pool().clone()));
     let native_worker = AgentdWorker::new(host.store().clone());
-    let _supervisor = WorkerFleetService::new(supervisor_fleet, native_worker).start();
+    let worker_service = Arc::new(WorkerFleetService::new(supervisor_fleet, native_worker));
+    let _supervisor = (*worker_service).clone().start();
     let fleet = SqliteWorkerFleet::new(host.store().pool().clone());
     let fleet = match auth.api_token.clone() {
         Some(token) => Arc::new(fleet.with_auth_proof(token)),
         None => Arc::new(fleet),
     };
-    let app =
-        build_router_with_worker_fleet(Arc::new(host), auth, MediaConfig::new(media_dir), fleet);
+    let app = build_router_with_worker_fleet(
+        Arc::new(host),
+        auth.clone(),
+        MediaConfig::new(media_dir),
+        fleet,
+    );
+    if let Some(token) = auth.api_token {
+        let app = app.merge(recovery_router(worker_service, token));
+        axum::serve(listener, app).await?;
+        return Ok(());
+    }
     axum::serve(listener, app).await?;
     Ok(())
 }

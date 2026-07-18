@@ -34,6 +34,7 @@ agentd-tmux = { path = "../agentd-tmux" }
 async-trait = "0.1"
 sha2 = "0.10"
 serde_json = { workspace = true }
+serde = { workspace = true }
 clap = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
