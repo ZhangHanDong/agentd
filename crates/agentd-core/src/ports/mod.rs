@@ -44,6 +44,6 @@ pub use task_lease::{
 };
 pub use worker_fleet::{
     WorkerFleetDrainRequest, WorkerFleetError, WorkerFleetHeartbeat, WorkerFleetHeartbeatResult,
-    WorkerFleetPort, WorkerFleetRegisterRequest, WorkerFleetRegistration,
+    WorkerFleetPort, WorkerFleetPullRequest, WorkerFleetRegisterRequest, WorkerFleetRegistration,
 };
 pub use worktree_allocator::WorktreeAllocator;

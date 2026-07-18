@@ -3,8 +3,8 @@
 use agentd_core::ports::{
     TaskLeaseCloseRequest, TaskLeaseDispatchRequest, TaskLeaseError, TaskLeasePort,
     TaskLeaseRenewRequest, WorkerFleetDrainRequest, WorkerFleetError, WorkerFleetHeartbeat,
-    WorkerFleetHeartbeatResult, WorkerFleetPort, WorkerFleetRegisterRequest,
-    WorkerFleetRegistration,
+    WorkerFleetHeartbeatResult, WorkerFleetPort, WorkerFleetPullRequest,
+    WorkerFleetRegisterRequest, WorkerFleetRegistration,
 };
 use agentd_core::types::{TaskLeaseGrant, WorkerStatus};
 use sqlx::SqlitePool;
@@ -119,6 +119,44 @@ impl WorkerFleetPort for SqliteWorkerFleet {
         worker_repo::mark_stale_workers_offline(&self.pool, heartbeat_cutoff)
             .await
             .map_err(storage_error)
+    }
+
+    async fn pull(
+        &self,
+        request: &WorkerFleetPullRequest,
+    ) -> Result<Option<TaskLeaseGrant>, WorkerFleetError> {
+        let worker = worker_repo::get_incarnation(&self.pool, &request.worker_incarnation_id)
+            .await
+            .map_err(storage_error)?
+            .ok_or_else(|| WorkerFleetError::NotFound(request.worker_incarnation_id.to_string()))?;
+        if !worker.is_current {
+            return Err(WorkerFleetError::Conflict(
+                "stale worker incarnation".to_string(),
+            ));
+        }
+        let task_id = sqlx::query_scalar::<_, String>(
+            "SELECT t.id FROM task_runs t \
+             WHERE t.finished_at IS NULL AND t.status = 'running' \
+             AND NOT EXISTS (SELECT 1 FROM execution_task_leases l \
+                 WHERE l.execution_task_id = t.id AND l.status = 'active') \
+             ORDER BY t.started_at ASC, t.id ASC LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| WorkerFleetError::Unavailable(error.to_string()))?;
+        let Some(task_id) = task_id else {
+            return Ok(None);
+        };
+        let grant = self
+            .dispatch(&TaskLeaseDispatchRequest {
+                execution_task_id: agentd_core::types::TaskRunId::from_string(task_id),
+                worker_incarnation_id: request.worker_incarnation_id.clone(),
+                observed_at: request.observed_at,
+                expires_at: request.expires_at,
+            })
+            .await
+            .map_err(|error| WorkerFleetError::Conflict(error.to_string()))?;
+        Ok(Some(grant))
     }
 }
 

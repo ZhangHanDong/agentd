@@ -1,11 +1,12 @@
 use agentd_core::ports::{
     WorkerFleetDrainRequest, WorkerFleetHeartbeat, WorkerFleetHeartbeatResult, WorkerFleetPort,
-    WorkerFleetRegisterRequest,
+    WorkerFleetPullRequest, WorkerFleetRegisterRequest,
 };
-use agentd_core::types::{WorkerId, WorkerIncarnationId, WorkerStatus};
+use agentd_core::types::{NodeId, RunId, WorkerId, WorkerIncarnationId, WorkerStatus};
 use agentd_store::SqliteStore;
 use agentd_store::worker_fleet::SqliteWorkerFleet;
 use agentd_store::worker_repo;
+use agentd_store::{run_repo, task_repo};
 use serde_json::json;
 
 #[tokio::test]
@@ -152,4 +153,45 @@ async fn worker_fleet_recovers_workers_missing_heartbeats_to_offline() {
             .status,
         WorkerStatus::Offline
     );
+}
+
+#[tokio::test]
+async fn worker_fleet_pull_selects_oldest_unleased_open_task() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteStore::connect(&dir.path().join("agentd.db"))
+        .await
+        .expect("store");
+    let fleet = SqliteWorkerFleet::new(store.pool().clone());
+    let run_id = RunId::new();
+    run_repo::insert_run(store.pool(), &run_id, "workflow-sha")
+        .await
+        .expect("run");
+    let task_id = task_repo::insert_task_run(store.pool(), &run_id, &NodeId::parsed("impl"))
+        .await
+        .expect("task");
+    let worker_id = WorkerId::new();
+    let incarnation_id = WorkerIncarnationId::new();
+    fleet
+        .register(&WorkerFleetRegisterRequest {
+            worker_id,
+            trust_domain: "local".into(),
+            labels: json!({}),
+            incarnation_id: incarnation_id.clone(),
+            daemon_version: "test".into(),
+            host_name: "host".into(),
+            network_zone: None,
+            capabilities: json!({}),
+        })
+        .await
+        .expect("register");
+    let grant = fleet
+        .pull(&WorkerFleetPullRequest {
+            worker_incarnation_id: incarnation_id,
+            observed_at: 10,
+            expires_at: 20,
+        })
+        .await
+        .expect("pull")
+        .expect("queued task");
+    assert_eq!(grant.execution_task_id, task_id);
 }

@@ -5,7 +5,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::ports::task_lease::TaskLeasePort;
-use crate::types::{WorkerId, WorkerIncarnationId};
+use crate::types::{TaskLeaseGrant, WorkerId, WorkerIncarnationId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerFleetRegisterRequest {
@@ -37,6 +37,13 @@ pub struct WorkerFleetDrainRequest {
     pub worker_id: WorkerId,
     pub incarnation_id: WorkerIncarnationId,
     pub drain: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerFleetPullRequest {
+    pub worker_incarnation_id: WorkerIncarnationId,
+    pub observed_at: i64,
+    pub expires_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,4 +79,9 @@ pub trait WorkerFleetPort: TaskLeasePort + Send + Sync {
     async fn set_drain(&self, request: &WorkerFleetDrainRequest) -> Result<(), WorkerFleetError>;
 
     async fn recover_offline(&self, heartbeat_cutoff: i64) -> Result<u64, WorkerFleetError>;
+
+    async fn pull(
+        &self,
+        request: &WorkerFleetPullRequest,
+    ) -> Result<Option<TaskLeaseGrant>, WorkerFleetError>;
 }
