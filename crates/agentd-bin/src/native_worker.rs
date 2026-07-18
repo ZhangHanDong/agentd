@@ -11,7 +11,7 @@ use agentd_core::types::{RuntimeAttemptId, RuntimeSessionId, WorkerIncarnationId
 use agentd_store::runtime_session_repo::{self, RuntimeAttemptCreate};
 use agentd_store::{SqliteStore, StoreError};
 use agentd_tmux::native::{
-    NativeProcessConfig, NativeProcessEvent, NativeRuntime, NativeRuntimeError,
+    NativeProcessConfig, NativeProcessEvent, NativeRuntime, NativeRuntimeError, NativeSpoolRecord,
 };
 use thiserror::Error;
 
@@ -176,7 +176,10 @@ impl AgentdWorkerHandle {
     }
 
     /// Persist the bounded PTY output for a later artifact publish/ack.
-    pub fn spool_output(&self, path: impl AsRef<Path>) -> Result<(), NativeWorkerError> {
+    pub fn spool_output(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<NativeSpoolRecord, NativeWorkerError> {
         self.runtime
             .spool_output(path)
             .map_err(NativeWorkerError::Native)

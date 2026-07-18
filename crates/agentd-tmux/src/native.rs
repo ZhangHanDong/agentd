@@ -12,6 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use portable_pty::{Child, CommandBuilder, PtySize, native_pty_system};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -48,6 +49,13 @@ pub enum NativeProcessStatus {
 pub enum NativeProcessEvent {
     Exited { code: Option<i32>, output: Vec<u8> },
     Gone { reason: String, output: Vec<u8> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeSpoolRecord {
+    pub storage_ref: String,
+    pub content_sha256: String,
+    pub size_bytes: u64,
 }
 
 #[derive(Debug, Error)]
@@ -233,7 +241,10 @@ impl NativeRuntime {
     }
 
     /// Spool the bounded output snapshot atomically for a later artifact upload.
-    pub fn spool_output(&self, path: impl AsRef<Path>) -> Result<(), NativeRuntimeError> {
+    pub fn spool_output(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<NativeSpoolRecord, NativeRuntimeError> {
         let path = path.as_ref();
         let parent = path
             .parent()
@@ -241,9 +252,16 @@ impl NativeRuntime {
         std::fs::create_dir_all(parent)
             .map_err(|error| NativeRuntimeError::Pty(error.to_string()))?;
         let temp = path.with_extension("part");
-        std::fs::write(&temp, self.output())
+        let output = self.output();
+        let content_sha256 = format!("{:x}", Sha256::digest(&output));
+        std::fs::write(&temp, &output)
             .map_err(|error| NativeRuntimeError::Pty(error.to_string()))?;
-        std::fs::rename(&temp, path).map_err(|error| NativeRuntimeError::Pty(error.to_string()))
+        std::fs::rename(&temp, path).map_err(|error| NativeRuntimeError::Pty(error.to_string()))?;
+        Ok(NativeSpoolRecord {
+            storage_ref: path.to_string_lossy().into_owned(),
+            content_sha256,
+            size_bytes: output.len() as u64,
+        })
     }
 
     #[must_use]
