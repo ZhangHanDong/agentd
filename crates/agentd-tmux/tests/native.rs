@@ -78,3 +78,19 @@ fn native_runtime_can_terminate_a_running_child() {
     let event = runtime.wait(Duration::from_secs(2)).expect("wait");
     assert!(matches!(event, NativeProcessEvent::Exited { .. }));
 }
+
+#[test]
+fn native_runtime_spools_output_atomically() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("artifacts/runtime.log");
+    let runtime = NativeRuntime::spawn(NativeProcessConfig {
+        program: "sh".into(),
+        args: vec!["-c".into(), "printf spool".into()],
+        ..NativeProcessConfig::default()
+    })
+    .expect("spawn");
+    runtime.wait(Duration::from_secs(2)).expect("wait");
+    runtime.spool_output(&path).expect("spool");
+    assert!(!std::fs::read(&path).expect("read spool").is_empty());
+    assert!(!path.with_extension("part").exists());
+}

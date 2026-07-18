@@ -6,6 +6,7 @@
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};
+use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -229,6 +230,20 @@ impl NativeRuntime {
             .lock()
             .map(|state| state.output.iter().copied().collect())
             .unwrap_or_default()
+    }
+
+    /// Spool the bounded output snapshot atomically for a later artifact upload.
+    pub fn spool_output(&self, path: impl AsRef<Path>) -> Result<(), NativeRuntimeError> {
+        let path = path.as_ref();
+        let parent = path
+            .parent()
+            .ok_or_else(|| NativeRuntimeError::Pty("spool path has no parent".to_string()))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|error| NativeRuntimeError::Pty(error.to_string()))?;
+        let temp = path.with_extension("part");
+        std::fs::write(&temp, self.output())
+            .map_err(|error| NativeRuntimeError::Pty(error.to_string()))?;
+        std::fs::rename(&temp, path).map_err(|error| NativeRuntimeError::Pty(error.to_string()))
     }
 
     #[must_use]
