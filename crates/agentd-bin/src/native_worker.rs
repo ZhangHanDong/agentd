@@ -7,7 +7,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agentd_core::types::{RuntimeAttemptId, RuntimeSessionId, WorkerIncarnationId};
+use agentd_core::ports::{ExecutionArtifactKind, ExecutionArtifactPublish, ExecutionEvidenceLinks};
+use agentd_core::types::{
+    ExecutionArtifactId, RuntimeAttemptId, RuntimeSessionId, WorkerIncarnationId,
+};
 use agentd_store::runtime_session_repo::{self, RuntimeAttemptCreate};
 use agentd_store::{SqliteStore, StoreError};
 use agentd_tmux::native::{
@@ -183,6 +186,28 @@ impl AgentdWorkerHandle {
         self.runtime
             .spool_output(path)
             .map_err(NativeWorkerError::Native)
+    }
+
+    /// Construct the immutable artifact envelope for a previously spooled log.
+    pub fn spooled_artifact(
+        &self,
+        record: NativeSpoolRecord,
+        id: ExecutionArtifactId,
+        kind: ExecutionArtifactKind,
+        media_type: String,
+        provenance: serde_json::Value,
+        links: ExecutionEvidenceLinks,
+    ) -> ExecutionArtifactPublish {
+        ExecutionArtifactPublish {
+            id,
+            kind,
+            content_sha256: record.content_sha256,
+            size_bytes: record.size_bytes,
+            media_type,
+            storage_ref: record.storage_ref,
+            provenance,
+            links,
+        }
     }
 
     /// Terminate the process and reconcile its durable attempt in one operation.
