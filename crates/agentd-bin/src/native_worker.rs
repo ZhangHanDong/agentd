@@ -33,6 +33,8 @@ pub enum NativeWorkerError {
     Join(String),
     #[error("artifact acknowledgement failed: {0}")]
     Evidence(String),
+    #[error("invalid native recovery request: {0}")]
+    InvalidRecovery(String),
 }
 
 impl From<ExecutionEvidenceError> for NativeWorkerError {
@@ -64,7 +66,12 @@ impl NativeRecoveryRegistry {
         Self::default()
     }
 
-    pub fn register(&self, request: NativeRecoveryRequest) {
+    pub fn register(&self, request: NativeRecoveryRequest) -> Result<(), NativeWorkerError> {
+        if request.config.program.trim().is_empty() {
+            return Err(NativeWorkerError::InvalidRecovery(
+                "provider program is required".into(),
+            ));
+        }
         if let Ok(mut requests) = self.requests.lock() {
             if let Some(existing) = requests
                 .iter_mut()
@@ -74,7 +81,11 @@ impl NativeRecoveryRegistry {
             } else {
                 requests.push(request);
             }
+            return Ok(());
         }
+        Err(NativeWorkerError::Join(
+            "recovery registry lock poisoned".into(),
+        ))
     }
 
     pub async fn recover_one(

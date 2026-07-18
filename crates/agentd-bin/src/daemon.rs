@@ -108,8 +108,11 @@ impl WorkerFleetService {
         }
     }
 
-    pub fn register_recovery(&self, request: crate::native_worker::NativeRecoveryRequest) {
-        self.recovery_registry.register(request);
+    pub fn register_recovery(
+        &self,
+        request: crate::native_worker::NativeRecoveryRequest,
+    ) -> Result<(), crate::native_worker::NativeWorkerError> {
+        self.recovery_registry.register(request)
     }
 
     pub fn start(self) -> tokio::task::JoinHandle<()> {
