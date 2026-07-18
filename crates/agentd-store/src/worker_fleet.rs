@@ -16,12 +16,33 @@ use crate::worker_repo::{self, WorkerCreate, WorkerHeartbeatOutcome, WorkerRegis
 #[derive(Debug, Clone)]
 pub struct SqliteWorkerFleet {
     pool: SqlitePool,
+    expected_auth_proof: Option<String>,
 }
 
 impl SqliteWorkerFleet {
     #[must_use]
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            expected_auth_proof: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_auth_proof(mut self, auth_proof: impl Into<String>) -> Self {
+        self.expected_auth_proof = Some(auth_proof.into());
+        self
+    }
+
+    fn authorize(&self, proof: &str) -> Result<(), WorkerFleetError> {
+        if let Some(expected) = &self.expected_auth_proof {
+            if proof != expected {
+                return Err(WorkerFleetError::Unavailable(
+                    "worker authentication failed".to_string(),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -31,6 +52,7 @@ impl WorkerFleetPort for SqliteWorkerFleet {
         &self,
         request: &WorkerFleetRegisterRequest,
     ) -> Result<WorkerFleetRegistration, WorkerFleetError> {
+        self.authorize(&request.auth_proof)?;
         if request.trust_domain.trim().is_empty()
             || request.daemon_version.trim().is_empty()
             || request.host_name.trim().is_empty()
@@ -79,6 +101,7 @@ impl WorkerFleetPort for SqliteWorkerFleet {
         &self,
         request: &WorkerFleetHeartbeat,
     ) -> Result<WorkerFleetHeartbeatResult, WorkerFleetError> {
+        self.authorize(&request.auth_proof)?;
         match worker_repo::heartbeat_incarnation(
             &self.pool,
             &request.worker_id,
@@ -95,6 +118,7 @@ impl WorkerFleetPort for SqliteWorkerFleet {
     }
 
     async fn set_drain(&self, request: &WorkerFleetDrainRequest) -> Result<(), WorkerFleetError> {
+        self.authorize(&request.auth_proof)?;
         let incarnation = worker_repo::get_incarnation(&self.pool, &request.incarnation_id)
             .await
             .map_err(storage_error)?
@@ -125,6 +149,7 @@ impl WorkerFleetPort for SqliteWorkerFleet {
         &self,
         request: &WorkerFleetPullRequest,
     ) -> Result<Option<TaskLeaseGrant>, WorkerFleetError> {
+        self.authorize(&request.auth_proof)?;
         let worker = worker_repo::get_incarnation(&self.pool, &request.worker_incarnation_id)
             .await
             .map_err(storage_error)?

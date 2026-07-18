@@ -9,6 +9,7 @@ use crate::types::{TaskLeaseGrant, WorkerId, WorkerIncarnationId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerFleetRegisterRequest {
+    pub auth_proof: String,
     pub worker_id: WorkerId,
     pub trust_domain: String,
     pub labels: Value,
@@ -28,12 +29,14 @@ pub struct WorkerFleetRegistration {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerFleetHeartbeat {
+    pub auth_proof: String,
     pub worker_id: WorkerId,
     pub incarnation_id: WorkerIncarnationId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerFleetDrainRequest {
+    pub auth_proof: String,
     pub worker_id: WorkerId,
     pub incarnation_id: WorkerIncarnationId,
     pub drain: bool,
@@ -41,6 +44,7 @@ pub struct WorkerFleetDrainRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerFleetPullRequest {
+    pub auth_proof: String,
     pub worker_incarnation_id: WorkerIncarnationId,
     pub observed_at: i64,
     pub expires_at: i64,

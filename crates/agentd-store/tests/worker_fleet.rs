@@ -20,6 +20,7 @@ async fn worker_fleet_registers_and_rejects_stale_incarnation_heartbeats() {
     let first_incarnation = WorkerIncarnationId::new();
     fleet
         .register(&WorkerFleetRegisterRequest {
+            auth_proof: String::new(),
             worker_id: worker_id.clone(),
             trust_domain: "corp".into(),
             labels: json!({"region": "cn-east"}),
@@ -34,6 +35,7 @@ async fn worker_fleet_registers_and_rejects_stale_incarnation_heartbeats() {
     assert!(matches!(
         fleet
             .heartbeat(&WorkerFleetHeartbeat {
+                auth_proof: String::new(),
                 worker_id: worker_id.clone(),
                 incarnation_id: first_incarnation.clone(),
             })
@@ -45,6 +47,7 @@ async fn worker_fleet_registers_and_rejects_stale_incarnation_heartbeats() {
     let second_incarnation = WorkerIncarnationId::new();
     fleet
         .register(&WorkerFleetRegisterRequest {
+            auth_proof: String::new(),
             worker_id: worker_id.clone(),
             trust_domain: "corp".into(),
             labels: json!({}),
@@ -59,6 +62,7 @@ async fn worker_fleet_registers_and_rejects_stale_incarnation_heartbeats() {
     assert_eq!(
         fleet
             .heartbeat(&WorkerFleetHeartbeat {
+                auth_proof: String::new(),
                 worker_id,
                 incarnation_id: first_incarnation,
             })
@@ -79,6 +83,7 @@ async fn worker_fleet_can_drain_and_resume_current_incarnation() {
     let incarnation_id = WorkerIncarnationId::new();
     fleet
         .register(&WorkerFleetRegisterRequest {
+            auth_proof: String::new(),
             worker_id: worker_id.clone(),
             trust_domain: "local".into(),
             labels: json!({}),
@@ -93,6 +98,7 @@ async fn worker_fleet_can_drain_and_resume_current_incarnation() {
 
     fleet
         .set_drain(&WorkerFleetDrainRequest {
+            auth_proof: String::new(),
             worker_id: worker_id.clone(),
             incarnation_id: incarnation_id.clone(),
             drain: true,
@@ -109,6 +115,7 @@ async fn worker_fleet_can_drain_and_resume_current_incarnation() {
     );
     fleet
         .set_drain(&WorkerFleetDrainRequest {
+            auth_proof: String::new(),
             worker_id,
             incarnation_id,
             drain: false,
@@ -128,6 +135,7 @@ async fn worker_fleet_recovers_workers_missing_heartbeats_to_offline() {
     let incarnation_id = WorkerIncarnationId::new();
     fleet
         .register(&WorkerFleetRegisterRequest {
+            auth_proof: String::new(),
             worker_id: worker_id.clone(),
             trust_domain: "local".into(),
             labels: json!({}),
@@ -173,6 +181,7 @@ async fn worker_fleet_pull_selects_oldest_unleased_open_task() {
     let incarnation_id = WorkerIncarnationId::new();
     fleet
         .register(&WorkerFleetRegisterRequest {
+            auth_proof: String::new(),
             worker_id,
             trust_domain: "local".into(),
             labels: json!({}),
@@ -186,6 +195,7 @@ async fn worker_fleet_pull_selects_oldest_unleased_open_task() {
         .expect("register");
     let grant = fleet
         .pull(&WorkerFleetPullRequest {
+            auth_proof: String::new(),
             worker_incarnation_id: incarnation_id,
             observed_at: 10,
             expires_at: 20,
@@ -194,4 +204,28 @@ async fn worker_fleet_pull_selects_oldest_unleased_open_task() {
         .expect("pull")
         .expect("queued task");
     assert_eq!(grant.execution_task_id, task_id);
+}
+
+#[tokio::test]
+async fn worker_fleet_rejects_invalid_auth_proof() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteStore::connect(&dir.path().join("agentd.db"))
+        .await
+        .expect("store");
+    let fleet = SqliteWorkerFleet::new(store.pool().clone()).with_auth_proof("fleet-secret");
+    let error = fleet
+        .register(&WorkerFleetRegisterRequest {
+            auth_proof: "wrong".into(),
+            worker_id: WorkerId::new(),
+            trust_domain: "local".into(),
+            labels: json!({}),
+            incarnation_id: WorkerIncarnationId::new(),
+            daemon_version: "test".into(),
+            host_name: "host".into(),
+            network_zone: None,
+            capabilities: json!({}),
+        })
+        .await
+        .expect_err("invalid proof");
+    assert!(error.to_string().contains("authentication failed"));
 }
