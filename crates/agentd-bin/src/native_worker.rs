@@ -29,6 +29,19 @@ pub struct AgentdWorker {
     store: SqliteStore,
 }
 
+/// Build the provider-native Codex resume invocation from a persisted thread id.
+pub fn codex_resume_config(
+    mut config: NativeProcessConfig,
+    thread_ref: String,
+) -> NativeProcessConfig {
+    config.args = ["exec".to_string(), "resume".to_string(), thread_ref]
+        .into_iter()
+        .chain(config.args)
+        .collect();
+    config.native_session_ref = config.args.get(2).cloned();
+    config
+}
+
 #[derive(Debug)]
 pub struct AgentdWorkerHandle {
     store: SqliteStore,
@@ -129,6 +142,11 @@ impl AgentdWorker {
                 runtime_session_repo::latest_attempt(self.store.pool(), &session_id)
                     .await?
                     .and_then(|attempt| attempt.native_session_ref);
+        }
+        if config.program.rsplit('/').next() == Some("codex") {
+            if let Some(thread_ref) = config.native_session_ref.clone() {
+                config = codex_resume_config(config, thread_ref);
+            }
         }
         self.start(session_id, worker_incarnation_id, config).await
     }

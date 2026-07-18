@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use agentd_bin::native_worker::AgentdWorker;
+use agentd_bin::native_worker::{AgentdWorker, codex_resume_config};
 use agentd_core::types::{
     AgentProfileId, NodeId, RunId, RuntimeSessionId, RuntimeSessionStatus, WorkerId,
     WorkerIncarnationId,
@@ -10,6 +10,13 @@ use agentd_store::runtime_session_repo::{self, ExecutionSnapshotRef, RuntimeSess
 use agentd_store::worker_repo::{self, WorkerCreate, WorkerRegistration};
 use agentd_store::{SqliteStore, run_repo, task_repo};
 use agentd_tmux::native::NativeProcessConfig;
+
+#[test]
+fn codex_resume_config_uses_persisted_thread_reference() {
+    let config = codex_resume_config(NativeProcessConfig::default(), "thread-42".into());
+    assert_eq!(config.args, ["exec", "resume", "thread-42"]);
+    assert_eq!(config.native_session_ref.as_deref(), Some("thread-42"));
+}
 use serde_json::json;
 
 #[tokio::test]
