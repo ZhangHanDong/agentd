@@ -114,6 +114,12 @@ impl WorkerFleetPort for SqliteWorkerFleet {
             .map(|_| ())
             .map_err(storage_error)
     }
+
+    async fn recover_offline(&self, heartbeat_cutoff: i64) -> Result<u64, WorkerFleetError> {
+        worker_repo::mark_stale_workers_offline(&self.pool, heartbeat_cutoff)
+            .await
+            .map_err(storage_error)
+    }
 }
 
 #[async_trait::async_trait]

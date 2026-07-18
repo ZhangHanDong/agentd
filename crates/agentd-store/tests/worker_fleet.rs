@@ -115,3 +115,41 @@ async fn worker_fleet_can_drain_and_resume_current_incarnation() {
         .await
         .expect("resume");
 }
+
+#[tokio::test]
+async fn worker_fleet_recovers_workers_missing_heartbeats_to_offline() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteStore::connect(&dir.path().join("agentd.db"))
+        .await
+        .expect("store");
+    let fleet = SqliteWorkerFleet::new(store.pool().clone());
+    let worker_id = WorkerId::new();
+    let incarnation_id = WorkerIncarnationId::new();
+    fleet
+        .register(&WorkerFleetRegisterRequest {
+            worker_id: worker_id.clone(),
+            trust_domain: "local".into(),
+            labels: json!({}),
+            incarnation_id,
+            daemon_version: "test".into(),
+            host_name: "host".into(),
+            network_zone: None,
+            capabilities: json!({}),
+        })
+        .await
+        .expect("register");
+    sqlx::query("UPDATE worker_incarnations SET last_seen_at = 1 WHERE worker_id = ?")
+        .bind(worker_id.as_str())
+        .execute(store.pool())
+        .await
+        .expect("age heartbeat");
+    assert_eq!(fleet.recover_offline(2).await.expect("recover"), 1);
+    assert_eq!(
+        worker_repo::get_worker(store.pool(), &worker_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        WorkerStatus::Offline
+    );
+}

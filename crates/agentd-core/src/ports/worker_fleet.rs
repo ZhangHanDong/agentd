@@ -70,4 +70,6 @@ pub trait WorkerFleetPort: TaskLeasePort + Send + Sync {
     ) -> Result<WorkerFleetHeartbeatResult, WorkerFleetError>;
 
     async fn set_drain(&self, request: &WorkerFleetDrainRequest) -> Result<(), WorkerFleetError>;
+
+    async fn recover_offline(&self, heartbeat_cutoff: i64) -> Result<u64, WorkerFleetError>;
 }

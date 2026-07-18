@@ -318,6 +318,29 @@ pub async fn transition_worker_status(
     get_worker(pool, id).await?.ok_or(StoreError::NotFound)
 }
 
+/// Fence workers whose current incarnation has missed its heartbeat deadline.
+pub async fn mark_stale_workers_offline(pool: &SqlitePool, cutoff: i64) -> Result<u64, StoreError> {
+    let rows = sqlx::query(
+        "SELECT w.id FROM workers w JOIN worker_incarnations i ON i.worker_id = w.id \
+         WHERE i.is_current = 1 AND i.last_seen_at < ? \
+         AND w.status IN ('online', 'draining')",
+    )
+    .bind(cutoff)
+    .fetch_all(pool)
+    .await?;
+    let mut changed = 0;
+    for row in rows {
+        let id = WorkerId::from_string(row.get::<String, _>("id"));
+        if transition_worker_status(pool, &id, WorkerStatus::Offline)
+            .await
+            .is_ok()
+        {
+            changed += 1;
+        }
+    }
+    Ok(changed)
+}
+
 fn row_to_worker(row: &sqlx::sqlite::SqliteRow) -> Result<WorkerRecord, StoreError> {
     let status_text: String = row.get("status");
     let labels_json: String = row.get("labels_json");
