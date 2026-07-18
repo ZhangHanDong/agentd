@@ -8,9 +8,11 @@ use std::sync::Arc;
 use agentd_core::CoreError;
 use agentd_core::ports::{AgentAllocation, AgentBackend, WorktreeAllocator};
 use agentd_core::types::{AgentHandle, SpawnRequest};
+use agentd_store::worker_fleet::SqliteWorkerFleet;
 use agentd_store::{FailedWorktreeCleanupCandidate, SqliteStore};
 use agentd_surface::host::RunHost;
 use agentd_surface::http::{AppState, AuthConfig, MediaConfig, SchedulerConfig, router};
+use agentd_surface::worker_fleet_http::worker_fleet_router;
 use agentd_tmux::{
     Config, GitWorktreeProvider, ShutdownMethod, ShutdownOpts, TmuxBackend, TokioCommandRunner,
     WorktreePool,
@@ -55,6 +57,16 @@ pub fn build_router_with_auth_and_media(
         media,
         scheduler: SchedulerConfig::default(),
     })
+}
+
+/// Build the daemon surface with the worker-fleet transport mounted.
+pub fn build_router_with_worker_fleet(
+    host: Arc<dyn RunHost>,
+    auth: AuthConfig,
+    media: MediaConfig,
+    fleet: Arc<dyn agentd_core::ports::WorkerFleetPort>,
+) -> Router {
+    build_router_with_auth_and_media(host, auth, media).merge(worker_fleet_router(fleet))
 }
 
 /// Production media root colocated with the daemon database.
@@ -265,11 +277,14 @@ pub async fn serve(config: DaemonConfig) -> Result<(), Box<dyn std::error::Error
         );
     }
     let media_dir = media_dir_for_db(&config.db_path);
-    let app = build_router_with_auth_and_media(
-        Arc::new(host),
-        config.auth_config(),
-        MediaConfig::new(media_dir),
-    );
+    let auth = config.auth_config();
+    let fleet = SqliteWorkerFleet::new(host.store().pool().clone());
+    let fleet = match auth.api_token.clone() {
+        Some(token) => Arc::new(fleet.with_auth_proof(token)),
+        None => Arc::new(fleet),
+    };
+    let app =
+        build_router_with_worker_fleet(Arc::new(host), auth, MediaConfig::new(media_dir), fleet);
     axum::serve(listener, app).await?;
     Ok(())
 }
