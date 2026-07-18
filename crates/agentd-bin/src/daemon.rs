@@ -83,31 +83,49 @@ pub async fn worker_fleet_tick(
     let _ = recovery_registry.recover_one(native_worker).await;
 }
 
+#[derive(Clone)]
+pub struct WorkerFleetService {
+    fleet: Arc<dyn WorkerFleetPort>,
+    recovery_registry: Arc<NativeRecoveryRegistry>,
+    native_worker: AgentdWorker,
+}
+
+impl WorkerFleetService {
+    #[must_use]
+    pub fn new(fleet: Arc<dyn WorkerFleetPort>, native_worker: AgentdWorker) -> Self {
+        Self {
+            fleet,
+            recovery_registry: Arc::new(NativeRecoveryRegistry::new()),
+            native_worker,
+        }
+    }
+
+    pub fn register_recovery(&self, request: crate::native_worker::NativeRecoveryRequest) {
+        self.recovery_registry.register(request);
+    }
+
+    pub fn start(self) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                worker_fleet_tick(
+                    self.fleet.as_ref(),
+                    self.recovery_registry.as_ref(),
+                    &self.native_worker,
+                    unix_now(),
+                )
+                .await;
+            }
+        })
+    }
+}
+
 fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
-}
-
-fn spawn_worker_fleet_supervisor(
-    fleet: Arc<dyn WorkerFleetPort>,
-    recovery_registry: Arc<NativeRecoveryRegistry>,
-    native_worker: AgentdWorker,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(5));
-        loop {
-            interval.tick().await;
-            worker_fleet_tick(
-                fleet.as_ref(),
-                recovery_registry.as_ref(),
-                &native_worker,
-                unix_now(),
-            )
-            .await;
-        }
-    })
 }
 
 /// Production media root colocated with the daemon database.
@@ -320,10 +338,8 @@ pub async fn serve(config: DaemonConfig) -> Result<(), Box<dyn std::error::Error
     let media_dir = media_dir_for_db(&config.db_path);
     let auth = config.auth_config();
     let supervisor_fleet = Arc::new(SqliteWorkerFleet::new(host.store().pool().clone()));
-    let recovery_registry = Arc::new(NativeRecoveryRegistry::new());
     let native_worker = AgentdWorker::new(host.store().clone());
-    let _supervisor =
-        spawn_worker_fleet_supervisor(supervisor_fleet, recovery_registry, native_worker);
+    let _supervisor = WorkerFleetService::new(supervisor_fleet, native_worker).start();
     let fleet = SqliteWorkerFleet::new(host.store().pool().clone());
     let fleet = match auth.api_token.clone() {
         Some(token) => Arc::new(fleet.with_auth_proof(token)),
