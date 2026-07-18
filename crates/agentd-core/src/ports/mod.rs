@@ -12,6 +12,7 @@ pub mod mempal;
 pub mod project_authority;
 pub mod store;
 pub mod task_lease;
+pub mod worker_fleet;
 pub mod worktree_allocator;
 
 pub use agent_allocator::{
@@ -40,5 +41,9 @@ pub use store::{RunStatus, Store};
 pub use task_lease::{
     TaskLeaseCloseRequest, TaskLeaseDispatchRequest, TaskLeaseError, TaskLeasePort,
     TaskLeaseRejectionReason, TaskLeaseRenewRequest,
+};
+pub use worker_fleet::{
+    WorkerFleetError, WorkerFleetHeartbeat, WorkerFleetHeartbeatResult, WorkerFleetPort,
+    WorkerFleetRegisterRequest, WorkerFleetRegistration,
 };
 pub use worktree_allocator::WorktreeAllocator;
