@@ -13,6 +13,7 @@ pub mod host;
 pub mod http;
 pub mod mcp_server;
 pub mod tools;
+pub mod worker_fleet_http;
 
 // In-crate seam fake. Gated so it never ships in a release binary; the crate's
 // own tests see it via the `test-support` dev-dependency.
