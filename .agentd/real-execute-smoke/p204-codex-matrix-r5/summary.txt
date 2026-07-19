@@ -1,0 +1,11 @@
+result: failed
+run_id: p204-codex-matrix-r5
+daemon_url: http://127.0.0.1:18789
+state_dir: /Users/zhangalex/Work/Projects/AI/agentd/.agentd/real-execute-smoke/p204-codex-matrix-r5
+spec_file: /Users/zhangalex/Work/Projects/AI/agentd/.agentd/run/frozen.spec.md
+frozen_spec: /Users/zhangalex/Work/Projects/AI/agentd/.agentd/real-execute-smoke/p204-codex-matrix-r5/frozen.spec.md
+plan: /Users/zhangalex/Work/Projects/AI/agentd/.agentd/real-execute-smoke/p204-codex-matrix-r5/plan.md
+run_snapshot: /Users/zhangalex/Work/Projects/AI/agentd/.agentd/real-execute-smoke/p204-codex-matrix-r5/run_snapshot.json
+events_snapshot: /Users/zhangalex/Work/Projects/AI/agentd/.agentd/real-execute-smoke/p204-codex-matrix-r5/events.snapshot
+daemon_log: /Users/zhangalex/Work/Projects/AI/agentd/.agentd/real-execute-smoke/p204-codex-matrix-r5/daemon.log
+agentctl_out: /Users/zhangalex/Work/Projects/AI/agentd/.agentd/real-execute-smoke/p204-codex-matrix-r5/agentctl.out

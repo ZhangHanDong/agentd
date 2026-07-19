@@ -1,0 +1,11 @@
+result: partial_execute_chain_verified_publish_ok_pr_blocked
+run_id: real-execute-smoke-20260707070439
+state_dir: .agentd/real-execute-smoke/real-execute-smoke-20260707070439
+real_agent_status: claude_started_but_monthly_spend_limit_blocked_implementation_and_review
+manual_steps: implemented frozen spec in allocated worktree; submitted implement outcome and three pass review verdicts through agentd MCP stdio
+workflow_status: failed_at_open_pr
+completed_nodes: start,pull_frozen_spec,draft_plan,implement,verify_lifecycle,review,aggregate,publish_branch
+published_branch: agentd/tr_01KWWTVEK1AC6C836SXSP7Y3Q3
+published_branch_sha: e02ba025d2919e9215e5c81d4cbf620eb891d977
+pr_blocker: GitHub rejected PR because remote origin/main has no common history with local main/published branch
+first_failed_run: real-execute-smoke-20260707070231 failed_before_park_due_relative_repo_dir_worktree_base_launcher_cd

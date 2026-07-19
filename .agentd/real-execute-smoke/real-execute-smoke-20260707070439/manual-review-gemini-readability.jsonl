@@ -1,0 +1,1 @@
+{"id":"manual-review-gemini-readability","jsonrpc":"2.0","result":{"content":[{"text":"{\"accepted\":true,\"fan_in_pending\":0}","type":"text"}],"isError":false,"structuredContent":{"accepted":true,"fan_in_pending":0}}}

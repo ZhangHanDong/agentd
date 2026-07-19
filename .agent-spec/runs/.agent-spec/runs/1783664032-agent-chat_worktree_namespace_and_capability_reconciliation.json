@@ -1,0 +1,10 @@
+{
+  "spec_name": "agent-chat worktree namespace and capability reconciliation",
+  "passing": true,
+  "summary": "6/6 passed, 0 failed, 0 skipped, 0 uncertain",
+  "timestamp": 1783664032,
+  "vcs": {
+    "vcs_type": "git",
+    "change_ref": "d2b9fff"
+  }
+}

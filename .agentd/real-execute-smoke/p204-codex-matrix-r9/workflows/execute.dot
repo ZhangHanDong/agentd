@@ -1,0 +1,46 @@
+// execute.dot — the standalone Path-B "execute" workflow (boundary Δ1): take a
+// FROZEN spec and walk it to a PR. Parks at `implement` (the implementer agent)
+// and at `review` (the 3 adversarial reviewers); the rest are `tool` shell-outs.
+// Human review + freeze happened upstream (between draft.dot and execute.dot).
+//
+// Conforms to the frozen agentd-core DOT grammar. Two goal_gate nodes guard the
+// terminal transition (design §2.7 D8a): `verify_lifecycle` (the spec-acceptance
+// gate) and `aggregate` (the adversarial-review majority). The gate is GLOBAL and
+// fires when a node routes to a terminal — so the node that routes to `done`
+// (`report_acceptance`) carries the recovery edge `[label="goal_gate_unmet"]`
+// back to a NON-terminal (`implement`) that can satisfy the gate on a re-run.
+// Without it the run would Stuck at the done transition (validate does NOT catch
+// this — see crates/agentctl/tests/workflows.rs goal_gate negative walk-test).
+//
+// cmd= strings are whitespace-split argv. `verify_lifecycle` receives the
+// implementer's allocated worktree through `${worktree}`; runtime-state paths
+// under `.agentd/run/` still resolve in the daemon cwd. `publish_branch` commits
+// and pushes `${worktree}` to `agentd/${task_run_id}` before `open_pr` runs the
+// PR helper for that branch. `gh` auth / GH_TOKEN still comes from the
+// operator's ambient environment (standalone, D6); Specify-provisioned token
+// injection is P0.9/P1.
+digraph execute {
+  "start"             [shape=Mdiamond];
+  "pull_frozen_spec"  [handler="tool", cmd="cat .agentd/run/frozen.spec.md", timeout_secs="30", context_updates="spec_path=.agentd/run/frozen.spec.md"];
+  "draft_plan"        [handler="tool", cmd="bash scripts/agentd_write_plan.sh .agentd/run/frozen.spec.md .agentd/run/plan.md", timeout_secs="120", context_updates="plan_path=.agentd/run/plan.md"];
+  "implement"         [handler="codergen", role="codex-impl", initial_prompt_includes="spec_path,plan_path"];
+  "verify_lifecycle"  [handler="tool", cmd="agent-spec lifecycle .agentd/run/frozen.spec.md --code ${worktree} --min-score 0.7 --format text", timeout_secs="300", goal_gate=true];
+  "review"            [handler="parallel.fan_out", reviewers="codex-sec,codex-perf,codex-readability", bundle="frozen", visibility="blind"];
+  "aggregate"         [handler="parallel.fan_in", aggregator="majority_pass", goal_gate=true];
+  "publish_branch"    [handler="tool", cmd="bash scripts/agentd_publish_worktree.sh ${worktree} ${task_run_id}", timeout_secs="300"];
+  "open_pr"           [handler="tool", cmd="bash scripts/agentd_open_pr.sh ${task_run_id}", timeout_secs="120"];
+  "report_acceptance" [handler="tool", cmd="cat .agentd/run/report.md", timeout_secs="30"];
+  "done"              [shape=Msquare];
+
+  "start"             -> "pull_frozen_spec";
+  "pull_frozen_spec"  -> "draft_plan";
+  "draft_plan"        -> "implement";
+  "implement"         -> "verify_lifecycle";
+  "verify_lifecycle"  -> "review";
+  "review"            -> "aggregate";
+  "aggregate"         -> "publish_branch"    [condition="outcome=success"];
+  "publish_branch"    -> "open_pr"           [condition="outcome=success"];
+  "open_pr"           -> "report_acceptance" [condition="outcome=success"];
+  "report_acceptance" -> "done"      [condition="outcome=success"];
+  "report_acceptance" -> "implement" [label="goal_gate_unmet"];
+}

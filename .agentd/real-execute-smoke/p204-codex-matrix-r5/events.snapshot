@@ -1,0 +1,12 @@
+id: 1
+event: run_parked
+data: {"node":"implement"}
+
+id: 2
+event: run_parked
+data: {"node":"review","round":1}
+
+id: 3
+event: run_failed
+data: {"reason":"no outgoing edge from 'aggregate' for status Fail"}
+

@@ -1,0 +1,10 @@
+{
+  "spec_name": "enterprise runtime worker identity contract",
+  "passing": true,
+  "summary": "9/9 passed, 0 failed, 0 skipped, 0 uncertain",
+  "timestamp": 1783664981,
+  "vcs": {
+    "vcs_type": "git",
+    "change_ref": "d2b9fff"
+  }
+}

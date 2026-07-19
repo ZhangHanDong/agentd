@@ -1,0 +1,10 @@
+{
+  "spec_name": "control plane dispatch lease and fencing API",
+  "passing": false,
+  "summary": "11/12 passed, 1 failed, 0 skipped, 0 uncertain",
+  "timestamp": 1783674160,
+  "vcs": {
+    "vcs_type": "git",
+    "change_ref": "d2b9fff"
+  }
+}

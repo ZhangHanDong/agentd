@@ -1,0 +1,4 @@
+id: 1
+event: run_failed
+data: {"reason":"backend error: recoverable: agent did not reach its main prompt within 15s"}
+

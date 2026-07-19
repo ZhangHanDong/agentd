@@ -1,0 +1,10 @@
+{
+  "spec_name": "agent-chat Matrix bridge backend contract baseline",
+  "passing": false,
+  "summary": "10/11 passed, 1 failed, 0 skipped, 0 uncertain",
+  "timestamp": 1783586234,
+  "vcs": {
+    "vcs_type": "git",
+    "change_ref": "d2b9fff"
+  }
+}

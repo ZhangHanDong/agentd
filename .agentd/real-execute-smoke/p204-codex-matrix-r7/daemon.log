@@ -1,0 +1,3 @@
+2026-07-08T21:22:34.065226Z  INFO agentd_bin::daemon: agentd daemon listening addr=127.0.0.1:18789
+2026-07-08T21:22:36.724432Z  INFO agentd_bin::daemon: in-flight runs awaiting events (resumable from checkpoint) parked=0
+2026-07-08T21:22:37.416669Z  INFO agentd_core::engine::execute: run started run_id=p204-codex-matrix-r7

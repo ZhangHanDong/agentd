@@ -1,31 +1,51 @@
 {
-  "spec_name": "Real Claude stdio smoke harness",
-  "timestamp": 1783377897,
-  "vcs_ref": "4229024",
+  "spec_name": "control plane dispatch lease and fencing API",
+  "timestamp": 1783674273,
+  "vcs_ref": "d2b9fff",
   "scenarios": {
+    "stale terminal and expired claims cannot authorize mutation": {
+      "verdict": "pass",
+      "vcs_ref": "d2b9fff"
+    },
+    "lease migration preserves enterprise and compatibility rows": {
+      "verdict": "pass",
+      "vcs_ref": "d2b9fff"
+    },
+    "migration creates constrained durable lease tables": {
+      "verdict": "pass",
+      "vcs_ref": "d2b9fff"
+    },
     "[boundaries] explicit change set respects declared paths": {
       "verdict": "pass",
-      "vcs_ref": "4229024"
+      "vcs_ref": "d2b9fff"
     },
-    "default dry-run prints the real smoke plan without side effects": {
+    "conflict expiry and reacquisition allocate new monotonic grants": {
       "verdict": "pass",
-      "vcs_ref": "4229024"
+      "vcs_ref": "d2b9fff"
     },
-    "preflight reports missing required tools": {
+    "concurrent dispatch exposes one active grant and unique token": {
       "verdict": "pass",
-      "vcs_ref": "4229024"
+      "vcs_ref": "d2b9fff"
     },
-    "preflight accepts fake local prerequisites without starting daemon": {
+    "worker reincarnation fences the old lease before redispatch": {
       "verdict": "pass",
-      "vcs_ref": "4229024"
+      "vcs_ref": "d2b9fff"
     },
-    "real execution plan writes named evidence artifacts": {
+    "roadmap and parity record P270 without claiming worker protocol cutover": {
       "verdict": "pass",
-      "vcs_ref": "4229024"
+      "vcs_ref": "d2b9fff"
     },
-    "execute mode requires explicit opt-in": {
+    "renew release and cancel require the exact current claim": {
       "verdict": "pass",
-      "vcs_ref": "4229024"
+      "vcs_ref": "d2b9fff"
+    },
+    "dispatch binds an unfinished task to the current online incarnation": {
+      "verdict": "pass",
+      "vcs_ref": "d2b9fff"
+    },
+    "task lease types and port preserve the P265 identity contract": {
+      "verdict": "pass",
+      "vcs_ref": "d2b9fff"
     }
   }
 }

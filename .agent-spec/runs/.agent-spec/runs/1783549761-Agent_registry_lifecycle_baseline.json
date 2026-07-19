@@ -1,0 +1,10 @@
+{
+  "spec_name": "Agent registry lifecycle baseline",
+  "passing": false,
+  "summary": "8/9 passed, 1 failed, 0 skipped, 0 uncertain",
+  "timestamp": 1783549761,
+  "vcs": {
+    "vcs_type": "git",
+    "change_ref": "d2b9fff"
+  }
+}
