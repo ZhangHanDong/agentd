@@ -6,7 +6,8 @@ use agentd_core::ports::{
     WorkerFleetHeartbeatResult, WorkerFleetPort, WorkerFleetPullRequest,
     WorkerFleetRegisterRequest, WorkerFleetRegistration,
 };
-use agentd_core::types::{TaskLeaseGrant, WorkerStatus};
+use agentd_core::types::{TaskLeaseGrant, TaskRunId, WorkerStatus};
+use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 
 use crate::task_lease_control_plane::SqliteTaskLeaseControlPlane;
@@ -16,7 +17,8 @@ use crate::worker_repo::{self, WorkerCreate, WorkerHeartbeatOutcome, WorkerRegis
 #[derive(Debug, Clone)]
 pub struct SqliteWorkerFleet {
     pool: SqlitePool,
-    expected_auth_proof: Option<String>,
+    expected_auth_proofs: Vec<String>,
+    auth_configured: bool,
 }
 
 impl SqliteWorkerFleet {
@@ -24,23 +26,48 @@ impl SqliteWorkerFleet {
     pub fn new(pool: SqlitePool) -> Self {
         Self {
             pool,
-            expected_auth_proof: None,
+            expected_auth_proofs: Vec::new(),
+            auth_configured: false,
         }
     }
 
     #[must_use]
     pub fn with_auth_proof(mut self, auth_proof: impl Into<String>) -> Self {
-        self.expected_auth_proof = Some(auth_proof.into());
+        self.expected_auth_proofs = vec![auth_proof.into()];
+        self.auth_configured = true;
+        self
+    }
+
+    /// Accept overlapping proofs during an operator-managed token rotation.
+    #[must_use]
+    pub fn with_auth_proofs<I, S>(mut self, auth_proofs: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.expected_auth_proofs = auth_proofs.into_iter().map(Into::into).collect();
+        self.auth_configured = true;
         self
     }
 
     fn authorize(&self, proof: &str) -> Result<(), WorkerFleetError> {
-        if let Some(expected) = &self.expected_auth_proof {
-            if proof != expected {
-                return Err(WorkerFleetError::Unavailable(
-                    "worker authentication failed".to_string(),
-                ));
-            }
+        let supplied_digest = Sha256::digest(proof.as_bytes());
+        let mut matched = 0_u8;
+        for expected in &self.expected_auth_proofs {
+            let expected_digest = Sha256::digest(expected.as_bytes());
+            let difference = supplied_digest
+                .iter()
+                .zip(expected_digest.iter())
+                .fold(0_u8, |acc, (supplied, expected)| {
+                    acc | (supplied ^ expected)
+                });
+            let non_zero = (difference | difference.wrapping_neg()) >> 7;
+            matched |= non_zero ^ 1;
+        }
+        if self.auth_configured && matched == 0 {
+            return Err(WorkerFleetError::Unavailable(
+                "worker authentication failed".to_string(),
+            ));
         }
         Ok(())
     }
@@ -159,6 +186,15 @@ impl WorkerFleetPort for SqliteWorkerFleet {
                 "stale worker incarnation".to_string(),
             ));
         }
+        let worker_record = worker_repo::get_worker(&self.pool, &worker.worker_id)
+            .await
+            .map_err(storage_error)?
+            .ok_or_else(|| WorkerFleetError::NotFound(worker.worker_id.to_string()))?;
+        if worker_record.status != WorkerStatus::Online {
+            return Err(WorkerFleetError::Conflict(
+                "worker is not accepting new leases".to_string(),
+            ));
+        }
         let task_id = sqlx::query_scalar::<_, String>(
             "SELECT t.id FROM task_runs t \
              WHERE t.finished_at IS NULL AND t.status = 'running' \
@@ -172,15 +208,43 @@ impl WorkerFleetPort for SqliteWorkerFleet {
         let Some(task_id) = task_id else {
             return Ok(None);
         };
+        let task_id = TaskRunId::from_string(task_id);
         let grant = self
             .dispatch(&TaskLeaseDispatchRequest {
-                execution_task_id: agentd_core::types::TaskRunId::from_string(task_id),
+                execution_task_id: task_id.clone(),
                 worker_incarnation_id: request.worker_incarnation_id.clone(),
                 observed_at: request.observed_at,
                 expires_at: request.expires_at,
             })
             .await
             .map_err(|error| WorkerFleetError::Conflict(error.to_string()))?;
+        let mut grant = grant;
+        if grant.execution_spec.is_some() {
+            let session =
+                crate::runtime_session_repo::latest_session_for_task(&self.pool, &task_id)
+                    .await
+                    .map_err(storage_error)?
+                    .ok_or_else(|| {
+                        WorkerFleetError::Conflict(
+                            "native task has no runtime session authority snapshot".into(),
+                        )
+                    })?;
+            let snapshot_ref = format!(
+                "{}:{}:{}:{}",
+                session.snapshot.authority_key,
+                session.snapshot.resource_kind,
+                session.snapshot.resource_id,
+                session.snapshot.resource_version
+            );
+            let snapshot = crate::project_authority_repo::get_snapshot(&self.pool, &snapshot_ref)
+                .await
+                .map_err(storage_error)?;
+            grant.security_scope = Some(crate::capability_repo::scope_for_snapshot(
+                &snapshot,
+                grant.claim(),
+            ));
+            grant.runtime_session_id = Some(session.id);
+        }
         Ok(Some(grant))
     }
 }

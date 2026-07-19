@@ -58,6 +58,7 @@ use agentd_surface::host::{
     MatrixBridgeRoomRecord as SurfaceMatrixBridgeRoomRecord,
     MatrixInboundMessageInput as SurfaceMatrixInboundMessageInput,
     MatrixInboundMessageResult as SurfaceMatrixInboundMessageResult,
+    MatrixOutboxCursorInput as SurfaceMatrixOutboxCursorInput,
     RelayServerHeartbeat as SurfaceRelayServerHeartbeat,
     RelayServerRecord as SurfaceRelayServerRecord,
     RelayStreamEventRecord as SurfaceRelayStreamEventRecord, RunHost, RunSnapshot, RunSummary,
@@ -1784,6 +1785,22 @@ impl RunHost for ProductionRunHost {
         Ok(events.into_iter().map(surface_relay_stream_event).collect())
     }
 
+    async fn acknowledge_matrix_outbox_cursor(
+        &self,
+        input: SurfaceMatrixOutboxCursorInput,
+    ) -> Result<i64, CoreError> {
+        Ok(matrix_bridge_repo::acknowledge_outbox_cursor(
+            self.store.pool(),
+            &input.bridge_id,
+            input.last_seq,
+        )
+        .await?)
+    }
+
+    async fn matrix_outbox_cursor(&self, bridge_id: &str) -> Result<i64, CoreError> {
+        Ok(matrix_bridge_repo::get_outbox_cursor(self.store.pool(), bridge_id).await?)
+    }
+
     async fn upsert_matrix_bridge_room(
         &self,
         input: SurfaceMatrixBridgeRoomInput,
@@ -1825,10 +1842,22 @@ impl RunHost for ProductionRunHost {
             }
         }
 
+        if let Some(project_id) = input.project_id.as_deref() {
+            if agentd_store::cutover_repo::get(self.store.pool(), project_id)
+                .await?
+                .is_none()
+            {
+                return Err(CoreError::Invariant(
+                    "matrix room project binding requires durable cutover state".into(),
+                ));
+            }
+        }
+
         let room = matrix_bridge_repo::upsert_room(
             self.store.pool(),
             matrix_bridge_repo::MatrixBridgeRoomInput {
                 room_id,
+                project_id: input.project_id,
                 group_name: group,
                 agent_name: agent,
                 trusted: input.trusted,
@@ -1852,6 +1881,36 @@ impl RunHost for ProductionRunHost {
         &self,
         input: SurfaceMatrixInboundMessageInput,
     ) -> Result<SurfaceMatrixInboundMessageResult, CoreError> {
+        let room = matrix_bridge_repo::get_room(self.store.pool(), &input.room_id)
+            .await?
+            .ok_or_else(|| CoreError::Invariant("matrix room mapping not found".into()))?;
+        if let Some(project_id) = room.project_id.as_deref() {
+            let state = agentd_store::cutover_repo::get(self.store.pool(), project_id)
+                .await?
+                .ok_or_else(|| {
+                    CoreError::Invariant("matrix project cutover state not found".into())
+                })?;
+            let phase_allows_ingress = matches!(
+                state.phase,
+                agentd_store::cutover_repo::CutoverPhase::Observe
+                    | agentd_store::cutover_repo::CutoverPhase::Shadow
+                    | agentd_store::cutover_repo::CutoverPhase::Canary
+                    | agentd_store::cutover_repo::CutoverPhase::Cutover
+            );
+            if !phase_allows_ingress {
+                return Err(CoreError::Invariant(
+                    "matrix project is not accepting ingress".into(),
+                ));
+            }
+            if input.project_id.as_deref() != Some(project_id)
+                || input.authority_revision.as_deref() != Some(state.authority_revision.as_str())
+                || input.lease_epoch != Some(state.lease_epoch)
+            {
+                return Err(CoreError::Invariant(
+                    "matrix project authority or lease fence mismatch".into(),
+                ));
+            }
+        }
         let event_id = clean_required(Some(&input.event_id), "matrix event id required")?;
         if let Some(existing) = matrix_bridge_repo::get_event(self.store.pool(), &event_id).await? {
             return Ok(SurfaceMatrixInboundMessageResult {
@@ -2559,6 +2618,7 @@ fn surface_matrix_bridge_room(
 ) -> SurfaceMatrixBridgeRoomRecord {
     SurfaceMatrixBridgeRoomRecord {
         room_id: record.room_id,
+        project_id: record.project_id,
         group: record.group_name,
         agent: record.agent_name,
         trusted: record.trusted,

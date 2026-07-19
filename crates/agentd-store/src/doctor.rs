@@ -22,6 +22,12 @@ pub struct OperationalDoctorReport {
     pub matrix_events: i64,
     pub projects: i64,
     pub queued_tasks: i64,
+    pub in_flight_runs: i64,
+    pub authority_snapshots: i64,
+    pub authority_snapshots_expired: i64,
+    pub active_leases_expired: i64,
+    pub tasks_missing_execution_spec: i64,
+    pub schema_version: i64,
     pub ready: bool,
 }
 
@@ -30,6 +36,29 @@ pub struct OperationalRemediationReport {
     pub observed_at: i64,
     pub workers_marked_offline: u64,
     pub leases_expired: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CutoverInventory {
+    pub captured_at: i64,
+    pub workers: WorkerInventory,
+    pub active_leases: i64,
+    pub runtime_running: i64,
+    pub runtime_resume_pending: i64,
+    pub matrix_rooms: i64,
+    pub matrix_events: i64,
+    pub artifacts: i64,
+    pub queued_tasks: i64,
+    pub in_flight_runs: i64,
+    pub ready_for_cutover: bool,
+    pub rollback_requires_new_lease_epoch: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerInventory {
+    pub online: i64,
+    pub draining: i64,
+    pub offline: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -91,7 +120,39 @@ impl OperationalDoctor {
             "SELECT COUNT(*) FROM task_runs WHERE status = 'queued' AND finished_at IS NULL",
         )
         .await?;
-        let ready = runtime_resume_pending == 0 && recovery_pending == 0;
+        let in_flight_runs = count(
+            &self.pool,
+            "SELECT COUNT(*) FROM runs WHERE status NOT IN ('finished', 'failed')",
+        )
+        .await?;
+        let authority_snapshots =
+            crate::project_authority_repo::count_snapshots(&self.pool).await?;
+        let authority_snapshots_expired =
+            crate::project_authority_repo::count_expired(&self.pool, now_unix()).await?;
+        let active_leases_expired = count(
+            &self.pool,
+            "SELECT COUNT(*) FROM execution_task_leases WHERE status = 'active' AND expires_at <= strftime('%s','now')",
+        )
+        .await?;
+        let tasks_missing_execution_spec = count(
+            &self.pool,
+            "SELECT COUNT(*) FROM task_runs WHERE status IN ('queued', 'running') AND finished_at IS NULL AND execution_spec_json IS NULL",
+        )
+        .await?;
+        let schema_version =
+            sqlx::query_scalar::<_, String>("SELECT value FROM schema_meta WHERE key = 'version'")
+                .fetch_one(&self.pool)
+                .await?
+                .parse::<i64>()
+                .map_err(|error| {
+                    StoreError::Invariant(format!("invalid schema version: {error}"))
+                })?;
+        let ready = runtime_resume_pending == 0
+            && recovery_pending == 0
+            && active_leases_expired == 0
+            && tasks_missing_execution_spec == 0
+            && authority_snapshots_expired == 0
+            && in_flight_runs == 0;
         Ok(OperationalDoctorReport {
             checked_at: now_unix(),
             workers_online,
@@ -107,7 +168,40 @@ impl OperationalDoctor {
             matrix_events,
             projects,
             queued_tasks,
+            in_flight_runs,
+            authority_snapshots,
+            authority_snapshots_expired,
+            active_leases_expired,
+            tasks_missing_execution_spec,
+            schema_version,
             ready,
+        })
+    }
+
+    /// Capture the durable cutover/rollback inventory without changing any
+    /// lease, cursor, runtime, or artifact state.
+    pub async fn cutover_inventory(&self) -> Result<CutoverInventory, StoreError> {
+        let report = self.check().await?;
+        Ok(CutoverInventory {
+            captured_at: report.checked_at,
+            workers: WorkerInventory {
+                online: report.workers_online,
+                draining: report.workers_draining,
+                offline: report.workers_offline,
+            },
+            active_leases: report.active_leases,
+            runtime_running: report.runtime_running,
+            runtime_resume_pending: report.runtime_resume_pending,
+            matrix_rooms: report.matrix_rooms,
+            matrix_events: report.matrix_events,
+            artifacts: report.artifacts,
+            queued_tasks: report.queued_tasks,
+            in_flight_runs: report.in_flight_runs,
+            ready_for_cutover: report.ready
+                && report.workers_draining == 0
+                && report.active_leases == 0
+                && report.runtime_running == 0,
+            rollback_requires_new_lease_epoch: true,
         })
     }
 

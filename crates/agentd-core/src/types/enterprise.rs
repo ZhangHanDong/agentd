@@ -6,7 +6,65 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
-use super::{LeaseId, TaskRunId, WorkerIncarnationId};
+use super::{LeaseId, RuntimeSessionId, TaskRunId, WorkerIncarnationId};
+use crate::ports::ExecutionSecurityScope;
+
+/// Typed, versioned provider launch input carried with a durable task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeExecutionSpec {
+    pub version: u32,
+    pub provider: String,
+    pub program: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
+}
+
+impl NativeExecutionSpec {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.version != 1
+            || self.provider.trim().is_empty()
+            || self.program.trim().is_empty()
+            || self.program.contains('\0')
+            || self.args.iter().any(|arg| arg.contains('\0'))
+            || self
+                .cwd
+                .as_deref()
+                .is_some_and(|cwd| cwd.is_empty() || cwd.contains('\0'))
+            || self
+                .env
+                .iter()
+                .any(|(key, value)| !valid_env_key(key) || value.contains('\0'))
+        {
+            return Err("invalid native execution spec");
+        }
+        if !self.provider_matches_program() {
+            return Err("execution provider does not match program");
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn provider_matches_program(&self) -> bool {
+        let executable = self.program.rsplit('/').next().unwrap_or_default();
+        match self.provider.as_str() {
+            "codex" => executable == "codex",
+            "claude" => matches!(executable, "claude" | "claude-code"),
+            _ => false,
+        }
+    }
+}
+
+fn valid_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    match chars.next() {
+        Some(first) if first == '_' || first.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
+}
 
 macro_rules! contract_status {
     (
@@ -172,6 +230,16 @@ pub struct TaskLeaseGrant {
     pub terminal_at: Option<i64>,
     pub terminal_reason: Option<String>,
     pub record_version: u64,
+    #[serde(default)]
+    pub execution_spec: Option<NativeExecutionSpec>,
+    /// Control-plane-issued scope required by a remote native worker. Older
+    /// durable leases may omit it and therefore cannot enter secured native
+    /// execution until re-issued.
+    #[serde(default)]
+    pub security_scope: Option<ExecutionSecurityScope>,
+    /// Durable logical session to which a native task is bound.
+    #[serde(default)]
+    pub runtime_session_id: Option<RuntimeSessionId>,
 }
 
 impl TaskLeaseGrant {

@@ -12,8 +12,10 @@ pub mod daemon;
 pub mod host;
 pub mod matrix_bridge;
 pub mod mempal;
+pub mod native_runtime_client;
 pub mod native_worker;
 pub mod stdio_mcp;
+pub mod worker_fleet_client;
 
 pub use cli::{
     AgentdCli, AgentdCommand, CleanupWorktreesArgs, DaemonConfig, MatrixBridgeOnceArgs,

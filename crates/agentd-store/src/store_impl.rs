@@ -156,12 +156,36 @@ impl Store for SqliteStore {
         Ok(task_repo::insert_task_run(self.pool(), run_id, node_id).await?)
     }
 
+    async fn insert_task_run_with_spec(
+        &self,
+        run_id: &RunId,
+        node_id: &NodeId,
+        spec: &agentd_core::types::NativeExecutionSpec,
+    ) -> Result<TaskRunId, CoreError> {
+        Ok(task_repo::insert_task_run_with_spec(self.pool(), run_id, node_id, spec).await?)
+    }
+
     async fn set_task_run_agent(
         &self,
         task_run_id: &TaskRunId,
         agent_id: &AgentId,
     ) -> Result<(), CoreError> {
         Ok(task_repo::set_task_run_agent(self.pool(), task_run_id, agent_id).await?)
+    }
+
+    async fn set_task_execution_spec(
+        &self,
+        task_run_id: &TaskRunId,
+        spec: &agentd_core::types::NativeExecutionSpec,
+    ) -> Result<(), CoreError> {
+        Ok(task_repo::set_task_execution_spec(self.pool(), task_run_id, spec).await?)
+    }
+
+    async fn get_task_execution_spec(
+        &self,
+        task_run_id: &TaskRunId,
+    ) -> Result<Option<agentd_core::types::NativeExecutionSpec>, CoreError> {
+        Ok(task_repo::get_task_execution_spec(self.pool(), task_run_id).await?)
     }
 
     async fn set_task_run_worktree(

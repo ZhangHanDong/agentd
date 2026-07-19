@@ -5,8 +5,8 @@ use agentd_core::ports::{
     TaskLeaseRejectionReason, TaskLeaseRenewRequest,
 };
 use agentd_core::types::{
-    FencingToken, LeaseId, LeaseStatus, TaskLeaseClaim, TaskLeaseGrant, TaskRunId,
-    WorkerIncarnationId,
+    FencingToken, LeaseId, LeaseStatus, NativeExecutionSpec, TaskLeaseClaim, TaskLeaseGrant,
+    TaskRunId, WorkerIncarnationId,
 };
 use sqlx::pool::PoolConnection;
 use sqlx::{Row, Sqlite, SqliteConnection, SqlitePool};
@@ -390,10 +390,11 @@ async fn get_optional_grant(
     lease_id: &str,
 ) -> Result<Option<TaskLeaseGrant>, TaskLeaseError> {
     let row = sqlx::query(
-        "SELECT id, execution_task_id, worker_incarnation_id, fencing_token, status, \
+        "SELECT l.id, l.execution_task_id, l.worker_incarnation_id, l.fencing_token, l.status, \
                 acquired_at, expires_at, renewed_at, terminal_at, terminal_reason, \
-                record_version \
-         FROM execution_task_leases WHERE id = ?",
+                record_version, t.execution_spec_json \
+         FROM execution_task_leases l JOIN task_runs t ON t.id = l.execution_task_id \
+         WHERE l.id = ?",
     )
     .bind(lease_id)
     .fetch_optional(&mut *connection)
@@ -427,7 +428,26 @@ fn row_to_grant(row: &sqlx::sqlite::SqliteRow) -> Result<TaskLeaseGrant, TaskLea
         record_version: u64::try_from(version).map_err(|_| {
             TaskLeaseError::Unavailable(format!("invalid lease record version {version}"))
         })?,
+        security_scope: None,
+        runtime_session_id: None,
+        execution_spec: parse_execution_spec(row.get("execution_spec_json"))?,
     })
+}
+
+fn parse_execution_spec(
+    encoded: Option<String>,
+) -> Result<Option<NativeExecutionSpec>, TaskLeaseError> {
+    encoded
+        .map(|value| {
+            let spec = serde_json::from_str::<NativeExecutionSpec>(&value).map_err(|error| {
+                TaskLeaseError::Unavailable(format!("invalid execution spec: {error}"))
+            })?;
+            spec.validate().map_err(|error| {
+                TaskLeaseError::Unavailable(format!("invalid execution spec: {error}"))
+            })?;
+            Ok(spec)
+        })
+        .transpose()
 }
 
 async fn dispatch_in_transaction(
@@ -483,6 +503,14 @@ async fn dispatch_in_transaction(
         ));
     }
 
+    let execution_spec = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT execution_spec_json FROM task_runs WHERE id = ?",
+    )
+    .bind(request.execution_task_id.as_str())
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(storage_error)
+    .and_then(parse_execution_spec)?;
     Ok(TaskLeaseGrant {
         lease_id,
         execution_task_id: request.execution_task_id.clone(),
@@ -495,6 +523,9 @@ async fn dispatch_in_transaction(
         terminal_at: None,
         terminal_reason: None,
         record_version: 1,
+        execution_spec,
+        security_scope: None,
+        runtime_session_id: None,
     })
 }
 

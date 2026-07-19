@@ -21,10 +21,21 @@ pub fn run(cmd: &AgentCmd) -> ExitCode {
         AgentCmd::Down(args) => down(args),
         AgentCmd::Rebind(args) => rebind(args),
         AgentCmd::Runtime(args) => runtime(args),
+        AgentCmd::RuntimeCapabilities(args) => runtime_capabilities(args),
         AgentCmd::Register(args) => register(args),
         AgentCmd::Heartbeat(args) => heartbeat(args),
         AgentCmd::Offline(args) => offline(args),
     }
+}
+
+fn runtime_capabilities(args: &AgentListArgs) -> ExitCode {
+    request_and_print(
+        &args.daemon_url,
+        "GET",
+        "/api/runtime/capabilities",
+        None,
+        &operator_headers(args.api_token.as_deref()),
+    )
 }
 
 fn list(args: &AgentListArgs) -> ExitCode {

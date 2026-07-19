@@ -278,6 +278,8 @@ fn default_matrix_trust_reason() -> String {
 pub struct MatrixBridgeRoomInput {
     #[serde(rename = "roomId", alias = "room_id")]
     pub room_id: String,
+    #[serde(default, rename = "projectId", alias = "project_id")]
+    pub project_id: Option<String>,
     #[serde(default)]
     pub group: Option<String>,
     #[serde(default)]
@@ -301,6 +303,8 @@ pub struct MatrixBridgeRoomInput {
 pub struct MatrixBridgeRoomRecord {
     #[serde(rename = "roomId")]
     pub room_id: String,
+    #[serde(rename = "projectId")]
+    pub project_id: Option<String>,
     pub group: Option<String>,
     pub agent: Option<String>,
     pub trusted: bool,
@@ -321,6 +325,12 @@ pub struct MatrixInboundMessageInput {
     pub room_id: String,
     #[serde(rename = "senderMxid", alias = "sender_mxid")]
     pub sender_mxid: String,
+    #[serde(default, rename = "projectId", alias = "project_id")]
+    pub project_id: Option<String>,
+    #[serde(default, rename = "authorityRevision", alias = "authority_revision")]
+    pub authority_revision: Option<String>,
+    #[serde(default, rename = "leaseEpoch", alias = "lease_epoch")]
+    pub lease_epoch: Option<i64>,
     #[serde(default)]
     pub from: Option<String>,
     pub body: String,
@@ -330,6 +340,14 @@ pub struct MatrixInboundMessageInput {
     pub reply_to: Option<String>,
     #[serde(default, rename = "trustLevel", alias = "trust_level")]
     pub trust_level: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MatrixOutboxCursorInput {
+    #[serde(rename = "bridgeId", alias = "bridge_id")]
+    pub bridge_id: String,
+    #[serde(rename = "lastSeq", alias = "last_seq")]
+    pub last_seq: i64,
 }
 
 /// Result for one Matrix inbound event route.
@@ -1115,6 +1133,13 @@ pub trait RunHost: Send + Sync {
         &self,
         input: MatrixInboundMessageInput,
     ) -> Result<MatrixInboundMessageResult, CoreError>;
+
+    async fn acknowledge_matrix_outbox_cursor(
+        &self,
+        input: MatrixOutboxCursorInput,
+    ) -> Result<i64, CoreError>;
+
+    async fn matrix_outbox_cursor(&self, bridge_id: &str) -> Result<i64, CoreError>;
 
     /// Read the agent-chat-compatible pool scheduler view.
     ///

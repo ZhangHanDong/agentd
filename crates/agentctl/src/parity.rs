@@ -14,7 +14,8 @@ use agentd_store::agent_chat_import::{
 
 use crate::cli::{
     ParityAgentImportArgs, ParityAgentShadowArgs, ParityAuditArgs, ParityCmd,
-    ParityMessageImportArgs, ParityMessageShadowArgs, ParityTaskImportArgs, ParityTaskShadowArgs,
+    ParityMessageImportArgs, ParityMessageShadowArgs, ParityMigrationArgs, ParityRollbackArgs,
+    ParityTaskImportArgs, ParityTaskShadowArgs,
 };
 
 const EXIT_GAPS: u8 = 1;
@@ -67,6 +68,122 @@ pub fn run(cmd: &ParityCmd) -> ExitCode {
         ParityCmd::ShadowMessages(args) => shadow_messages(args),
         ParityCmd::ImportTasks(args) => import_tasks(args),
         ParityCmd::ShadowTasks(args) => shadow_tasks(args),
+        ParityCmd::MigrateSupportedState(args) => migrate_supported_state(args),
+        ParityCmd::RollbackCutover(args) => rollback_cutover(args),
+    }
+}
+
+fn rollback_cutover(args: &ParityRollbackArgs) -> ExitCode {
+    if !args.execute {
+        println!(
+            "dry-run: would rollback project={} with lease_epoch={}",
+            args.project_id, args.lease_epoch
+        );
+        return ExitCode::SUCCESS;
+    }
+    match run_async(async {
+        let store = SqliteStore::connect(&args.db_path).await?;
+        agentd_store::cutover_repo::rollback(store.pool(), &args.project_id, args.lease_epoch).await
+    }) {
+        Ok(state) => {
+            println!(
+                "cutover rollback project={} phase={:?} lease_epoch={}",
+                state.project_id, state.phase, state.lease_epoch
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("error: cutover rollback failed: {error}");
+            ExitCode::from(EXIT_IMPORT)
+        }
+    }
+}
+
+fn migrate_supported_state(args: &ParityMigrationArgs) -> ExitCode {
+    if let Err(err) = validate_agent_chat_path(&args.agent_chat) {
+        eprintln!("error: invalid agent-chat path: {err}");
+        return ExitCode::from(EXIT_INVALID);
+    }
+    let mode = if args.execute {
+        AgentChatImportMode::Execute
+    } else {
+        AgentChatImportMode::DryRun
+    };
+    let binding = match (
+        &args.project_id,
+        &args.authority_revision,
+        args.matrix_cursor,
+        args.lease_epoch,
+    ) {
+        (None, None, None, None) => None,
+        (Some(project_id), Some(authority_revision), Some(matrix_cursor), Some(lease_epoch)) => {
+            Some((
+                project_id.clone(),
+                authority_revision.clone(),
+                matrix_cursor,
+                lease_epoch,
+            ))
+        }
+        _ => {
+            eprintln!(
+                "error: --project-id, --authority-revision, --matrix-cursor, and --lease-epoch must be supplied together"
+            );
+            return ExitCode::from(EXIT_INVALID);
+        }
+    };
+    if binding.is_some() && !args.execute {
+        eprintln!("error: project binding requires --execute");
+        return ExitCode::from(EXIT_INVALID);
+    }
+    let result = run_async(async {
+        let store = SqliteStore::connect(&args.db_path).await?;
+        let report =
+            agent_chat_import::migrate_supported_state(store.pool(), &args.agent_chat, mode)
+                .await?;
+        if let Some((project_id, authority_revision, matrix_cursor, lease_epoch)) = binding {
+            if !report.ok {
+                return Err(agentd_store::StoreError::Invariant(
+                    "supported-state migration report is not healthy".into(),
+                ));
+            }
+            let state = agentd_store::cutover_repo::transition(
+                store.pool(),
+                &project_id,
+                agentd_store::cutover_repo::CutoverPhase::Observe,
+                &authority_revision,
+                matrix_cursor,
+                lease_epoch,
+            )
+            .await?;
+            Ok((report, Some(state)))
+        } else {
+            Ok((report, None))
+        }
+    });
+    match result {
+        Ok((report, cutover_state)) => {
+            println!("agent-chat supported-state migration ({})", report.mode);
+            println!("agents imported={}", report.agents.agents.imported);
+            println!("messages imported={}", report.messages.messages.imported);
+            println!("cursors imported={}", report.messages.cursors.imported);
+            println!("tasks imported={}", report.tasks.tasks.imported);
+            println!("task_graphs imported={}", report.tasks.task_graphs.imported);
+            if let Some(state) = cutover_state {
+                println!(
+                    "cutover project={} phase={:?}",
+                    state.project_id, state.phase
+                );
+            }
+            if report.ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(EXIT_IMPORT)
+            }
+        }
+        Err(err) => {
+            eprintln!("error: supported-state migration failed: {err}");
+            ExitCode::from(EXIT_IMPORT)
+        }
     }
 }
 

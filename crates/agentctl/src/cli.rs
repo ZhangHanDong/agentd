@@ -51,6 +51,8 @@ pub enum AgentCmd {
     Rebind(AgentRebindArgs),
     /// Record a runtime observation for one agent.
     Runtime(AgentRuntimeArgs),
+    /// Inspect daemon-owned native runtime capabilities.
+    RuntimeCapabilities(AgentListArgs),
     /// Register or update an agent.
     Register(AgentRegisterArgs),
     /// Send an agent heartbeat.
@@ -333,6 +335,10 @@ pub enum ParityCmd {
     ShadowMessages(ParityMessageShadowArgs),
     /// Plan or execute an agent-chat `tasks/task_graphs` import.
     ImportTasks(ParityTaskImportArgs),
+    /// Import the supported agent-chat state in one migration operation.
+    MigrateSupportedState(ParityMigrationArgs),
+    /// Plan or execute a fenced rollback of one cutover project.
+    RollbackCutover(ParityRollbackArgs),
     /// Compare agent-chat `tasks/task_graphs` JSON against an agentd `SQLite` database.
     ShadowTasks(ParityTaskShadowArgs),
 }
@@ -414,6 +420,47 @@ pub struct ParityTaskShadowArgs {
     /// Path to the target agentd `SQLite` database.
     #[arg(long)]
     pub db_path: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct ParityMigrationArgs {
+    /// Path to the checked-out agent-chat repository.
+    #[arg(long)]
+    pub agent_chat: PathBuf,
+    /// Path to the target agentd `SQLite` database.
+    #[arg(long)]
+    pub db_path: PathBuf,
+    /// Execute the migration. Without this flag the command is a dry-run plan.
+    #[arg(long)]
+    pub execute: bool,
+    /// Project binding for recording the post-import observe state.
+    #[arg(long)]
+    pub project_id: Option<String>,
+    /// Immutable authority revision for the project binding.
+    #[arg(long)]
+    pub authority_revision: Option<String>,
+    /// Last handed-off Matrix cursor.
+    #[arg(long)]
+    pub matrix_cursor: Option<i64>,
+    /// Current lease epoch for the project.
+    #[arg(long)]
+    pub lease_epoch: Option<i64>,
+}
+
+#[derive(Debug, Args)]
+pub struct ParityRollbackArgs {
+    /// Path to the target agentd SQLite database.
+    #[arg(long)]
+    pub db_path: PathBuf,
+    /// Project whose durable cutover state should be rolled back.
+    #[arg(long)]
+    pub project_id: String,
+    /// New lease epoch; must be greater than the current epoch.
+    #[arg(long)]
+    pub lease_epoch: i64,
+    /// Execute the rollback. Without this flag the command is a dry-run.
+    #[arg(long)]
+    pub execute: bool,
 }
 
 #[derive(Debug, Subcommand)]

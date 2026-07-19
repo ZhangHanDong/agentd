@@ -165,6 +165,18 @@ pub async fn count_in_flight(pool: &SqlitePool) -> Result<i64, StoreError> {
     Ok(count)
 }
 
+pub async fn count_in_flight_for_project(
+    pool: &SqlitePool,
+    project_id: &str,
+) -> Result<i64, StoreError> {
+    Ok(sqlx::query_scalar(
+        "SELECT COUNT(*) FROM runs WHERE project_id = ? AND status NOT IN ('finished', 'failed')",
+    )
+    .bind(project_id)
+    .fetch_one(pool)
+    .await?)
+}
+
 /// Record the run's current node (the park/resume cursor). Errors if unknown.
 ///
 /// # Errors

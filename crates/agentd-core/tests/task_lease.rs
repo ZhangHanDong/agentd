@@ -37,6 +37,9 @@ fn grant() -> TaskLeaseGrant {
         terminal_at: None,
         terminal_reason: None,
         record_version: 1,
+        execution_spec: None,
+        security_scope: None,
+        runtime_session_id: None,
     }
 }
 

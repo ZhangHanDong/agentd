@@ -37,8 +37,9 @@ use crate::host::{
     AgentChatTaskPatchInput, AgentChatTaskTransitionInput, AgentHeartbeat, AgentIdentityPatch,
     AgentOffline, AgentRegistration, AgentRuntimeUpdate, DeliveryEventInput, DirectMessageInput,
     EventRecord, GroupCreateInput, GroupMemberUpdate, LiveEvent, MatrixBridgeRoomInput,
-    MatrixInboundMessageInput, RelayServerHeartbeat, RelayStreamEventRecord, RunHost, RunSnapshot,
-    SchedulerDispatchInput, SchedulerPoolFilters, SchedulerReleaseInput,
+    MatrixInboundMessageInput, MatrixOutboxCursorInput, RelayServerHeartbeat,
+    RelayStreamEventRecord, RunHost, RunSnapshot, SchedulerDispatchInput, SchedulerPoolFilters,
+    SchedulerReleaseInput,
 };
 use crate::mcp_server::dispatch;
 use crate::tools::attachments::{
@@ -132,6 +133,7 @@ impl AuthConfig {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/api/runtime/ui-status", get(runtime_ui_status))
         .route("/api/doctor", get(get_doctor))
         .route("/dashboard", get(dashboard))
         .route("/dashboard/", get(dashboard))
@@ -145,6 +147,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/matrix/rooms/:room_id", get(get_matrix_room))
         .route("/api/matrix/inbound", post(post_matrix_inbound))
         .route("/api/matrix/outbox", get(matrix_outbox))
+        .route("/api/matrix/outbox/cursor", get(matrix_outbox_cursor))
+        .route("/api/matrix/outbox/ack", post(ack_matrix_outbox))
         .route("/api/messages", post(post_message))
         .route("/api/delivery-events", post(post_delivery_event))
         .route("/api/inbox/:agent", get(get_inbox))
@@ -201,6 +205,19 @@ pub fn router(state: AppState) -> Router {
 #[allow(clippy::unused_async)] // axum handlers are async; the shell is embedded.
 async fn dashboard() -> Html<&'static str> {
     Html(include_str!("dashboard.html"))
+}
+
+/// Public, bounded runtime identity used by the local dashboard shell. The
+/// operator-authenticated recovery endpoint remains the authoritative detailed
+/// capability document; this endpoint exposes only non-sensitive UI metadata.
+async fn runtime_ui_status() -> Json<Value> {
+    Json(json!({
+        "runtime": "native",
+        "runtimeApiVersion": 1,
+        "sessionResume": true,
+        "artifactAcknowledgement": true,
+        "legacyTmux": "compatibility-only"
+    }))
 }
 
 /// `GET /runs` — the at-a-glance overview: every run's current status (P1).
@@ -304,6 +321,12 @@ fn default_delivery_event_limit() -> usize {
 struct RelayStreamQuery {
     #[serde(default)]
     from_seq: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct MatrixCursorQuery {
+    #[serde(rename = "bridgeId", alias = "bridge_id")]
+    bridge_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -614,6 +637,36 @@ async fn matrix_outbox(
             Json(json!({ "error": "internal" })),
         )
             .into_response(),
+    }
+}
+
+async fn ack_matrix_outbox(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<MatrixOutboxCursorInput>,
+) -> Response {
+    if let Err(err) = require_operator_bearer(&state.auth, &headers) {
+        return err.into_response();
+    }
+    match state.host.acknowledge_matrix_outbox_cursor(req).await {
+        Ok(last_seq) => Json(json!({ "lastSeq": last_seq })).into_response(),
+        Err(error) => agent_error_response(error),
+    }
+}
+
+async fn matrix_outbox_cursor(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<MatrixCursorQuery>,
+) -> Response {
+    if let Err(err) = require_operator_bearer(&state.auth, &headers) {
+        return err.into_response();
+    }
+    match state.host.matrix_outbox_cursor(&query.bridge_id).await {
+        Ok(last_seq) => {
+            Json(json!({ "bridgeId": query.bridge_id, "lastSeq": last_seq })).into_response()
+        }
+        Err(error) => agent_error_response(error),
     }
 }
 

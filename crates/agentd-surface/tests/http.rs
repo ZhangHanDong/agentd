@@ -206,6 +206,17 @@ async fn http_healthz_ok() {
 }
 
 #[tokio::test]
+async fn runtime_ui_status_declares_native_runtime_contract() {
+    let resp = get(app(FakeRunHost::new()), "/api/runtime/ui-status").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let value: Value = serde_json::from_slice(&body_bytes(resp).await).expect("json");
+    assert_eq!(value["runtime"], "native");
+    assert_eq!(value["sessionResume"], true);
+    assert_eq!(value["artifactAcknowledgement"], true);
+    assert_eq!(value["legacyTmux"], "compatibility-only");
+}
+
+#[tokio::test]
 async fn http_stream_replays_message_wakeup_events() {
     let host = FakeRunHost::new();
     host.set_stream_events(vec![

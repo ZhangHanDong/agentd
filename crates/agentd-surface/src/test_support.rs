@@ -22,10 +22,10 @@ use crate::host::{
     DirectMessageInput, EventRecord, GroupCreateInput, GroupMemberUpdate, GroupMessageInput,
     GroupReadAdvance, GroupReadRequest, GroupReadResult, GroupRecord, InboxMessage, LiveEvent,
     MatrixBridgeRoomInput, MatrixBridgeRoomRecord, MatrixInboundMessageInput,
-    MatrixInboundMessageResult, RelayServerHeartbeat, RelayServerRecord, RelayStreamEventRecord,
-    RunHost, RunSnapshot, RunSummary, SchedulerDispatchInput, SchedulerDispatchResult,
-    SchedulerPoolAgent, SchedulerPoolFilters, SchedulerPoolSnapshot, SchedulerReleaseInput,
-    SchedulerReleaseResult, SchedulerReservation, TaskAssignment,
+    MatrixInboundMessageResult, MatrixOutboxCursorInput, RelayServerHeartbeat, RelayServerRecord,
+    RelayStreamEventRecord, RunHost, RunSnapshot, RunSummary, SchedulerDispatchInput,
+    SchedulerDispatchResult, SchedulerPoolAgent, SchedulerPoolFilters, SchedulerPoolSnapshot,
+    SchedulerReleaseInput, SchedulerReleaseResult, SchedulerReservation, TaskAssignment,
 };
 
 /// Scripted, recording [`RunHost`] for tests.
@@ -57,6 +57,7 @@ pub struct FakeRunHost {
     stream_events: Mutex<Vec<RelayStreamEventRecord>>,
     matrix_rooms: Mutex<HashMap<String, MatrixBridgeRoomRecord>>,
     matrix_events: Mutex<HashMap<String, MatrixInboundMessageResult>>,
+    matrix_outbox_cursors: Mutex<HashMap<String, i64>>,
 }
 
 #[derive(Debug, Clone)]
@@ -117,6 +118,7 @@ impl Default for FakeRunHost {
             stream_events: Mutex::default(),
             matrix_rooms: Mutex::default(),
             matrix_events: Mutex::default(),
+            matrix_outbox_cursors: Mutex::default(),
         }
     }
 }
@@ -768,6 +770,7 @@ impl RunHost for FakeRunHost {
         }
         let record = MatrixBridgeRoomRecord {
             room_id: room_id.clone(),
+            project_id: input.project_id.clone(),
             group,
             agent,
             trusted: input.trusted,
@@ -795,6 +798,29 @@ impl RunHost for FakeRunHost {
             .expect("matrix rooms lock")
             .get(&room_id)
             .cloned())
+    }
+
+    async fn acknowledge_matrix_outbox_cursor(
+        &self,
+        input: MatrixOutboxCursorInput,
+    ) -> Result<i64, CoreError> {
+        let mut cursors = self
+            .matrix_outbox_cursors
+            .lock()
+            .expect("matrix outbox cursors lock");
+        let cursor = cursors.entry(input.bridge_id).or_insert(0);
+        *cursor = (*cursor).max(input.last_seq);
+        Ok(*cursor)
+    }
+
+    async fn matrix_outbox_cursor(&self, bridge_id: &str) -> Result<i64, CoreError> {
+        Ok(self
+            .matrix_outbox_cursors
+            .lock()
+            .expect("matrix outbox cursors lock")
+            .get(bridge_id)
+            .copied()
+            .unwrap_or(0))
     }
 
     async fn post_matrix_inbound_message(

@@ -1,10 +1,11 @@
+use agentd_core::ports::Store;
 use agentd_core::ports::{
     TaskLeaseCloseRequest, TaskLeaseDispatchRequest, TaskLeaseError, TaskLeasePort,
     TaskLeaseRejectionReason, TaskLeaseRenewRequest,
 };
 use agentd_core::types::{
-    FencingToken, LeaseStatus, NodeId, RunId, TaskLeaseClaim, TaskRunId, WorkerId,
-    WorkerIncarnationId, WorkerStatus,
+    FencingToken, LeaseStatus, NativeExecutionSpec, NodeId, RunId, TaskLeaseClaim, TaskRunId,
+    WorkerId, WorkerIncarnationId, WorkerStatus,
 };
 use agentd_store::task_lease_control_plane::SqliteTaskLeaseControlPlane;
 use agentd_store::worker_repo::{self, WorkerCreate, WorkerRegistration};
@@ -186,6 +187,45 @@ async fn dispatch_binds_current_worker_and_allocates_first_fencing_token() {
         .await
         .expect_err("draining worker cannot receive new dispatch");
     assert!(matches!(draining, TaskLeaseError::Conflict(_)));
+}
+
+#[tokio::test]
+async fn execution_spec_is_immutable_while_lease_is_active() {
+    let fixture = fixture().await;
+    let original = NativeExecutionSpec {
+        version: 1,
+        provider: "codex".into(),
+        program: "codex".into(),
+        args: vec!["exec".into()],
+        cwd: None,
+        env: Vec::new(),
+    };
+    Store::set_task_execution_spec(&fixture.store, &fixture.task_id, &original)
+        .await
+        .expect("persist spec");
+    let control_plane = SqliteTaskLeaseControlPlane::new(fixture.store.pool().clone());
+    let grant = control_plane
+        .dispatch(&dispatch(
+            fixture.task_id.clone(),
+            fixture.incarnation_id.clone(),
+            100,
+            200,
+        ))
+        .await
+        .expect("dispatch");
+    assert_eq!(grant.execution_spec, Some(original.clone()));
+    let mut replacement = original.clone();
+    replacement.args = vec!["different".into()];
+    let error = Store::set_task_execution_spec(&fixture.store, &fixture.task_id, &replacement)
+        .await
+        .expect_err("active lease must freeze spec");
+    assert!(error.to_string().contains("active"));
+    assert_eq!(
+        Store::get_task_execution_spec(&fixture.store, &fixture.task_id)
+            .await
+            .expect("read spec"),
+        Some(original)
+    );
 }
 
 #[tokio::test]

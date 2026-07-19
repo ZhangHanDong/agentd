@@ -240,10 +240,50 @@ impl NativeRuntime {
             .unwrap_or_default()
     }
 
+    /// Atomically capture the bounded runtime state for observers.
+    #[must_use]
+    pub fn snapshot(&self) -> (NativeProcessStatus, Option<String>, Vec<u8>) {
+        self.shared
+            .state
+            .lock()
+            .map(|state| {
+                (
+                    state.status,
+                    state.native_session_ref.clone(),
+                    state.output.iter().copied().collect(),
+                )
+            })
+            .unwrap_or((NativeProcessStatus::Gone, None, Vec::new()))
+    }
+
     /// Spool the bounded output snapshot atomically for a later artifact upload.
     pub fn spool_output(
         &self,
         path: impl AsRef<Path>,
+    ) -> Result<NativeSpoolRecord, NativeRuntimeError> {
+        self.spool_bytes(path, &self.output())
+    }
+
+    /// Spool output after replacing checked-out secret material before it is
+    /// persisted or hashed into an evidence envelope.
+    pub fn spool_output_redacted(
+        &self,
+        path: impl AsRef<Path>,
+        secrets: &[agentd_core::ports::SecretMaterial],
+    ) -> Result<NativeSpoolRecord, NativeRuntimeError> {
+        let mut output = self.output();
+        for secret in secrets {
+            if !secret.as_bytes().is_empty() {
+                replace_all(&mut output, secret.as_bytes(), b"[REDACTED]");
+            }
+        }
+        self.spool_bytes(path, &output)
+    }
+
+    fn spool_bytes(
+        &self,
+        path: impl AsRef<Path>,
+        output: &[u8],
     ) -> Result<NativeSpoolRecord, NativeRuntimeError> {
         let path = path.as_ref();
         let parent = path
@@ -252,7 +292,6 @@ impl NativeRuntime {
         std::fs::create_dir_all(parent)
             .map_err(|error| NativeRuntimeError::Pty(error.to_string()))?;
         let temp = path.with_extension("part");
-        let output = self.output();
         let content_sha256 = format!("{:x}", Sha256::digest(&output));
         std::fs::write(&temp, &output)
             .map_err(|error| NativeRuntimeError::Pty(error.to_string()))?;
@@ -320,5 +359,39 @@ impl NativeRuntime {
                 return Err(NativeRuntimeError::Timeout);
             }
         }
+    }
+}
+
+fn replace_all(output: &mut Vec<u8>, needle: &[u8], replacement: &[u8]) {
+    if needle.is_empty() {
+        return;
+    }
+    let mut cursor = 0;
+    while let Some(relative) = output[cursor..]
+        .windows(needle.len())
+        .position(|window| window == needle)
+    {
+        let start = cursor + relative;
+        output.splice(start..start + needle.len(), replacement.iter().copied());
+        cursor = start + replacement.len();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::replace_all;
+
+    #[test]
+    fn redaction_replaces_all_occurrences() {
+        let mut output = b"before-secret-after-secret".to_vec();
+        replace_all(&mut output, b"secret", b"[REDACTED]");
+        assert_eq!(output, b"before-[REDACTED]-after-[REDACTED]");
+    }
+
+    #[test]
+    fn redaction_ignores_empty_secret() {
+        let mut output = b"unchanged".to_vec();
+        replace_all(&mut output, b"", b"[REDACTED]");
+        assert_eq!(output, b"unchanged");
     }
 }

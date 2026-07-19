@@ -1,0 +1,96 @@
+//! Control-plane port used by native workers.
+//!
+//! Native process resources remain worker-local, while runtime identity and
+//! attempt state remain owned by the control plane. Implementations may be
+//! `SQLite` (daemon) or authenticated HTTP (remote worker).
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+use crate::types::{
+    RuntimeAttemptId, RuntimeAttemptStatus, RuntimeSessionId, TaskRunId, WorkerIncarnationId,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum NativeRuntimeControlError {
+    #[error("native runtime control-plane input is invalid: {0}")]
+    Invalid(String),
+    #[error("native runtime control-plane resource not found: {0}")]
+    NotFound(String),
+    #[error("native runtime control-plane conflict: {0}")]
+    Conflict(String),
+    #[error("native runtime control-plane unavailable: {0}")]
+    Unavailable(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeRuntimeAttemptStart {
+    pub attempt_id: RuntimeAttemptId,
+    pub session_id: RuntimeSessionId,
+    pub task_id: TaskRunId,
+    pub worker_incarnation_id: WorkerIncarnationId,
+    pub observed_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeRuntimeAttemptState {
+    pub attempt_id: RuntimeAttemptId,
+    pub session_id: RuntimeSessionId,
+    pub status: RuntimeAttemptStatus,
+    pub native_session_ref: Option<String>,
+    pub observed_at: i64,
+}
+
+/// Wire request for session/task ownership validation shared by the HTTP
+/// transport and its client adapter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeRuntimeSessionValidate {
+    pub session_id: RuntimeSessionId,
+    pub task_id: TaskRunId,
+}
+
+/// Control-plane view of one runtime session for worker resume decisions.
+///
+/// `latest_native_session_ref` carries the provider-native thread reference of
+/// the most recent attempt so a worker can build `codex exec resume` without
+/// reading the daemon database.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeRuntimeSessionView {
+    pub session_id: RuntimeSessionId,
+    pub task_id: TaskRunId,
+    pub status: crate::types::RuntimeSessionStatus,
+    pub latest_native_session_ref: Option<String>,
+}
+
+#[async_trait::async_trait]
+pub trait NativeRuntimeControlPort: Send + Sync {
+    /// Confirm that the control-plane session owns the requested task.
+    async fn validate_session_task(
+        &self,
+        session_id: &RuntimeSessionId,
+        task_id: &TaskRunId,
+    ) -> Result<(), NativeRuntimeControlError>;
+
+    /// Read the session status and latest provider-native session reference.
+    /// Returns `None` when the control plane does not know the session.
+    async fn session_view(
+        &self,
+        session_id: &RuntimeSessionId,
+    ) -> Result<Option<NativeRuntimeSessionView>, NativeRuntimeControlError>;
+
+    /// Create the worker-bound attempt under the control-plane lease.
+    async fn start_attempt(
+        &self,
+        request: &NativeRuntimeAttemptStart,
+    ) -> Result<NativeRuntimeAttemptState, NativeRuntimeControlError>;
+
+    async fn update_attempt(
+        &self,
+        state: &NativeRuntimeAttemptState,
+    ) -> Result<(), NativeRuntimeControlError>;
+
+    async fn mark_attempt_terminal(
+        &self,
+        state: &NativeRuntimeAttemptState,
+    ) -> Result<(), NativeRuntimeControlError>;
+}

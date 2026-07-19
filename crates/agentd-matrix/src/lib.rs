@@ -3206,6 +3206,15 @@ pub trait AgentdBridgeBackend {
 
     /// Poll backend outbox events after the supplied sequence.
     fn poll_outbox(&mut self, from_seq: i64) -> Result<Vec<MatrixOutboundEvent>, BridgeError>;
+
+    /// Persist the highest outbox sequence actually delivered to Matrix.
+    fn acknowledge_outbox_cursor(&mut self, _last_seq: i64) -> Result<(), BridgeError> {
+        Ok(())
+    }
+
+    fn outbox_cursor(&mut self) -> Result<Option<i64>, BridgeError> {
+        Ok(None)
+    }
 }
 
 /// Matrix-side adapter contract used by the bridge runtime.
@@ -3277,13 +3286,18 @@ where
             report.inbound_forwarded += 1;
         }
 
+        let mut acknowledged_seq = None;
         for event in self.backend.poll_outbox(self.state.next_from_seq)? {
             let seq = event.seq;
             self.transport.send_outbound(event)?;
             if seq > self.state.next_from_seq {
                 self.state.next_from_seq = seq;
             }
+            acknowledged_seq = Some(seq);
             report.outbound_sent += 1;
+        }
+        if let Some(seq) = acknowledged_seq {
+            self.backend.acknowledge_outbox_cursor(seq)?;
         }
 
         Ok(report)
@@ -3876,8 +3890,12 @@ where
         .as_ref()
         .map(run_bridge_once_puppet_account_provisioning)
         .transpose()?;
-    let state = BridgeState::load_json(&config.state_path)?;
+    let mut state = BridgeState::load_json(&config.state_path)?;
     let mut backend = AgentdHttpBackend::new(&config.bridge_config)?;
+    backend.require_native_runtime()?;
+    if let Some(cursor) = backend.outbox_cursor()? {
+        state.next_from_seq = state.next_from_seq.max(cursor);
+    }
     let mut transport = MatrixClientBridgeTransport::new(client, config.transport_config.clone());
     let command_count = transport.bot_command_plans()?.len();
     let bot_command_replies_sent = if command_count == 0 {
@@ -3908,8 +3926,12 @@ pub fn run_bridge_once(config: &BridgeOnceConfig) -> Result<BridgeOnceReport, Br
         .as_ref()
         .map(run_bridge_once_puppet_account_provisioning)
         .transpose()?;
-    let state = BridgeState::load_json(&config.state_path)?;
     let backend = AgentdHttpBackend::new(&config.bridge_config)?;
+    // File-backed transport is also an execution ingress. Keep it behind the
+    // same native-runtime contract as the SDK transport so replay/testing
+    // cannot silently become a legacy production path.
+    backend.require_native_runtime()?;
+    let state = BridgeState::load_json(&config.state_path)?;
     let transport = FileMatrixTransport::from_files(
         &config.rooms_json_path,
         &config.inbound_json_path,
@@ -3954,6 +3976,114 @@ impl AgentdHttpBackend {
             endpoint: HttpEndpoint::parse(config.agentd_api())?,
             operator_token: config.operator_token().map(ToOwned::to_owned),
         })
+    }
+
+    /// Read the daemon-owned runtime contract used by Matrix/Robrix adapters.
+    /// Callers can gate native session operations without inspecting legacy
+    /// agent records or tmux targets.
+    pub fn runtime_capabilities(&self) -> Result<Value, BridgeError> {
+        self.request_json("GET", "/api/runtime/capabilities", None)
+    }
+
+    /// Gate the production Matrix bridge on the daemon-native runtime contract.
+    /// This keeps compatibility APIs available while preventing a live bridge
+    /// from silently routing commands to the legacy runtime.
+    pub fn require_native_runtime(&self) -> Result<(), BridgeError> {
+        let capabilities = self.runtime_capabilities()?;
+        let native = capabilities.get("runtime").and_then(Value::as_str) == Some("native");
+        let resumable = capabilities.get("sessionResume").and_then(Value::as_bool) == Some(true);
+        let acknowledged = capabilities
+            .get("artifactAcknowledgement")
+            .and_then(Value::as_bool)
+            == Some(true);
+        if native && resumable && acknowledged {
+            return Ok(());
+        }
+        Err(BridgeError::backend(
+            "agentd runtime capabilities do not satisfy the native bridge contract",
+        ))
+    }
+
+    /// Read durable per-project cutover state for Robrix/project views.
+    pub fn cutover_project_state(&self, project_id: &str) -> Result<Option<Value>, BridgeError> {
+        self.request_optional_json(
+            "GET",
+            &format!("/api/cutover/projects/{}", encode_path_segment(project_id)),
+            None,
+        )
+    }
+
+    /// Advance a daemon-owned project through the cutover state machine.
+    pub fn transition_cutover_project(
+        &self,
+        project_id: &str,
+        phase: &str,
+        authority_revision: &str,
+        matrix_cursor: i64,
+        lease_epoch: i64,
+    ) -> Result<Value, BridgeError> {
+        self.request_json(
+            "POST",
+            &format!(
+                "/api/cutover/projects/{}/transition",
+                encode_path_segment(project_id)
+            ),
+            Some(json!({
+                "phase": phase,
+                "authorityRevision": authority_revision,
+                "matrixCursor": matrix_cursor,
+                "leaseEpoch": lease_epoch,
+            })),
+        )
+    }
+
+    /// Roll a project back using a strictly newer lease epoch.
+    pub fn rollback_cutover_project(
+        &self,
+        project_id: &str,
+        lease_epoch: i64,
+    ) -> Result<Value, BridgeError> {
+        self.request_json(
+            "POST",
+            &format!(
+                "/api/cutover/projects/{}/rollback",
+                encode_path_segment(project_id)
+            ),
+            Some(json!({ "leaseEpoch": lease_epoch })),
+        )
+    }
+
+    /// Read native execution artifacts for a Robrix run detail view.
+    pub fn runtime_run_artifacts(&self, run_id: &str) -> Result<Value, BridgeError> {
+        self.request_json(
+            "GET",
+            &format!(
+                "/api/runtime/runs/{}/artifacts",
+                encode_path_segment(run_id)
+            ),
+            None,
+        )
+    }
+
+    pub fn acknowledge_matrix_outbox_cursor(&self, last_seq: i64) -> Result<(), BridgeError> {
+        self.request_json(
+            "POST",
+            "/api/matrix/outbox/ack",
+            Some(json!({ "bridgeId": "matrix-bridge", "lastSeq": last_seq })),
+        )?;
+        Ok(())
+    }
+
+    pub fn matrix_outbox_cursor(&self) -> Result<i64, BridgeError> {
+        let value = self.request_json(
+            "GET",
+            "/api/matrix/outbox/cursor?bridgeId=matrix-bridge",
+            None,
+        )?;
+        value
+            .get("lastSeq")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| BridgeError::backend("matrix cursor response missing lastSeq"))
     }
 
     fn request_json(
@@ -4201,6 +4331,14 @@ impl AgentdBridgeBackend for AgentdHttpBackend {
             .ok_or_else(|| BridgeError::backend("matrix outbox response missing events array"))?;
 
         events.iter().map(decode_outbox_event).collect()
+    }
+
+    fn acknowledge_outbox_cursor(&mut self, last_seq: i64) -> Result<(), BridgeError> {
+        self.acknowledge_matrix_outbox_cursor(last_seq)
+    }
+
+    fn outbox_cursor(&mut self) -> Result<Option<i64>, BridgeError> {
+        self.matrix_outbox_cursor().map(Some)
     }
 }
 

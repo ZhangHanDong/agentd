@@ -126,6 +126,43 @@ pub async fn get_session(
     row.as_ref().map(row_to_session).transpose()
 }
 
+/// Return the newest durable runtime session for a task. Native worker grants
+/// use this association to carry the immutable authority snapshot across the
+/// process boundary.
+pub async fn latest_session_for_task(
+    pool: &SqlitePool,
+    task_id: &TaskRunId,
+) -> Result<Option<RuntimeSessionRecord>, StoreError> {
+    let row = sqlx::query(
+        "SELECT id, execution_task_id, agent_profile_id, snapshot_authority_key, \
+         snapshot_resource_kind, snapshot_resource_id, snapshot_resource_version, \
+         snapshot_content_sha256, status, record_version, terminal_reason, created_at, updated_at \
+         FROM runtime_sessions WHERE execution_task_id = ? \
+         ORDER BY created_at DESC, id DESC LIMIT 1",
+    )
+    .bind(task_id.as_str())
+    .fetch_optional(pool)
+    .await?;
+    row.as_ref().map(row_to_session).transpose()
+}
+
+/// List logical sessions that explicitly requested native resume. The query is
+/// intentionally narrow so daemon restart recovery cannot resurrect terminal
+/// or merely requested sessions.
+pub async fn list_resume_pending_sessions(
+    pool: &SqlitePool,
+) -> Result<Vec<RuntimeSessionRecord>, StoreError> {
+    let rows = sqlx::query(
+        "SELECT id, execution_task_id, agent_profile_id, snapshot_authority_key, \
+         snapshot_resource_kind, snapshot_resource_id, snapshot_resource_version, \
+         snapshot_content_sha256, status, record_version, terminal_reason, created_at, updated_at \
+         FROM runtime_sessions WHERE status = 'resume_pending' ORDER BY updated_at, id",
+    )
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_session).collect()
+}
+
 /// Start one process attempt for a requested/resume-pending session on a
 /// current worker incarnation.
 ///
@@ -336,6 +373,33 @@ pub async fn mark_attempt_running(
     get_attempt(pool, attempt_id)
         .await?
         .ok_or(StoreError::NotFound)
+}
+
+/// Persist a provider-native session reference discovered after process start.
+pub async fn set_attempt_native_session_ref(
+    pool: &SqlitePool,
+    session_id: &RuntimeSessionId,
+    attempt_id: &RuntimeAttemptId,
+    native_session_ref: &str,
+) -> Result<(), StoreError> {
+    if native_session_ref.trim().is_empty() {
+        return Err(StoreError::Invariant(
+            "native session reference cannot be empty".into(),
+        ));
+    }
+    let result = sqlx::query(
+        "UPDATE runtime_attempts SET native_session_ref = ? \
+         WHERE id = ? AND runtime_session_id = ? AND is_current = 1",
+    )
+    .bind(native_session_ref)
+    .bind(attempt_id.as_str())
+    .bind(session_id.as_str())
+    .execute(pool)
+    .await?;
+    if result.rows_affected() != 1 {
+        return Err(StoreError::NotFound);
+    }
+    Ok(())
 }
 
 /// Reconcile a native process exit and close its logical runtime session.

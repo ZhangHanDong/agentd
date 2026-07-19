@@ -9,7 +9,9 @@ pub mod clock;
 pub mod command_runner;
 pub mod execution_evidence;
 pub mod mempal;
+pub mod native_runtime;
 pub mod project_authority;
+pub mod security;
 pub mod store;
 pub mod task_lease;
 pub mod worker_fleet;
@@ -33,9 +35,18 @@ pub use execution_evidence::{
     UsageTotals, WorkerArtifactAcknowledgement, WorkerArtifactReport, WorkerUsageReport,
 };
 pub use mempal::{DrawerHit, MempalClient};
+pub use native_runtime::{
+    NativeRuntimeAttemptStart, NativeRuntimeAttemptState, NativeRuntimeControlError,
+    NativeRuntimeControlPort, NativeRuntimeSessionValidate, NativeRuntimeSessionView,
+};
 pub use project_authority::{
     ProjectAuthorityAvailability, ProjectAuthorityError, ProjectAuthorityHealth,
     ProjectAuthorityMode, ProjectAuthorityPort, ProjectSnapshotResolveRequest,
+};
+pub use security::{
+    AuthenticatedWorkload, CapabilityAdmission, ExecutionSecurityScope, MtlsWorkloadVerifier,
+    ProtectedAction, ProtectedResource, SecretBrokerPort, SecretLease, SecretMaterial,
+    SecurityDenial, TenantAuthorizationPort, WorkloadRole,
 };
 pub use store::{RunStatus, Store};
 pub use task_lease::{

@@ -2,7 +2,8 @@
 //! read the production `RunHost`'s `open_task` needs. Names match
 //! `specs/store/p6-find-open-task-run.spec.md`.
 
-use agentd_core::types::{AgentId, NodeId, RunId};
+use agentd_core::ports::Store;
+use agentd_core::types::{AgentId, NativeExecutionSpec, NodeId, RunId};
 use agentd_store::{SqliteStore, run_repo, task_repo};
 
 async fn store() -> (SqliteStore, tempfile::TempDir) {
@@ -54,6 +55,32 @@ async fn set_task_run_worktree_persists_path() {
         .expect("open task run");
     assert_eq!(found.0, tr);
     assert_eq!(found.1.as_deref(), Some(wt));
+}
+
+#[tokio::test]
+async fn insert_task_run_with_spec_is_atomic_and_readable_through_store_port() {
+    let (s, _d) = store().await;
+    let run = RunId::from_string("r-spec");
+    run_repo::insert_run(s.pool(), &run, "sha")
+        .await
+        .expect("run");
+    let spec = NativeExecutionSpec {
+        version: 1,
+        provider: "codex".into(),
+        program: "codex".into(),
+        args: vec!["exec".into()],
+        cwd: None,
+        env: Vec::new(),
+    };
+    let task = Store::insert_task_run_with_spec(&s, &run, &NodeId::from_string("implement"), &spec)
+        .await
+        .expect("task with spec");
+    assert_eq!(
+        Store::get_task_execution_spec(&s, &task)
+            .await
+            .expect("read"),
+        Some(spec)
+    );
 }
 
 #[tokio::test]

@@ -19,6 +19,7 @@ async fn matrix_bridge_store_persists_room_mapping_and_event_records() {
         store.pool(),
         matrix_bridge_repo::MatrixBridgeRoomInput {
             room_id: text("!ops:matrix.test"),
+            project_id: Some(text("project-ops")),
             group_name: Some(text("ops")),
             agent_name: None,
             trusted: true,
@@ -30,6 +31,7 @@ async fn matrix_bridge_store_persists_room_mapping_and_event_records() {
     .expect("upsert room");
 
     assert_eq!(room.room_id, "!ops:matrix.test");
+    assert_eq!(room.project_id.as_deref(), Some("project-ops"));
     assert_eq!(room.group_name.as_deref(), Some("ops"));
     assert!(room.trusted);
     assert_eq!(room.trust_reason, "managed");
@@ -71,4 +73,33 @@ async fn matrix_bridge_store_persists_room_mapping_and_event_records() {
     .await
     .expect("record duplicate event");
     assert_eq!(duplicate.message_id.as_deref(), Some("msg-1"));
+}
+
+#[tokio::test]
+async fn matrix_outbox_cursor_is_durable_and_monotonic() {
+    let (store, _dir) = open_temp().await;
+    assert_eq!(
+        matrix_bridge_repo::get_outbox_cursor(store.pool(), "matrix-bridge")
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        matrix_bridge_repo::acknowledge_outbox_cursor(store.pool(), "matrix-bridge", 12)
+            .await
+            .unwrap(),
+        12
+    );
+    assert_eq!(
+        matrix_bridge_repo::acknowledge_outbox_cursor(store.pool(), "matrix-bridge", 7)
+            .await
+            .unwrap(),
+        12
+    );
+    assert_eq!(
+        matrix_bridge_repo::get_outbox_cursor(store.pool(), "matrix-bridge")
+            .await
+            .unwrap(),
+        12
+    );
 }

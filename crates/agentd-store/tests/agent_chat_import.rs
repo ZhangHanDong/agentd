@@ -299,3 +299,21 @@ async fn agent_chat_task_import_rejects_malformed_tasks_without_partial_writes()
         0
     );
 }
+
+#[tokio::test]
+async fn supported_state_migration_aggregates_agents_messages_tasks_and_cursors() {
+    let source = valid_message_checkout();
+    let (store, _target) = open_store().await;
+    let report = agent_chat_import::migrate_supported_state(
+        store.pool(),
+        source.path(),
+        AgentChatImportMode::Execute,
+    )
+    .await
+    .expect("migration");
+    assert!(report.ok);
+    assert_eq!(report.agents.agents.imported, 1);
+    assert_eq!(report.messages.messages.imported, 2);
+    assert_eq!(report.messages.cursors.imported, 2);
+    assert_eq!(report.tasks.tasks.imported, 0);
+}

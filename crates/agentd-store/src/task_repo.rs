@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use agentd_core::types::{AgentId, NodeId, RunId, TaskRunId};
+use agentd_core::types::{AgentId, NativeExecutionSpec, NodeId, RunId, TaskRunId};
 use sqlx::{Row, SqlitePool};
 
 use crate::error::StoreError;
@@ -33,6 +33,33 @@ pub async fn insert_task_run(
     Ok(TaskRunId::from_string(id))
 }
 
+/// Insert a task run and its immutable execution input in one transaction.
+pub async fn insert_task_run_with_spec(
+    pool: &SqlitePool,
+    run_id: &RunId,
+    node_id: &NodeId,
+    spec: &NativeExecutionSpec,
+) -> Result<TaskRunId, StoreError> {
+    spec.validate()
+        .map_err(|message| StoreError::Invariant(message.into()))?;
+    let encoded = serde_json::to_string(spec)?;
+    let id = format!("tr_{}", ulid::Ulid::new());
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO task_runs (id, run_id, node_id, status, started_at, execution_spec_json) \
+         VALUES (?, ?, ?, 'running', ?, ?)",
+    )
+    .bind(&id)
+    .bind(run_id.as_str())
+    .bind(node_id.as_str())
+    .bind(now_unix())
+    .bind(encoded)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(TaskRunId::from_string(id))
+}
+
 /// Persist the worktree path allocated to a task run.
 ///
 /// # Errors
@@ -51,6 +78,76 @@ pub async fn set_task_run_worktree(
         return Err(StoreError::NotFound);
     }
     Ok(())
+}
+
+/// Persist the versioned provider execution input used by a worker claim.
+pub async fn set_task_execution_spec(
+    pool: &SqlitePool,
+    task_run_id: &TaskRunId,
+    spec: &NativeExecutionSpec,
+) -> Result<(), StoreError> {
+    spec.validate()
+        .map_err(|message| StoreError::Invariant(message.into()))?;
+    let encoded =
+        serde_json::to_string(spec).map_err(|error| StoreError::Invariant(error.to_string()))?;
+    let result = sqlx::query(
+        "UPDATE task_runs SET execution_spec_json = ? WHERE id = ? \
+         AND NOT EXISTS (SELECT 1 FROM execution_task_leases \
+                         WHERE execution_task_id = task_runs.id AND status = 'active')",
+    )
+    .bind(encoded)
+    .bind(task_run_id.as_str())
+    .execute(pool)
+    .await?;
+    if result.rows_affected() == 0 {
+        let exists =
+            sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM task_runs WHERE id = ?)")
+                .bind(task_run_id.as_str())
+                .fetch_one(pool)
+                .await?;
+        return if exists == 1 {
+            Err(StoreError::Conflict(
+                "execution spec cannot change while task lease is active".into(),
+            ))
+        } else {
+            Err(StoreError::NotFound)
+        };
+    }
+    Ok(())
+}
+
+pub async fn get_task_execution_spec(
+    pool: &SqlitePool,
+    task_run_id: &TaskRunId,
+) -> Result<Option<NativeExecutionSpec>, StoreError> {
+    let encoded = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT execution_spec_json FROM task_runs WHERE id = ?",
+    )
+    .bind(task_run_id.as_str())
+    .fetch_optional(pool)
+    .await?
+    .ok_or(StoreError::NotFound)?;
+    encoded
+        .map(|value| {
+            let spec = serde_json::from_str::<NativeExecutionSpec>(&value)
+                .map_err(|error| StoreError::Invariant(error.to_string()))?;
+            spec.validate()
+                .map_err(|message| StoreError::Invariant(message.into()))?;
+            Ok(spec)
+        })
+        .transpose()
+}
+
+pub async fn get_task_run_run_id(
+    pool: &SqlitePool,
+    task_run_id: &TaskRunId,
+) -> Result<RunId, StoreError> {
+    let run_id = sqlx::query_scalar::<_, String>("SELECT run_id FROM task_runs WHERE id = ?")
+        .bind(task_run_id.as_str())
+        .fetch_optional(pool)
+        .await?
+        .ok_or(StoreError::NotFound)?;
+    Ok(RunId::from_string(run_id))
 }
 
 /// Persist the agent id that owns a task run.

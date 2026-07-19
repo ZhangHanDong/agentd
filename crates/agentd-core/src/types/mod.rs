@@ -8,8 +8,8 @@ pub mod verdict;
 
 pub use context::RunContext;
 pub use enterprise::{
-    AgentProfileStatus, FencingToken, InvalidFencingToken, LeaseStatus, RuntimeAttemptStatus,
-    RuntimeSessionStatus, TaskLeaseClaim, TaskLeaseGrant, WorkerStatus,
+    AgentProfileStatus, FencingToken, InvalidFencingToken, LeaseStatus, NativeExecutionSpec,
+    RuntimeAttemptStatus, RuntimeSessionStatus, TaskLeaseClaim, TaskLeaseGrant, WorkerStatus,
 };
 pub use handle::{AgentHandle, AgentStatus, BackendKind, CliKind, LaunchStrategy, SpawnRequest};
 pub use ids::{

@@ -188,6 +188,50 @@ async fn runtime_session_attempt_resume_keeps_session_and_immutable_placement() 
 }
 
 #[tokio::test]
+async fn current_attempt_native_session_ref_can_be_persisted_after_start() {
+    let fixture = fixture().await;
+    let session_id = RuntimeSessionId::new();
+    runtime_session_repo::create_session(
+        fixture.store.pool(),
+        session(session_id.clone(), &fixture),
+    )
+    .await
+    .expect("session");
+    let attempt_id = RuntimeAttemptId::new();
+    runtime_session_repo::start_attempt(
+        fixture.store.pool(),
+        &session_id,
+        attempt(attempt_id.clone(), fixture.incarnation_id.clone(), "native"),
+    )
+    .await
+    .expect("attempt");
+    runtime_session_repo::set_attempt_native_session_ref(
+        fixture.store.pool(),
+        &session_id,
+        &attempt_id,
+        "provider-ref-after-start",
+    )
+    .await
+    .expect("session ref");
+    assert_eq!(
+        runtime_session_repo::latest_attempt(fixture.store.pool(), &session_id)
+            .await
+            .expect("latest")
+            .and_then(|attempt| attempt.native_session_ref),
+        Some("provider-ref-after-start".into())
+    );
+    let empty = runtime_session_repo::set_attempt_native_session_ref(
+        fixture.store.pool(),
+        &session_id,
+        &attempt_id,
+        " ",
+    )
+    .await
+    .expect_err("empty ref");
+    assert!(matches!(empty, StoreError::Invariant(_)));
+}
+
+#[tokio::test]
 async fn runtime_session_rejects_terminal_or_stale_worker_attempt() {
     let fixture = fixture().await;
     let terminal_session_id = RuntimeSessionId::new();

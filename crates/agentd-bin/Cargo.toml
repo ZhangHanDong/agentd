@@ -30,6 +30,7 @@ agentd-core = { path = "../agentd-core" }
 agentd-matrix = { path = "../agentd-matrix" }
 agentd-store = { path = "../agentd-store" }
 agentd-surface = { path = "../agentd-surface" }
+agentd-security = { path = "../agentd-security" }
 agentd-tmux = { path = "../agentd-tmux" }
 async-trait = "0.1"
 sha2 = "0.10"
@@ -42,6 +43,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 rmcp = { workspace = true }
 thiserror = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
 # The in-memory port fakes (FakeBackend/MempalStub/FixedClock/RecordingCommandRunner)

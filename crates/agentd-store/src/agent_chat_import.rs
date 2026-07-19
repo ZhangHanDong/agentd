@@ -115,6 +115,40 @@ pub struct AgentChatTaskImportReport {
     pub drift: Vec<String>,
 }
 
+/// Aggregate report for the supported-state cutover import. Each underlying
+/// importer remains idempotent; callers can persist this report alongside the
+/// project cutover state and retry without duplicating stable source IDs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentChatMigrationReport {
+    pub mode: String,
+    pub agents: AgentChatAgentImportReport,
+    pub messages: AgentChatMessageImportReport,
+    pub tasks: AgentChatTaskImportReport,
+    pub ok: bool,
+}
+
+pub async fn migrate_supported_state(
+    pool: &SqlitePool,
+    agent_chat: &Path,
+    mode: AgentChatImportMode,
+) -> Result<AgentChatMigrationReport, StoreError> {
+    let agents =
+        import_agents_from_agent_chat(pool, agent_chat, AgentChatImportOptions { mode }).await?;
+    let messages =
+        import_messages_from_agent_chat(pool, agent_chat, AgentChatMessageImportOptions { mode })
+            .await?;
+    let tasks =
+        import_tasks_from_agent_chat(pool, agent_chat, AgentChatTaskImportOptions { mode }).await?;
+    let ok = agents.ok && messages.ok && tasks.ok;
+    Ok(AgentChatMigrationReport {
+        mode: mode.as_str().to_owned(),
+        agents,
+        messages,
+        tasks,
+        ok,
+    })
+}
+
 pub fn plan_agents_from_agent_chat(
     agent_chat: &Path,
 ) -> Result<AgentChatAgentImportReport, StoreError> {

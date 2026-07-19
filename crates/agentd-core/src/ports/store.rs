@@ -130,12 +130,46 @@ pub trait Store: Send + Sync {
         run_id: &RunId,
         node_id: &NodeId,
     ) -> Result<TaskRunId, CoreError>;
+    /// Atomically insert a task run and its validated execution input.
+    async fn insert_task_run_with_spec(
+        &self,
+        run_id: &RunId,
+        node_id: &NodeId,
+        spec: &crate::types::NativeExecutionSpec,
+    ) -> Result<TaskRunId, CoreError> {
+        let _ = (run_id, node_id, spec);
+        Err(CoreError::Invariant(
+            "atomic task execution spec insertion is unsupported by this store".into(),
+        ))
+    }
     /// Persist the agent id that owns a task run.
     async fn set_task_run_agent(
         &self,
         task_run_id: &TaskRunId,
         agent_id: &AgentId,
     ) -> Result<(), CoreError>;
+    /// Persist the immutable, versioned provider execution input for a task.
+    /// Implementations without enterprise task execution support fail closed.
+    async fn set_task_execution_spec(
+        &self,
+        task_run_id: &TaskRunId,
+        spec: &crate::types::NativeExecutionSpec,
+    ) -> Result<(), CoreError> {
+        let _ = (task_run_id, spec);
+        Err(CoreError::Invariant(
+            "task execution specs are unsupported by this store".into(),
+        ))
+    }
+    /// Read the immutable execution input for a task, if one has been set.
+    async fn get_task_execution_spec(
+        &self,
+        task_run_id: &TaskRunId,
+    ) -> Result<Option<crate::types::NativeExecutionSpec>, CoreError> {
+        let _ = task_run_id;
+        Err(CoreError::Invariant(
+            "task execution specs are unsupported by this store".into(),
+        ))
+    }
     /// Persist the worktree assigned to a task run.
     async fn set_task_run_worktree(
         &self,

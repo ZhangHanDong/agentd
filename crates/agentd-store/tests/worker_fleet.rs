@@ -229,3 +229,27 @@ async fn worker_fleet_rejects_invalid_auth_proof() {
         .expect_err("invalid proof");
     assert!(error.to_string().contains("authentication failed"));
 }
+
+#[tokio::test]
+async fn empty_rotation_proof_set_fails_closed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteStore::connect(&dir.path().join("agentd.db"))
+        .await
+        .expect("store");
+    let fleet = SqliteWorkerFleet::new(store.pool().clone()).with_auth_proofs(Vec::<String>::new());
+    let error = fleet
+        .register(&WorkerFleetRegisterRequest {
+            auth_proof: String::new(),
+            worker_id: WorkerId::new(),
+            trust_domain: "local".into(),
+            labels: json!({}),
+            incarnation_id: WorkerIncarnationId::new(),
+            daemon_version: "test".into(),
+            host_name: "host".into(),
+            network_zone: None,
+            capabilities: json!({}),
+        })
+        .await
+        .expect_err("empty configured proof set must reject");
+    assert!(error.to_string().contains("authentication failed"));
+}
