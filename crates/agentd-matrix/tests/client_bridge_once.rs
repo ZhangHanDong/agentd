@@ -369,9 +369,12 @@ fn bridge_config(server: &FakeHttpServer, state_path: PathBuf) -> MatrixClientBr
 
 fn bridge_runtime_responses(seq: i64, body: &str) -> Vec<FakeResponse> {
     vec![
+        native_caps_response(),
+        cursor_response(),
         FakeResponse::status(200, json!({"ok": true}).to_string()),
         FakeResponse::status(201, json!({"ok": true}).to_string()),
         outbox_response(vec![(seq, body)]),
+        ack_response(),
     ]
 }
 
@@ -393,6 +396,27 @@ fn outbox_response(events: Vec<(i64, &str)>) -> FakeResponse {
         })
         .collect();
     FakeResponse::status(200, json!({"events": events}).to_string())
+}
+
+fn native_caps_response() -> FakeResponse {
+    FakeResponse::status(
+        200,
+        json!({
+            "runtime": "native",
+            "runtimeApiVersion": 1,
+            "sessionResume": true,
+            "artifactAcknowledgement": true
+        })
+        .to_string(),
+    )
+}
+
+fn cursor_response() -> FakeResponse {
+    FakeResponse::status(200, json!({"lastSeq": 0}).to_string())
+}
+
+fn ack_response() -> FakeResponse {
+    FakeResponse::status(200, json!({"ok": true}).to_string())
 }
 
 fn puppet_accounts(server: &FakeHttpServer, path: &Path) -> BridgeOncePuppetAccountConfig {
@@ -461,13 +485,22 @@ fn matrix_client_bridge_once_runner_syncs_client_posts_backend_sends_outbox_save
             "reply from codex".to_owned()
         )]
     );
-    assert_eq!(requests[0].method, "POST");
-    assert_eq!(requests[0].path, "/api/matrix/rooms");
-    assert_eq!(requests[1].method, "POST");
-    assert_eq!(requests[1].path, "/api/matrix/inbound");
-    assert_eq!(requests[2].method, "GET");
-    assert_eq!(requests[2].path, "/api/matrix/outbox?from_seq=0");
-    let inbound_body: Value = serde_json::from_str(&requests[1].body).expect("inbound body");
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[0].path, "/api/runtime/capabilities");
+    assert_eq!(requests[1].method, "GET");
+    assert_eq!(
+        requests[1].path,
+        "/api/matrix/outbox/cursor?bridgeId=matrix-bridge"
+    );
+    assert_eq!(requests[2].method, "POST");
+    assert_eq!(requests[2].path, "/api/matrix/rooms");
+    assert_eq!(requests[3].method, "POST");
+    assert_eq!(requests[3].path, "/api/matrix/inbound");
+    assert_eq!(requests[4].method, "GET");
+    assert_eq!(requests[4].path, "/api/matrix/outbox?from_seq=0");
+    assert_eq!(requests[5].method, "POST");
+    assert_eq!(requests[5].path, "/api/matrix/outbox/ack");
+    let inbound_body: Value = serde_json::from_str(&requests[3].body).expect("inbound body");
     assert_eq!(inbound_body["body"], "please continue");
     let state = read_json(&state_path);
     assert_eq!(state["nextFromSeq"], 21);
@@ -476,6 +509,8 @@ fn matrix_client_bridge_once_runner_syncs_client_posts_backend_sends_outbox_save
 #[test]
 fn matrix_client_bridge_once_executes_bot_command_replies_and_reports_count() {
     let agentd = FakeHttpServer::new(vec![
+        native_caps_response(),
+        cursor_response(),
         FakeResponse::status(
             200,
             json!([
@@ -517,13 +552,20 @@ fn matrix_client_bridge_once_executes_bot_command_replies_and_reports_count() {
     assert_eq!(report.run.bot_command_replies_sent, 1);
     assert_eq!(report.next_from_seq, 0);
     assert_eq!(requests[0].method, "GET");
-    assert_eq!(requests[0].path, "/api/agents");
+    assert_eq!(requests[0].path, "/api/runtime/capabilities");
     assert_eq!(requests[1].method, "GET");
-    assert_eq!(requests[1].path, "/api/groups");
-    assert_eq!(requests[2].method, "POST");
-    assert_eq!(requests[2].path, "/api/matrix/rooms");
+    assert_eq!(
+        requests[1].path,
+        "/api/matrix/outbox/cursor?bridgeId=matrix-bridge"
+    );
+    assert_eq!(requests[2].method, "GET");
+    assert_eq!(requests[2].path, "/api/agents");
     assert_eq!(requests[3].method, "GET");
-    assert_eq!(requests[3].path, "/api/matrix/outbox?from_seq=0");
+    assert_eq!(requests[3].path, "/api/groups");
+    assert_eq!(requests[4].method, "POST");
+    assert_eq!(requests[4].path, "/api/matrix/rooms");
+    assert_eq!(requests[5].method, "GET");
+    assert_eq!(requests[5].path, "/api/matrix/outbox?from_seq=0");
     assert!(
         !requests
             .iter()
@@ -543,6 +585,8 @@ fn matrix_client_bridge_once_executes_bot_command_replies_and_reports_count() {
 #[test]
 fn matrix_client_bridge_once_executes_management_command_effects_and_reports_count() {
     let agentd = FakeHttpServer::new(vec![
+        native_caps_response(),
+        cursor_response(),
         FakeResponse::status(
             200,
             json!([
@@ -613,14 +657,19 @@ fn matrix_client_bridge_once_executes_management_command_effects_and_reports_cou
             .1
             .contains("DM room ready for codex-worker")
     );
-    assert_eq!(requests[0].path, "/api/agents");
-    assert_eq!(requests[1].path, "/api/groups");
-    assert_eq!(requests[2].method, "GET");
-    assert_eq!(requests[2].path, "/api/agents/codex-worker");
-    assert_eq!(requests[3].method, "POST");
-    assert_eq!(requests[3].path, "/api/matrix/rooms");
+    assert_eq!(requests[0].path, "/api/runtime/capabilities");
+    assert_eq!(
+        requests[1].path,
+        "/api/matrix/outbox/cursor?bridgeId=matrix-bridge"
+    );
+    assert_eq!(requests[2].path, "/api/agents");
+    assert_eq!(requests[3].path, "/api/groups");
     assert_eq!(requests[4].method, "GET");
-    assert_eq!(requests[4].path, "/api/matrix/outbox?from_seq=0");
+    assert_eq!(requests[4].path, "/api/agents/codex-worker");
+    assert_eq!(requests[5].method, "POST");
+    assert_eq!(requests[5].path, "/api/matrix/rooms");
+    assert_eq!(requests[6].method, "GET");
+    assert_eq!(requests[6].path, "/api/matrix/outbox?from_seq=0");
     let state = read_json(&state_path);
     assert_eq!(state["nextFromSeq"], 0);
 }
@@ -628,6 +677,8 @@ fn matrix_client_bridge_once_executes_management_command_effects_and_reports_cou
 #[test]
 fn matrix_client_bridge_once_executes_dm_lifecycle_with_fake_client() {
     let agentd = FakeHttpServer::new(vec![
+        native_caps_response(),
+        cursor_response(),
         FakeResponse::status(
             200,
             json!([
@@ -683,13 +734,16 @@ fn matrix_client_bridge_once_executes_dm_lifecycle_with_fake_client() {
     );
     assert_eq!(client.sent().len(), 1);
     assert!(client.sent()[0].1.contains("DM room ready"));
-    assert_eq!(requests[0].path, "/api/agents");
+    assert_eq!(requests[0].path, "/api/runtime/capabilities");
+    assert_eq!(requests[2].path, "/api/agents");
 }
 
 #[test]
 fn matrix_client_bridge_once_runner_provisions_puppets_before_matrix_sync() {
     let homeserver = FakeHttpServer::new(vec![matrix_login_response()]);
     let agentd = FakeHttpServer::new(vec![
+        native_caps_response(),
+        cursor_response(),
         FakeResponse::status(200, json!({"ok": true}).to_string()),
         outbox_response(Vec::new()),
     ]);
@@ -723,8 +777,10 @@ fn matrix_client_bridge_once_runner_provisions_puppets_before_matrix_sync() {
     assert_eq!(client.calls()[0..2], ["ensure_logged_in", "sync_once"]);
     assert_eq!(homeserver_requests[0].method, "POST");
     assert_eq!(homeserver_requests[0].path, "/_matrix/client/v3/login");
-    assert_eq!(agentd_requests[0].method, "POST");
-    assert_eq!(agentd_requests[0].path, "/api/matrix/rooms");
+    assert_eq!(agentd_requests[0].method, "GET");
+    assert_eq!(agentd_requests[0].path, "/api/runtime/capabilities");
+    assert_eq!(agentd_requests[2].method, "POST");
+    assert_eq!(agentd_requests[2].path, "/api/matrix/rooms");
     let puppet_state = read_json(&puppet_state_path);
     assert_eq!(puppet_state["agentTokens"]["codex-worker"], "codex-token");
 }
@@ -732,6 +788,8 @@ fn matrix_client_bridge_once_runner_provisions_puppets_before_matrix_sync() {
 #[test]
 fn matrix_client_bridge_once_runner_preserves_cursor_on_matrix_send_failure() {
     let agentd = FakeHttpServer::new(vec![
+        native_caps_response(),
+        cursor_response(),
         FakeResponse::status(200, json!({"ok": true}).to_string()),
         outbox_response(vec![(21, "first"), (22, "second")]),
     ]);

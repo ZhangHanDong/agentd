@@ -231,6 +231,7 @@ async fn mcp_stdio_tools_list_returns_registered_tools() {
             "submit_review",
             "send_message",
             "post",
+            "submit_human_answer",
             "check_inbox",
             "check_group",
             "query_run"
@@ -282,7 +283,7 @@ async fn mcp_stdio_tools_list_includes_input_schemas() {
     .await;
 
     let tools = response["result"]["tools"].as_array().expect("tools array");
-    assert_eq!(tools.len(), 8);
+    assert_eq!(tools.len(), 9);
     for tool in tools {
         assert_eq!(tool["inputSchema"]["type"], "object", "{tool}");
     }
@@ -1306,4 +1307,37 @@ fn rmcp_workspace_dependency_is_version_aligned() {
         "{workspace_toml}"
     );
     assert!(bin_toml.contains("rmcp = { workspace = true"), "{bin_toml}");
+}
+
+#[tokio::test]
+async fn mcp_stdio_tools_list_includes_submit_human_answer_schema() {
+    let (host, _dir) = production_host().await;
+    let response = handle_request(
+        &host,
+        json!({"jsonrpc": "2.0", "id": 12, "method": "tools/list"}),
+    )
+    .await;
+
+    let tools = response["result"]["tools"].as_array().expect("tools array");
+    let submit_human_answer = tools
+        .iter()
+        .find(|tool| tool["name"] == "submit_human_answer")
+        .expect("submit_human_answer tool");
+    let required = submit_human_answer["inputSchema"]["required"]
+        .as_array()
+        .expect("required array");
+    for field in ["wait_id", "answer"] {
+        assert!(
+            required.iter().any(|value| value == field),
+            "missing {field}: {submit_human_answer}"
+        );
+    }
+    assert!(
+        !required.iter().any(|value| value == "feedback"),
+        "feedback should be optional: {submit_human_answer}"
+    );
+    assert_eq!(
+        submit_human_answer["inputSchema"]["properties"]["feedback"]["type"],
+        "string"
+    );
 }

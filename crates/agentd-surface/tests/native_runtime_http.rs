@@ -62,6 +62,7 @@ impl NativeRuntimeControlPort for FakeControlPlane {
                 session_id: request.session_id.clone(),
                 status: RuntimeAttemptStatus::Starting,
                 native_session_ref: None,
+                exit_code: None,
                 observed_at: request.observed_at,
             }),
         }

@@ -233,6 +233,7 @@ fn daemon_config(api_token: Option<&str>) -> DaemonConfig {
         api_token: api_token.map(ToOwned::to_owned),
         agent_tokens: Vec::new(),
         agent_token_mode: "audit".to_owned(),
+        accept_workflow_change: false,
     }
 }
 
@@ -355,19 +356,53 @@ fn agentd_cli_matrix_client_bridge_service_accepts_bot_command_acl_options() {
     );
 }
 
+fn native_caps_response() -> FakeResponse {
+    FakeResponse::status(
+        200,
+        json!({
+            "runtime": "native",
+            "runtimeApiVersion": 1,
+            "sessionResume": true,
+            "artifactAcknowledgement": true
+        })
+        .to_string(),
+    )
+}
+
+fn cursor_response() -> FakeResponse {
+    FakeResponse::status(200, json!({"lastSeq": 0}).to_string())
+}
+
+fn ok_response() -> FakeResponse {
+    FakeResponse::status(200, json!({"ok": true}).to_string())
+}
+
+/// Two gated iterations. `second_iteration_acks` controls whether the second
+/// iteration reaches its outbox acknowledgement (false when the Matrix send is
+/// scripted to fail before the ack request is issued).
 fn bridge_runtime_responses(
     first_seq: i64,
     first_summary: &str,
     second_seq: i64,
     second_summary: &str,
+    second_iteration_acks: bool,
 ) -> Vec<FakeResponse> {
-    vec![
-        FakeResponse::status(200, json!({"ok": true}).to_string()),
+    let mut responses = vec![
+        native_caps_response(),
+        cursor_response(),
+        ok_response(),
         FakeResponse::status(201, json!({"ok": true}).to_string()),
         FakeResponse::status(200, outbox_response(first_seq, first_summary).to_string()),
-        FakeResponse::status(200, json!({"ok": true}).to_string()),
+        ok_response(),
+        native_caps_response(),
+        cursor_response(),
+        ok_response(),
         FakeResponse::status(200, outbox_response(second_seq, second_summary).to_string()),
-    ]
+    ];
+    if second_iteration_acks {
+        responses.push(ok_response());
+    }
+    responses
 }
 
 fn outbox_response(seq: i64, summary: &str) -> Value {
@@ -448,6 +483,7 @@ fn agentd_bin_matrix_client_bridge_service_runs_bounded_iterations_with_fake_cli
         "first reply",
         22,
         "second reply",
+        true,
     ));
     let dir = tempfile::tempdir().expect("tempdir");
     let state_path = dir.path().join("state.json");
@@ -490,23 +526,43 @@ fn agentd_bin_matrix_client_bridge_service_runs_bounded_iterations_with_fake_cli
 
     let requests = server.requests();
     server.join();
-    assert_eq!(requests[0].method, "POST");
-    assert_eq!(requests[0].path, "/api/matrix/rooms");
-    assert_eq!(requests[1].method, "POST");
-    assert_eq!(requests[1].path, "/api/matrix/inbound");
-    assert!(requests[1].body.contains("$event-1"));
-    assert_eq!(requests[2].method, "GET");
-    assert_eq!(requests[2].path, "/api/matrix/outbox?from_seq=0");
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[0].path, "/api/runtime/capabilities");
+    assert_eq!(requests[1].method, "GET");
+    assert_eq!(
+        requests[1].path,
+        "/api/matrix/outbox/cursor?bridgeId=matrix-bridge"
+    );
+    assert_eq!(requests[2].method, "POST");
+    assert_eq!(requests[2].path, "/api/matrix/rooms");
     assert_eq!(requests[3].method, "POST");
-    assert_eq!(requests[3].path, "/api/matrix/rooms");
+    assert_eq!(requests[3].path, "/api/matrix/inbound");
+    assert!(requests[3].body.contains("$event-1"));
     assert_eq!(requests[4].method, "GET");
-    assert_eq!(requests[4].path, "/api/matrix/outbox?from_seq=21");
+    assert_eq!(requests[4].path, "/api/matrix/outbox?from_seq=0");
+    assert_eq!(requests[5].method, "POST");
+    assert_eq!(requests[5].path, "/api/matrix/outbox/ack");
+    assert_eq!(requests[6].method, "GET");
+    assert_eq!(requests[6].path, "/api/runtime/capabilities");
+    assert_eq!(requests[7].method, "GET");
+    assert_eq!(
+        requests[7].path,
+        "/api/matrix/outbox/cursor?bridgeId=matrix-bridge"
+    );
+    assert_eq!(requests[8].method, "POST");
+    assert_eq!(requests[8].path, "/api/matrix/rooms");
+    assert_eq!(requests[9].method, "GET");
+    assert_eq!(requests[9].path, "/api/matrix/outbox?from_seq=21");
+    assert_eq!(requests[10].method, "POST");
+    assert_eq!(requests[10].path, "/api/matrix/outbox/ack");
     assert_eq!(read_state(&state_path)["nextFromSeq"], 22);
 }
 
 #[test]
 fn agentd_bin_matrix_client_bridge_service_reports_bot_command_reply_counts() {
     let server = FakeAgentdServer::new(vec![
+        native_caps_response(),
+        cursor_response(),
         FakeResponse::status(
             200,
             json!([
@@ -555,13 +611,20 @@ fn agentd_bin_matrix_client_bridge_service_reports_bot_command_reply_counts() {
     assert_eq!(client.sent().len(), 1);
     assert!(client.sent()[0].1.contains("=== System Status ==="));
     assert_eq!(requests[0].method, "GET");
-    assert_eq!(requests[0].path, "/api/agents");
+    assert_eq!(requests[0].path, "/api/runtime/capabilities");
     assert_eq!(requests[1].method, "GET");
-    assert_eq!(requests[1].path, "/api/groups");
-    assert_eq!(requests[2].method, "POST");
-    assert_eq!(requests[2].path, "/api/matrix/rooms");
+    assert_eq!(
+        requests[1].path,
+        "/api/matrix/outbox/cursor?bridgeId=matrix-bridge"
+    );
+    assert_eq!(requests[2].method, "GET");
+    assert_eq!(requests[2].path, "/api/agents");
     assert_eq!(requests[3].method, "GET");
-    assert_eq!(requests[3].path, "/api/matrix/outbox?from_seq=0");
+    assert_eq!(requests[3].path, "/api/groups");
+    assert_eq!(requests[4].method, "POST");
+    assert_eq!(requests[4].path, "/api/matrix/rooms");
+    assert_eq!(requests[5].method, "GET");
+    assert_eq!(requests[5].path, "/api/matrix/outbox?from_seq=0");
     assert!(
         !requests
             .iter()
@@ -577,6 +640,7 @@ fn agentd_bin_matrix_client_bridge_service_preserves_cursor_when_later_iteration
         "first reply",
         22,
         "second reply",
+        false,
     ));
     let dir = tempfile::tempdir().expect("tempdir");
     let state_path = dir.path().join("state.json");

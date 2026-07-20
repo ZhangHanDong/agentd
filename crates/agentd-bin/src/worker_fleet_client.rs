@@ -201,10 +201,9 @@ impl WorkerFleetHttpClient {
             tokio::select! {
                 _ = ticker.tick() => {
                     match self.heartbeat_with_retry(heartbeat, policy).await {
-                        Ok(_) => {}
-                        Err(WorkerFleetError::Unavailable(_)) => {
-                            // Keep the worker alive across a daemon restart or
-                            // network partition; the next tick retries.
+                        Ok(_) | Err(WorkerFleetError::Unavailable(_)) => {
+                            // Success or a transient outage: keep the worker
+                            // alive; the next tick retries.
                         }
                         Err(error) => return Err(error),
                     }
@@ -212,7 +211,7 @@ impl WorkerFleetHttpClient {
                 changed = shutdown.changed() => {
                     match changed {
                         Ok(()) if *shutdown.borrow() => return Ok(()),
-                        Ok(()) => continue,
+                        Ok(()) => {}
                         Err(_) => return Ok(()),
                     }
                 }
@@ -246,7 +245,7 @@ impl WorkerFleetHttpClient {
                     let request = self.incarnation_request(
                         incarnation_id.clone(),
                         observed_at,
-                        observed_at.saturating_add(lease_ttl.as_secs().max(1) as i64),
+                        observed_at.saturating_add(i64::try_from(lease_ttl.as_secs().max(1)).unwrap_or(i64::MAX)),
                     );
                     match self.pull_native_with_scope(&request, policy).await {
                         Ok(Some(grant)) => execute(grant).await?,
@@ -265,7 +264,7 @@ impl WorkerFleetHttpClient {
                 changed = shutdown.changed() => {
                     match changed {
                         Ok(()) if *shutdown.borrow() => return Ok(()),
-                        Ok(()) => continue,
+                        Ok(()) => {}
                         Err(_) => return Ok(()),
                     }
                 }
@@ -295,7 +294,7 @@ impl WorkerFleetHttpClient {
             String::new()
         };
         write!(stream, "POST {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{authorization}{certificate_header}Connection: close\r\n\r\n", self.authority, body.len())
-            .and_then(|_| stream.write_all(&body))
+            .and_then(|()| stream.write_all(&body))
             .map_err(|error| WorkerFleetError::Unavailable(error.to_string()))?;
         let mut response = Vec::new();
         stream
@@ -332,7 +331,9 @@ fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs() as i64
+        .as_secs()
+        .try_into()
+        .unwrap_or(i64::MAX)
 }
 
 fn classify_http_error(status: u16, body: &str) -> WorkerFleetError {
@@ -346,6 +347,7 @@ fn classify_http_error(status: u16, body: &str) -> WorkerFleetError {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::classify_http_error;
     use agentd_core::ports::WorkerFleetError;

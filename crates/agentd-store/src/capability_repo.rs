@@ -21,6 +21,7 @@ pub struct IssuedCapability {
 /// Derive the worker execution scope from an immutable authority snapshot and
 /// the current fenced lease. This is intentionally pure: persistence and lease
 /// validation remain the responsibility of the caller.
+#[must_use]
 pub fn scope_for_snapshot(
     snapshot: &ProjectExecutionSnapshot,
     claim: TaskLeaseClaim,

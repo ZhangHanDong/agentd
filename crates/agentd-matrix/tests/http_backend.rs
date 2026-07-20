@@ -597,38 +597,41 @@ impl MatrixBridgeTransport for FakeTransport {
 
 #[test]
 fn matrix_runtime_with_http_backend_sends_outbox_and_persists_cursor() {
-    let server = FakeAgentdServer::new(vec![FakeResponse::status(
-        200,
-        json!({
-            "events": [
-                {
-                    "seq": 1,
-                    "event": "message",
-                    "created_at": 123,
-                    "payload": {
-                        "messageId": "msg-1",
-                        "source": "api",
-                        "target": "codex-worker",
-                        "roomId": "!ops:matrix.test",
-                        "full": "first"
+    let server = FakeAgentdServer::new(vec![
+        FakeResponse::status(
+            200,
+            json!({
+                "events": [
+                    {
+                        "seq": 1,
+                        "event": "message",
+                        "created_at": 123,
+                        "payload": {
+                            "messageId": "msg-1",
+                            "source": "api",
+                            "target": "codex-worker",
+                            "roomId": "!ops:matrix.test",
+                            "full": "first"
+                        }
+                    },
+                    {
+                        "seq": 2,
+                        "event": "message",
+                        "created_at": 124,
+                        "payload": {
+                            "messageId": "msg-2",
+                            "source": "api",
+                            "target": "codex-worker",
+                            "roomId": "!ops:matrix.test",
+                            "summary": "second"
+                        }
                     }
-                },
-                {
-                    "seq": 2,
-                    "event": "message",
-                    "created_at": 124,
-                    "payload": {
-                        "messageId": "msg-2",
-                        "source": "api",
-                        "target": "codex-worker",
-                        "roomId": "!ops:matrix.test",
-                        "summary": "second"
-                    }
-                }
-            ]
-        })
-        .to_string(),
-    )]);
+                ]
+            })
+            .to_string(),
+        ),
+        FakeResponse::status(200, json!({"ok": true}).to_string()),
+    ]);
     let config = BridgeConfig::new(server.base_url()).expect("config");
     let backend = AgentdHttpBackend::new(&config).expect("http backend");
     let transport = FakeTransport::default();

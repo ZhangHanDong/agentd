@@ -31,6 +31,7 @@ pub struct Engine<'a> {
     registry: &'a HandlerRegistry,
     ports: Ports<'a>,
     workflow_sha: String,
+    accept_workflow_change: bool,
     /// Optional per-task_run worktree allocator (P2 C1' R3a). Default `None`
     /// leaves codergen spawning in `"."`.
     worktree_allocator: Option<&'a dyn WorktreeAllocator>,
@@ -73,8 +74,18 @@ impl<'a> Engine<'a> {
             registry,
             ports,
             workflow_sha: workflow_sha.into(),
+            accept_workflow_change: false,
             worktree_allocator: None,
         }
+    }
+
+    /// Allow resuming a checkpoint whose stored workflow sha differs from the
+    /// current graph sha. Default is false; production wires this to an explicit
+    /// operator flag.
+    #[must_use]
+    pub fn with_accept_workflow_change(mut self, accept: bool) -> Self {
+        self.accept_workflow_change = accept;
+        self
     }
 
     /// Thread an optional per-task_run worktree allocator into handlers.
@@ -90,6 +101,19 @@ impl<'a> Engine<'a> {
     /// Returns [`CoreError`] on a store/handler failure or an engine invariant
     /// violation (missing start node, unknown handler, step ceiling exceeded).
     pub async fn execute(&self, run_id: &RunId) -> Result<RunProgress, CoreError> {
+        self.execute_with_context(run_id, RunContext::new()).await
+    }
+
+    /// Run `run_id` from the graph's start node with a seeded initial context.
+    ///
+    /// # Errors
+    /// Returns [`CoreError`] on a store/handler failure or an engine invariant
+    /// violation (missing start node, unknown handler, step ceiling exceeded).
+    pub async fn execute_with_context(
+        &self,
+        run_id: &RunId,
+        initial_context: RunContext,
+    ) -> Result<RunProgress, CoreError> {
         let start = self
             .graph
             .starts()
@@ -103,7 +127,7 @@ impl<'a> Engine<'a> {
         tracing::info!(run_id = %run_id.as_str(), "run started");
         let state = RunState {
             current: NodeId::parsed(start.id.as_str()),
-            context: RunContext::new(),
+            context: initial_context,
             attempts: HashMap::new(),
             completed: Vec::new(),
         };
@@ -147,6 +171,7 @@ impl<'a> Engine<'a> {
             .ok_or_else(|| {
                 CoreError::Invariant(format!("parked run {} has no checkpoint", run_id.as_str()))
             })?;
+        checkpoint.resume_guard(&self.workflow_sha, self.accept_workflow_change)?;
         let mut state = RunState {
             current: node_id.clone(),
             context: checkpoint.context_snapshot,
@@ -262,7 +287,7 @@ impl<'a> Engine<'a> {
                 // Start does no work; advance with a synthetic success.
                 let current = state.current.clone();
                 match self
-                    .advance(run_id, current.as_str(), &Outcome::success(), state)
+                    .advance(run_id, current.as_str(), &Outcome::success(), state, None)
                     .await?
                 {
                     Advanced::To(next) => {
@@ -369,10 +394,7 @@ impl<'a> Engine<'a> {
     ) -> Result<Flow, CoreError> {
         // Outcome.context_updates merge on Done (ctx-staged already merged by caller).
         state.context.merge(&outcome.context_updates);
-        self.ports
-            .store
-            .insert_node_outcome(run_id, node_id, &outcome)
-            .await?;
+        let persisted_outcome = outcome.clone();
         let attempts_here = {
             let counter = state
                 .attempts
@@ -386,7 +408,8 @@ impl<'a> Engine<'a> {
             let max = retry_max(self.graph.node(node_id.as_str()));
             if attempts_here < max {
                 // Re-run the same node; current is unchanged.
-                self.write_checkpoint(run_id, state).await?;
+                self.commit_outcome_checkpoint(run_id, node_id, &persisted_outcome, state)
+                    .await?;
                 return Ok(Flow::Continue);
             }
             // Retry budget exhausted — route as a Fail.
@@ -394,18 +417,31 @@ impl<'a> Engine<'a> {
         }
 
         match self
-            .advance(run_id, node_id.as_str(), &outcome, state)
+            .advance(
+                run_id,
+                node_id.as_str(),
+                &outcome,
+                state,
+                Some((node_id, &outcome)),
+            )
             .await?
         {
             Advanced::To(next) => {
                 state.completed.push(node_id.clone());
                 state.current = next;
-                self.write_checkpoint(run_id, state).await?;
+                self.commit_outcome_checkpoint(run_id, node_id, &persisted_outcome, state)
+                    .await?;
                 Ok(Flow::Continue)
             }
             // The store status is set by the caller via `fail()`; process_done
             // stays pure so both run_loop and deliver_event reconcile it once.
-            Advanced::Stuck(reason) => Ok(Flow::Fail(reason)),
+            Advanced::Stuck(reason) => {
+                self.ports
+                    .store
+                    .insert_node_outcome(run_id, node_id, &persisted_outcome)
+                    .await?;
+                Ok(Flow::Fail(reason))
+            }
         }
     }
 
@@ -419,6 +455,7 @@ impl<'a> Engine<'a> {
         node_id: &str,
         outcome: &Outcome,
         state: &RunState,
+        pending_goal_outcome: Option<(&NodeId, &Outcome)>,
     ) -> Result<Advanced, CoreError> {
         let Some(target) = select_next_edge(
             self.graph,
@@ -435,7 +472,9 @@ impl<'a> Engine<'a> {
         };
 
         if self.is_terminal(&target) {
-            let gate = self.evaluate_goal_gate(run_id).await?;
+            let gate = self
+                .evaluate_goal_gate(run_id, pending_goal_outcome)
+                .await?;
             if !gate.met {
                 let synthetic = Outcome {
                     status: Status::Fail,
@@ -469,6 +508,7 @@ impl<'a> Engine<'a> {
     async fn evaluate_goal_gate(
         &self,
         run_id: &RunId,
+        pending_outcome: Option<(&NodeId, &Outcome)>,
     ) -> Result<goal_gate::GoalGateStatus, CoreError> {
         let mut outcomes: BTreeMap<NodeId, Outcome> = BTreeMap::new();
         for node in &self.graph.nodes {
@@ -477,6 +517,15 @@ impl<'a> Engine<'a> {
                 if let Some(outcome) = self.ports.store.latest_outcome(run_id, &nid).await? {
                     outcomes.insert(nid, outcome);
                 }
+            }
+        }
+        if let Some((node_id, outcome)) = pending_outcome {
+            if self
+                .graph
+                .node(node_id.as_str())
+                .is_some_and(|node| node.goal_gate)
+            {
+                outcomes.insert(node_id.clone(), outcome.clone());
             }
         }
         Ok(goal_gate::evaluate(self.graph, &outcomes))
@@ -489,20 +538,38 @@ impl<'a> Engine<'a> {
     }
 
     async fn write_checkpoint(&self, run_id: &RunId, state: &RunState) -> Result<(), CoreError> {
+        let checkpoint = self.checkpoint_for(run_id, state);
+        self.ports.store.write_checkpoint(&checkpoint).await
+    }
+
+    async fn commit_outcome_checkpoint(
+        &self,
+        run_id: &RunId,
+        node_id: &NodeId,
+        outcome: &Outcome,
+        state: &RunState,
+    ) -> Result<(), CoreError> {
+        let checkpoint = self.checkpoint_for(run_id, state);
+        self.ports
+            .store
+            .insert_node_outcome_and_checkpoint(run_id, node_id, outcome, &checkpoint)
+            .await
+    }
+
+    fn checkpoint_for(&self, run_id: &RunId, state: &RunState) -> Checkpoint {
         let retry_counts: BTreeMap<NodeId, u32> = state
             .attempts
             .iter()
             .map(|(k, v)| (NodeId::parsed(k.as_str()), *v))
             .collect();
-        let checkpoint = Checkpoint {
+        Checkpoint {
             run_id: run_id.clone(),
             current_node: state.current.clone(),
             completed_nodes: state.completed.clone(),
             retry_counts,
             context_snapshot: state.context.clone(),
             workflow_sha: self.workflow_sha.clone(),
-        };
-        self.ports.store.write_checkpoint(&checkpoint).await
+        }
     }
 }
 

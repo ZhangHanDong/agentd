@@ -1887,8 +1887,8 @@ pub fn live_event_stream(
 fn event_frame(rec: &EventRecord) -> Event {
     Event::default()
         .id(rec.seq.to_string())
-        .event(rec.kind.clone())
-        .data(rec.payload.clone())
+        .event(sanitize_sse_event_name(&rec.kind))
+        .data(sanitize_sse_data(&rec.payload))
 }
 
 fn relay_stream_event_frame(rec: &RelayStreamEventRecord) -> Event {
@@ -1912,8 +1912,30 @@ fn resync_frame(snap: &RunSnapshot) -> Event {
         "context": snap.context,
     });
     Event::default()
-        .event("state_resync")
-        .data(data.to_string())
+        .event(sanitize_sse_event_name("state_resync"))
+        .data(sanitize_sse_data(&data.to_string()))
+}
+
+fn sanitize_sse_event_name(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| match ch {
+            '\r' | '\n' => '_',
+            _ => ch,
+        })
+        .collect()
+}
+
+fn sanitize_sse_data(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\r' => out.push_str("\\r"),
+            '\n' => out.push_str("\\n"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 fn is_terminal_kind(kind: &str) -> bool {

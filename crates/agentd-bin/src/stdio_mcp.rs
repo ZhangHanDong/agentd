@@ -1120,6 +1120,15 @@ fn input_schema_for_tool(name: &str, identity: Option<&str>) -> JsonObject {
         "post" => post_schema(identity_bound),
         "check_inbox" => check_inbox_schema(identity_bound),
         "check_group" => check_group_schema(identity_bound),
+        "submit_human_answer" => json!({
+            "type": "object",
+            "properties": {
+                "wait_id": { "type": "string" },
+                "answer": { "type": "string" },
+                "feedback": { "type": "string" }
+            },
+            "required": ["wait_id", "answer"]
+        }),
         "query_run" => json!({
             "type": "object",
             "properties": {

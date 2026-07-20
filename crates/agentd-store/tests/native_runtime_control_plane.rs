@@ -154,6 +154,7 @@ async fn sqlite_adapter_starts_updates_and_terminates_attempt() {
             session_id: fixture.session_id.clone(),
             status: RuntimeAttemptStatus::Running,
             native_session_ref: Some("thread-abc123".to_string()),
+            exit_code: None,
             observed_at: 2,
         })
         .await
@@ -171,6 +172,7 @@ async fn sqlite_adapter_starts_updates_and_terminates_attempt() {
             session_id: fixture.session_id.clone(),
             status: RuntimeAttemptStatus::Exited,
             native_session_ref: None,
+            exit_code: None,
             observed_at: 3,
         })
         .await
@@ -198,6 +200,7 @@ async fn sqlite_adapter_rejects_non_terminal_reconciliation() {
             session_id: fixture.session_id.clone(),
             status: RuntimeAttemptStatus::Running,
             native_session_ref: None,
+            exit_code: None,
             observed_at: 2,
         })
         .await
@@ -234,6 +237,7 @@ async fn sqlite_adapter_serves_session_view_for_resume() {
             session_id: fixture.session_id.clone(),
             status: RuntimeAttemptStatus::Running,
             native_session_ref: Some("thread-resume-1".to_string()),
+            exit_code: None,
             observed_at: 2,
         })
         .await

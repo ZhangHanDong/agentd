@@ -67,6 +67,44 @@ echo 'https://example.invalid/pull/1'
     fs::set_permissions(&gh, perms).expect("chmod fake gh");
 }
 
+fn assert_no_common_history_guidance(stderr: &str, task_branch: &str, base_branch: &str) {
+    let base_ref = format!("origin/{base_branch}");
+    let retry = format!("bash scripts/agentd_open_pr.sh {TASK_RUN_ID} {base_branch}");
+
+    assert!(
+        stderr.contains("repair task branch with:"),
+        "stderr should introduce repair guidance: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("git switch {task_branch}")),
+        "stderr should switch to the failed task branch: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "bash scripts/agentd_pr_history_bridge.sh {base_branch}"
+        )),
+        "stderr should show the bridge dry-run command: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "AGENTD_PR_HISTORY_BRIDGE=1 bash scripts/agentd_pr_history_bridge.sh --execute {base_branch}"
+        )),
+        "stderr should show the guarded bridge execute command: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("git push origin {task_branch}")),
+        "stderr should push the repaired task branch normally: {stderr}"
+    );
+    assert!(
+        stderr.contains(&retry),
+        "stderr should include a retry command: {stderr}"
+    );
+    assert!(
+        stderr.contains(&base_ref),
+        "stderr should name the requested base ref: {stderr}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn open_pr_rejects_no_common_history_before_gh() {
@@ -121,6 +159,69 @@ fn open_pr_rejects_no_common_history_before_gh() {
             && stderr.contains("origin/main"),
         "stderr names compared refs: {stderr}"
     );
+    assert_no_common_history_guidance(&stderr, &task_branch, "main");
+    assert!(
+        !gh_log.exists(),
+        "gh must not be called on preflight failure"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn open_pr_no_common_history_guidance_uses_requested_base_branch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let origin_seed = temp.path().join("origin-seed");
+    let origin = temp.path().join("origin.git");
+    let repo = temp.path().join("repo");
+    let fakebin = temp.path().join("bin");
+    let gh_log = temp.path().join("gh.log");
+
+    init_repo(&origin_seed);
+    commit_file(&origin_seed, "README.md", "remote seed\n", "remote seed");
+    git(&origin_seed, &["branch", "-M", "release"]);
+    let mut clone_bare = Command::new("git");
+    clone_bare.args([
+        "clone",
+        "--bare",
+        origin_seed.to_str().expect("origin seed path"),
+        origin.to_str().expect("origin path"),
+    ]);
+    run(&mut clone_bare, "git clone --bare");
+
+    init_repo(&repo);
+    commit_file(&repo, "README.md", "local seed\n", "local seed");
+    branch_main(&repo);
+    git(
+        &repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    let task_branch = format!("agentd/{TASK_RUN_ID}");
+    git(&repo, &["switch", "-c", &task_branch]);
+    git(&repo, &["push", "origin", &task_branch]);
+    write_fake_gh(&fakebin);
+
+    let output = Command::new("bash")
+        .current_dir(&repo)
+        .arg(repo_root().join("scripts/agentd_open_pr.sh"))
+        .arg(TASK_RUN_ID)
+        .arg("release")
+        .env("PATH", fake_path(&fakebin))
+        .env("GH_LOG", &gh_log)
+        .output()
+        .expect("run open_pr helper");
+
+    assert!(
+        !output.status.success(),
+        "no-common-history branch must be rejected before gh"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no common history")
+            && stderr.contains(&task_branch)
+            && stderr.contains("origin/release"),
+        "stderr names compared refs: {stderr}"
+    );
+    assert_no_common_history_guidance(&stderr, &task_branch, "release");
     assert!(
         !gh_log.exists(),
         "gh must not be called on preflight failure"

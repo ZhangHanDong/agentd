@@ -160,6 +160,7 @@ fn daemon_config(api_token: Option<&str>) -> DaemonConfig {
         api_token: api_token.map(ToOwned::to_owned),
         agent_tokens: Vec::new(),
         agent_token_mode: "audit".to_owned(),
+        accept_workflow_change: false,
     }
 }
 
@@ -174,8 +175,22 @@ fn matrix_puppet_login_response() -> FakeResponse {
     )
 }
 
+fn native_runtime_capabilities_response() -> FakeResponse {
+    FakeResponse::status(
+        200,
+        json!({
+            "runtime": "native",
+            "runtimeApiVersion": 1,
+            "sessionResume": true,
+            "artifactAcknowledgement": true
+        })
+        .to_string(),
+    )
+}
+
 fn bridge_runtime_responses(seq: i64, summary: &str) -> Vec<FakeResponse> {
     vec![
+        native_runtime_capabilities_response(),
         FakeResponse::status(200, json!({"ok": true}).to_string()),
         FakeResponse::status(201, json!({"ok": true}).to_string()),
         FakeResponse::status(
@@ -195,6 +210,7 @@ fn bridge_runtime_responses(seq: i64, summary: &str) -> Vec<FakeResponse> {
             })
             .to_string(),
         ),
+        FakeResponse::status(200, json!({"ok": true}).to_string()),
     ]
 }
 
@@ -275,13 +291,17 @@ fn agentd_bin_matrix_bridge_once_runs_against_fake_agentd() {
         requests[0].header("authorization"),
         Some("Bearer bridge-secret")
     );
-    assert_eq!(requests[0].method, "POST");
-    assert_eq!(requests[0].path, "/api/matrix/rooms");
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[0].path, "/api/runtime/capabilities");
     assert_eq!(requests[1].method, "POST");
-    assert_eq!(requests[1].path, "/api/matrix/inbound");
-    assert_eq!(requests[2].method, "GET");
-    assert_eq!(requests[2].path, "/api/matrix/outbox?from_seq=0");
-    let inbound_body: Value = serde_json::from_str(&requests[1].body).expect("inbound body");
+    assert_eq!(requests[1].path, "/api/matrix/rooms");
+    assert_eq!(requests[2].method, "POST");
+    assert_eq!(requests[2].path, "/api/matrix/inbound");
+    assert_eq!(requests[3].method, "GET");
+    assert_eq!(requests[3].path, "/api/matrix/outbox?from_seq=0");
+    assert_eq!(requests[4].method, "POST");
+    assert_eq!(requests[4].path, "/api/matrix/outbox/ack");
+    let inbound_body: Value = serde_json::from_str(&requests[2].body).expect("inbound body");
     assert_eq!(inbound_body["body"], "please continue");
 
     let sent = std::fs::read_to_string(&sent_path).expect("sent log");
@@ -354,14 +374,16 @@ fn agentd_bin_matrix_bridge_once_provisions_puppets_with_file_store() {
         puppet_report.pruned_token_names(),
         &["old-agent".to_owned()]
     );
-    assert_eq!(agentd_requests.len(), 3);
+    assert_eq!(agentd_requests.len(), 5);
     assert_eq!(
         agentd_requests[0].header("authorization"),
         Some("Bearer bridge-secret")
     );
-    assert_eq!(agentd_requests[0].path, "/api/matrix/rooms");
-    assert_eq!(agentd_requests[1].path, "/api/matrix/inbound");
-    assert_eq!(agentd_requests[2].path, "/api/matrix/outbox?from_seq=0");
+    assert_eq!(agentd_requests[0].path, "/api/runtime/capabilities");
+    assert_eq!(agentd_requests[1].path, "/api/matrix/rooms");
+    assert_eq!(agentd_requests[2].path, "/api/matrix/inbound");
+    assert_eq!(agentd_requests[3].path, "/api/matrix/outbox?from_seq=0");
+    assert_eq!(agentd_requests[4].path, "/api/matrix/outbox/ack");
     assert_eq!(report.run.registered_rooms, 1);
     assert_eq!(report.run.inbound_forwarded, 1);
     assert_eq!(report.run.outbound_sent, 1);

@@ -146,6 +146,7 @@ async fn http_adapter_round_trips_attempt_lifecycle_against_daemon() {
             session_id: fixture.session_id.clone(),
             status: RuntimeAttemptStatus::Running,
             native_session_ref: Some("thread-abc123".to_string()),
+            exit_code: None,
             observed_at: 2,
         })
         .await
@@ -157,6 +158,7 @@ async fn http_adapter_round_trips_attempt_lifecycle_against_daemon() {
             session_id: fixture.session_id.clone(),
             status: RuntimeAttemptStatus::Exited,
             native_session_ref: None,
+            exit_code: None,
             observed_at: 3,
         })
         .await

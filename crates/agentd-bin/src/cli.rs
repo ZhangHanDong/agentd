@@ -267,6 +267,10 @@ pub struct DaemonConfig {
     #[arg(long, default_value = ".agentd/worktrees", global = true)]
     pub worktree_base: PathBuf,
 
+    /// Allow checkpoint resume when the current workflow file content sha differs from the checkpoint.
+    #[arg(long, global = true)]
+    pub accept_workflow_change: bool,
+
     /// Tracing log level (`error`/`warn`/`info`/`debug`/`trace`).
     #[arg(long, default_value = "info", global = true)]
     pub log_level: String,
@@ -770,6 +774,22 @@ mod tests {
         assert_eq!(
             args.matrix_registration_token.as_deref(),
             Some("registration-token")
+        );
+    }
+
+    #[test]
+    fn agentd_cli_accepts_accept_workflow_change_flag() {
+        let default = AgentdCli::try_parse_from(["agentd"]).expect("daemon defaults parse");
+        assert!(
+            !default.config.accept_workflow_change,
+            "resume across changed workflow sha is opt-in"
+        );
+
+        let cli = AgentdCli::try_parse_from(["agentd", "--accept-workflow-change"])
+            .expect("accept workflow change flag parses");
+        assert!(
+            cli.config.accept_workflow_change,
+            "operator flag enables changed-workflow resume"
         );
     }
 }

@@ -58,10 +58,13 @@ async fn authenticate(
     let der = STANDARD
         .decode(encoded)
         .map_err(|_| unauthorized("invalid client certificate encoding"))?;
-    let observed_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| unauthorized("clock unavailable"))?
-        .as_secs() as i64;
+    let observed_at = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| unauthorized("clock unavailable"))?
+            .as_secs(),
+    )
+    .map_err(|_| unauthorized("clock out of range"))?;
     state
         .verifier
         .verify_peer(&der, observed_at)

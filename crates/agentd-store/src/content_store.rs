@@ -222,7 +222,7 @@ impl LocalContentStore {
             let mut output = File::create(&temporary)?;
             let mut digest = Sha256::new();
             let mut size = 0_u64;
-            let mut buffer = [0_u8; 64 * 1024];
+            let mut buffer = vec![0_u8; 64 * 1024];
             loop {
                 let read = input.read(&mut buffer)?;
                 if read == 0 {
@@ -297,10 +297,13 @@ impl ArtifactObjectStore for LocalContentStore {
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
     Sha256::digest(bytes)
         .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+        .fold(String::with_capacity(64), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
 }
 
 #[cfg(test)]

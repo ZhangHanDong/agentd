@@ -468,9 +468,8 @@ where
         {
             return Err(SecurityDenial::CapabilityScopeMismatch);
         }
-        let selector = match &admission.resource {
-            ProtectedResource::Secret(selector) => selector,
-            _ => return Err(SecurityDenial::ResourceDenied),
+        let ProtectedResource::Secret(selector) = &admission.resource else {
+            return Err(SecurityDenial::ResourceDenied);
         };
         self.secret_broker
             .checkout(admission, selector, observed_at)

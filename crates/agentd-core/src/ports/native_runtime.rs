@@ -38,6 +38,11 @@ pub struct NativeRuntimeAttemptState {
     pub session_id: RuntimeSessionId,
     pub status: RuntimeAttemptStatus,
     pub native_session_ref: Option<String>,
+    /// Process exit code for a terminal `Exited` reconciliation. `None` for
+    /// non-terminal updates or when the code is unavailable; a terminal
+    /// reconciliation with `Some(0)` completes the session, otherwise it fails.
+    #[serde(default)]
+    pub exit_code: Option<i32>,
     pub observed_at: i64,
 }
 

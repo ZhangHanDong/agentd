@@ -108,6 +108,7 @@ fn config_with_relative_paths() -> DaemonConfig {
         workflows_dir: PathBuf::from("workflows"),
         repo_dir: PathBuf::from("."),
         worktree_base: PathBuf::from(".agentd/worktrees"),
+        accept_workflow_change: false,
         log_level: "debug".to_string(),
         api_token: None,
         agent_tokens: Vec::new(),
@@ -150,6 +151,24 @@ fn mcp_stdio_command_includes_proxy_url_to_daemon() {
     assert!(
         command.ends_with(" mcp-stdio --proxy-url 'http://127.0.0.1:8787'"),
         "command ends with the proxied stdio subcommand: {command}"
+    );
+}
+
+#[test]
+fn mcp_stdio_command_includes_accept_workflow_change_when_enabled() {
+    let mut config = config_with_relative_paths();
+    let default_command =
+        mcp_stdio_command(Path::new("/opt/agentd"), &config, Path::new("/repo/agentd"));
+    assert!(
+        !default_command.contains("--accept-workflow-change"),
+        "default command omits operator accept flag: {default_command}"
+    );
+
+    config.accept_workflow_change = true;
+    let command = mcp_stdio_command(Path::new("/opt/agentd"), &config, Path::new("/repo/agentd"));
+    assert!(
+        command.contains("--accept-workflow-change mcp-stdio"),
+        "accept flag should be inherited by the spawned MCP stdio command: {command}"
     );
 }
 

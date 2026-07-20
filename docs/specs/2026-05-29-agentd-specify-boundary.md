@@ -133,8 +133,16 @@ So agentd's existing `agentd-matrix` adapter stays, but its **role narrows**: it
 ### 4.3 The seam is mostly agentd-surface (already planned)
 
 agentd's planned `agentd-surface` crate (HTTP+SSE + MCP server, P0.7) already exposes events. The new pieces are small:
-- an **outbound Specify client** (`agentd-specify` — pull issue, push draft, pull frozen spec, report events) — a thin reqwest wrapper, ~1 crate, P1.
-- the semantic-event vocabulary aligns to Specify's list (`workflow.started`/`task.claimed`/`criterion.passed`/`agent.blocked`/…) — our EventBus `EventKind` maps onto it nearly 1:1.
+- an **outbound Specify client seam** (`agentd-specify` — pull issue, push draft,
+  pull frozen spec, report events, report acceptance). As built through P145,
+  this is an object-safe `SpecifyClient` trait with `OfflineSpecify`, protocol
+  value types, test recording support, semantic event mapping, and runtime
+  reporting through `ProductionRunHost`. Real HTTP/WS transport remains future
+  work gated on a concrete Specify API contract.
+- the semantic event mapping currently serializes durable agentd run events to
+  Specify's first stable vocabulary (`agent.blocked`, `workflow.finished`,
+  `workflow.failed`). Richer semantic events such as `task.claimed` or
+  `criterion.passed` wait until the runtime emits those facts explicitly.
 
 ---
 
@@ -170,8 +178,8 @@ This is what changes in THIS repo once Path B is adopted. **Nothing here is dest
 | Δ4 | Spec finalized location | agentd commits `specs/issue-N.spec.md` to git after `wait.human` approve | Specify owns frozen spec; agentd pulls it. (git copy optional, Specify-driven) |
 | Δ5 | Matrix adapter (P0.6) role | MAS + slash router (`/start`,`/execute`,`/spec-approve`) + wait.human delivery | narrowed to dispatch listener + execution notifier; slash authority → Specify |
 | Δ6 | GitHub adapter (P0.5) | agentd owns GitHub read + webhook + status push | GitHub owned by Specify; agentd keeps only execution-time PR open via provisioned token. P0.5 may shrink or move |
-| Δ7 | New: Specify client | — | new thin `agentd-specify` crate (pull issue / push draft / pull frozen spec / report events). P1. |
-| Δ8 | Semantic events | EventBus `EventKind` internal | additionally serialized to Specify's semantic-event schema (`workflow.started`/`criterion.passed`/…). Mapping table needed |
+| Δ7 | New: Specify client | — | `agentd-specify` exists as an optional no-network seam: `SpecifyClient`, `OfflineSpecify`, protocol value types, event reporting helper, and runtime reporting hook are in place; real HTTP/WS transport/auth/config wait on the external Specify API contract. |
+| Δ8 | Semantic events | EventBus `EventKind` internal | first semantic event mapping is in place for durable run events (`agent.blocked`, `workflow.finished`, `workflow.failed`); richer event facts are deferred until runtime emits them explicitly. |
 | Δ9 | Design doc framing | "agentd is the daemon that owns issues/spec/review" | reframe §0/§1/§5/§7 to "agentd is the local runtime; Specify is the web layer"; this boundary doc is authoritative |
 
 **Phasing note**: Δ1–Δ5 touch P0 (workflow + Matrix + storage). Δ6–Δ8 are P1 (the Specify seam can be stubbed in P0 — agentd can run standalone with a local frozen spec for the MVP demo, and the Specify client lands in P1). Δ9 is a doc pass.
@@ -186,7 +194,12 @@ Because Specify is a *layer on top*, agentd must remain runnable WITHOUT Specify
 - "freeze" is a local git tag / file,
 - no semantic events are shipped (or shipped to a local sink).
 
-The Specify client (`agentd-specify`, P1) is an **optional adapter**, gated behind config. This preserves the P0 plan's ability to build + demo agentd on its own, and matches Specify's own "Solo $0 self-deploy" tier.
+The Specify client (`agentd-specify`, P1) is an **optional adapter**. Today it
+defaults to `OfflineSpecify` and runtime reporting is best-effort, so standalone
+agentd keeps running without Specify. Future online mode should be gated behind
+explicit config once the real Specify API contract exists. This preserves the P0
+plan's ability to build + demo agentd on its own, and matches Specify's own
+"Solo $0 self-deploy" tier.
 
 ---
 

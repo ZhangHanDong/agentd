@@ -449,7 +449,7 @@ pub struct ParityMigrationArgs {
 
 #[derive(Debug, Args)]
 pub struct ParityRollbackArgs {
-    /// Path to the target agentd SQLite database.
+    /// Path to the target agentd `SQLite` database.
     #[arg(long)]
     pub db_path: PathBuf,
     /// Project whose durable cutover state should be rolled back.

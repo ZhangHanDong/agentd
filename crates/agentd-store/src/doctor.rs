@@ -74,6 +74,7 @@ impl OperationalDoctor {
 
     /// Produce a bounded, structured health report from durable control-plane
     /// tables. The report is intentionally independent of daemon log parsing.
+    #[allow(clippy::too_many_lines)]
     pub async fn check(&self) -> Result<OperationalDoctorReport, StoreError> {
         let workers_online = count(
             &self.pool,

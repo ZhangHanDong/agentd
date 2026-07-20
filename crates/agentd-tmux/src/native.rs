@@ -130,7 +130,7 @@ impl NativeRuntime {
             .spawn_command(command)
             .map_err(|e| NativeRuntimeError::Spawn(e.to_string()))?;
         let child = Arc::new(Mutex::new(Some(child)));
-        let mut reader = pair
+        let reader = pair
             .master
             .try_clone_reader()
             .map_err(|e| NativeRuntimeError::Pty(e.to_string()))?;
@@ -147,32 +147,7 @@ impl NativeRuntime {
             }),
             changed: Condvar::new(),
         });
-        let reader_shared = Arc::clone(&shared);
-        let capacity = config.output_capacity.max(1);
-        thread::Builder::new()
-            .name("agentd-native-pty-reader".into())
-            .spawn(move || {
-                let mut buf = [0_u8; 4096];
-                loop {
-                    match reader.read(&mut buf) {
-                        Ok(0) => break,
-                        Ok(read) => {
-                            if let Ok(mut state) = reader_shared.state.lock() {
-                                for byte in &buf[..read] {
-                                    if state.output.len() == capacity {
-                                        state.output.pop_front();
-                                    }
-                                    state.output.push_back(*byte);
-                                }
-                            } else {
-                                break;
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-            })
-            .map_err(|e| NativeRuntimeError::Pty(e.to_string()))?;
+        Self::spawn_output_reader(reader, Arc::clone(&shared), config.output_capacity.max(1))?;
 
         let wait_shared = Arc::clone(&shared);
         let wait_child = Arc::clone(&child);
@@ -187,9 +162,8 @@ impl NativeRuntime {
                         || Err(std::io::Error::other("child handle unavailable")),
                         |mut child| child.wait(),
                     );
-                let mut state = match wait_shared.state.lock() {
-                    Ok(state) => state,
-                    Err(_) => return,
+                let Ok(mut state) = wait_shared.state.lock() else {
+                    return;
                 };
                 let output = state.output.iter().copied().collect::<Vec<_>>();
                 match result {
@@ -222,8 +196,7 @@ impl NativeRuntime {
         self.shared
             .state
             .lock()
-            .map(|state| state.status)
-            .unwrap_or(NativeProcessStatus::Gone)
+            .map_or(NativeProcessStatus::Gone, |state| state.status)
     }
 
     #[must_use]
@@ -246,14 +219,13 @@ impl NativeRuntime {
         self.shared
             .state
             .lock()
-            .map(|state| {
+            .map_or((NativeProcessStatus::Gone, None, Vec::new()), |state| {
                 (
                     state.status,
                     state.native_session_ref.clone(),
                     state.output.iter().copied().collect(),
                 )
             })
-            .unwrap_or((NativeProcessStatus::Gone, None, Vec::new()))
     }
 
     /// Spool the bounded output snapshot atomically for a later artifact upload.
@@ -261,7 +233,7 @@ impl NativeRuntime {
         &self,
         path: impl AsRef<Path>,
     ) -> Result<NativeSpoolRecord, NativeRuntimeError> {
-        self.spool_bytes(path, &self.output())
+        Self::spool_bytes(path, &self.output())
     }
 
     /// Spool output after replacing checked-out secret material before it is
@@ -277,11 +249,42 @@ impl NativeRuntime {
                 replace_all(&mut output, secret.as_bytes(), b"[REDACTED]");
             }
         }
-        self.spool_bytes(path, &output)
+        Self::spool_bytes(path, &output)
+    }
+
+    /// Pump PTY output into the bounded ring buffer on a dedicated thread.
+    fn spawn_output_reader(
+        mut reader: Box<dyn Read + Send>,
+        shared: Arc<SharedState>,
+        capacity: usize,
+    ) -> Result<(), NativeRuntimeError> {
+        thread::Builder::new()
+            .name("agentd-native-pty-reader".into())
+            .spawn(move || {
+                let mut buf = [0_u8; 4096];
+                loop {
+                    match reader.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => {
+                            if let Ok(mut state) = shared.state.lock() {
+                                for byte in &buf[..read] {
+                                    if state.output.len() == capacity {
+                                        state.output.pop_front();
+                                    }
+                                    state.output.push_back(*byte);
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                }
+            })
+            .map_err(|e| NativeRuntimeError::Pty(e.to_string()))?;
+        Ok(())
     }
 
     fn spool_bytes(
-        &self,
         path: impl AsRef<Path>,
         output: &[u8],
     ) -> Result<NativeSpoolRecord, NativeRuntimeError> {
@@ -292,8 +295,8 @@ impl NativeRuntime {
         std::fs::create_dir_all(parent)
             .map_err(|error| NativeRuntimeError::Pty(error.to_string()))?;
         let temp = path.with_extension("part");
-        let content_sha256 = format!("{:x}", Sha256::digest(&output));
-        std::fs::write(&temp, &output)
+        let content_sha256 = format!("{:x}", Sha256::digest(output));
+        std::fs::write(&temp, output)
             .map_err(|error| NativeRuntimeError::Pty(error.to_string()))?;
         std::fs::rename(&temp, path).map_err(|error| NativeRuntimeError::Pty(error.to_string()))?;
         Ok(NativeSpoolRecord {

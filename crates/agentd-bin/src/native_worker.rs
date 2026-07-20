@@ -58,6 +58,14 @@ pub struct AgentdWorker {
     runtime_control: Arc<dyn NativeRuntimeControlPort>,
 }
 
+impl std::fmt::Debug for AgentdWorker {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AgentdWorker")
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeWorkerSecurityBinding {
     pub scope: ExecutionSecurityScope,
@@ -242,6 +250,7 @@ impl NativeRecoveryRegistry {
 }
 
 /// Build the provider-native Codex resume invocation from a persisted thread id.
+#[must_use]
 pub fn codex_resume_config(
     mut config: NativeProcessConfig,
     thread_ref: String,
@@ -255,6 +264,7 @@ pub fn codex_resume_config(
 }
 
 /// Build a provider-native resume invocation without starting the provider.
+#[must_use]
 pub fn provider_resume_config(
     mut config: NativeProcessConfig,
     thread_ref: String,
@@ -280,6 +290,16 @@ pub struct AgentdWorkerHandle {
     session_id: RuntimeSessionId,
     attempt_id: RuntimeAttemptId,
     lease_claim: Option<TaskLeaseClaim>,
+}
+
+impl std::fmt::Debug for AgentdWorkerHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AgentdWorkerHandle")
+            .field("session_id", &self.session_id)
+            .field("attempt_id", &self.attempt_id)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -341,7 +361,7 @@ impl AgentdWorker {
     }
 
     /// Construct a worker whose runtime identity mutations cross the supplied
-    /// control-plane port. The SQLite store remains available for daemon-only
+    /// control-plane port. The `SQLite` store remains available for daemon-only
     /// concerns such as artifact publication and lease operations.
     pub fn with_runtime_control(
         store: SqliteStore,
@@ -615,7 +635,7 @@ impl AgentdWorker {
         config: NativeProcessConfig,
     ) -> Result<AgentdWorkerHandle, NativeWorkerError> {
         let attempt_id = RuntimeAttemptId::new();
-        let observed_at = crate::clock::SystemClock::default().now_unix();
+        let observed_at = crate::clock::SystemClock.now_unix();
         let start = self
             .runtime_control
             .start_attempt(&NativeRuntimeAttemptStart {
@@ -640,6 +660,7 @@ impl AgentdWorker {
                             session_id: session_id.clone(),
                             status: agentd_core::types::RuntimeAttemptStatus::Gone,
                             native_session_ref: None,
+                            exit_code: None,
                             observed_at,
                         })
                         .await;
@@ -653,6 +674,7 @@ impl AgentdWorker {
                             session_id: session_id.clone(),
                             status: agentd_core::types::RuntimeAttemptStatus::Gone,
                             native_session_ref: None,
+                            exit_code: None,
                             observed_at,
                         })
                         .await;
@@ -660,13 +682,21 @@ impl AgentdWorker {
                 }
             };
         let runtime = Arc::new(runtime);
+        // Persist the provider-native session reference so a later resume can
+        // reuse it. The control-plane `start_attempt` does not carry it, so the
+        // reference from the spawned runtime (from the execution config) is the
+        // authoritative value here.
+        let native_session_ref = runtime
+            .native_session_ref()
+            .or_else(|| start.native_session_ref.clone());
         if let Err(error) = self
             .runtime_control
             .update_attempt(&NativeRuntimeAttemptState {
                 attempt_id: attempt_id.clone(),
                 session_id: session_id.clone(),
                 status: agentd_core::types::RuntimeAttemptStatus::Running,
-                native_session_ref: start.native_session_ref.clone(),
+                native_session_ref: native_session_ref.clone(),
+                exit_code: None,
                 observed_at,
             })
             .await
@@ -678,6 +708,7 @@ impl AgentdWorker {
                     session_id: session_id.clone(),
                     status: agentd_core::types::RuntimeAttemptStatus::Gone,
                     native_session_ref: None,
+                    exit_code: None,
                     observed_at,
                 })
                 .await;
@@ -789,7 +820,8 @@ impl AgentdWorkerHandle {
                 session_id: self.session_id.clone(),
                 status: agentd_core::types::RuntimeAttemptStatus::Running,
                 native_session_ref: Some(native_session_ref.to_owned()),
-                observed_at: crate::clock::SystemClock::default().now_unix(),
+                exit_code: None,
+                observed_at: crate::clock::SystemClock.now_unix(),
             })
             .await
             .map_err(|error| NativeWorkerError::InvalidRecovery(error.to_string()))
@@ -889,6 +921,7 @@ impl AgentdWorkerHandle {
     }
 
     /// Start periodic, fenced lease renewal for this running process.
+    #[must_use]
     pub fn spawn_lease_renewal(
         &self,
         claim: TaskLeaseClaim,
@@ -905,8 +938,9 @@ impl AgentdWorkerHandle {
                     return Ok(());
                 }
                 ticker.tick().await;
-                let observed_at = crate::clock::SystemClock::default().now_unix();
-                let expires_at = observed_at.saturating_add(lease_duration.as_secs() as i64);
+                let observed_at = crate::clock::SystemClock.now_unix();
+                let expires_at = observed_at
+                    .saturating_add(i64::try_from(lease_duration.as_secs()).unwrap_or(i64::MAX));
                 let renewal =
                     agentd_store::task_lease_control_plane::SqliteTaskLeaseControlPlane::new(
                         store.pool().clone(),
@@ -987,6 +1021,7 @@ impl AgentdWorkerHandle {
     }
 
     /// Construct the immutable artifact envelope for a previously spooled log.
+    #[must_use]
     pub fn spooled_artifact(
         &self,
         record: NativeSpoolRecord,
@@ -1027,6 +1062,7 @@ impl AgentdWorkerHandle {
 
     /// Retry acknowledgement for an already persisted spool record without
     /// touching the native process or recalculating its content digest.
+    #[allow(clippy::too_many_arguments)]
     pub async fn retry_spooled_artifact<P: ArtifactIndexPort + ?Sized>(
         &self,
         port: &P,
@@ -1047,6 +1083,7 @@ impl AgentdWorkerHandle {
     /// Spool bounded PTY output and acknowledge its immutable artifact under
     /// the same fenced claim. The spool remains on disk when acknowledgement
     /// fails, allowing the caller to retry without rerunning the process.
+    #[allow(clippy::too_many_arguments)]
     pub async fn spool_and_acknowledge<P: ArtifactIndexPort + ?Sized>(
         &self,
         port: &P,
@@ -1065,6 +1102,7 @@ impl AgentdWorkerHandle {
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn spool_and_acknowledge_redacted<P: ArtifactIndexPort + ?Sized>(
         &self,
         port: &P,
@@ -1086,6 +1124,7 @@ impl AgentdWorkerHandle {
 
     /// Store output content by digest and acknowledge its immutable artifact
     /// under the current fenced lease in one operation.
+    #[allow(clippy::too_many_arguments)]
     pub async fn spool_and_acknowledge_to_store<P: ArtifactIndexPort + ?Sized>(
         &self,
         port: &P,
@@ -1105,6 +1144,7 @@ impl AgentdWorkerHandle {
     }
 
     /// Redacted content-addressed variant for transcript and log artifacts.
+    #[allow(clippy::too_many_arguments)]
     pub async fn spool_and_acknowledge_redacted_to_store<P: ArtifactIndexPort + ?Sized>(
         &self,
         port: &P,
@@ -1141,14 +1181,14 @@ impl AgentdWorkerHandle {
             .map_err(|error| NativeWorkerError::Join(error.to_string()))??;
         match &event {
             NativeProcessEvent::Exited { code, .. } => {
-                let _ = code;
                 self.runtime_control
                     .mark_attempt_terminal(&NativeRuntimeAttemptState {
                         attempt_id: self.attempt_id.clone(),
                         session_id: self.session_id.clone(),
                         status: agentd_core::types::RuntimeAttemptStatus::Exited,
                         native_session_ref: self.native_session_ref(),
-                        observed_at: crate::clock::SystemClock::default().now_unix(),
+                        exit_code: *code,
+                        observed_at: crate::clock::SystemClock.now_unix(),
                     })
                     .await
                     .map_err(|error| NativeWorkerError::InvalidRecovery(error.to_string()))?;
@@ -1160,7 +1200,8 @@ impl AgentdWorkerHandle {
                         session_id: self.session_id.clone(),
                         status: agentd_core::types::RuntimeAttemptStatus::Gone,
                         native_session_ref: self.native_session_ref(),
-                        observed_at: crate::clock::SystemClock::default().now_unix(),
+                        exit_code: None,
+                        observed_at: crate::clock::SystemClock.now_unix(),
                     })
                     .await
                     .map_err(|error| NativeWorkerError::InvalidRecovery(error.to_string()))?;

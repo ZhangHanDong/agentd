@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tower::ServiceExt;
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn recovery_http_requires_operator_token_and_accepts_codex_request() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = SqliteStore::connect(&dir.path().join("agentd.db"))

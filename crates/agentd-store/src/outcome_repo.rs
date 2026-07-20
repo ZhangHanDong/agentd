@@ -4,8 +4,9 @@
 //! transaction as the outcome row (design §3.4), so `latest_outcome`
 //! reconstructs an empty `mempal_writes` (all the engine reads).
 
+use agentd_core::engine::Checkpoint;
 use agentd_core::types::{Artifact, NodeId, Outcome, RunId};
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, SqliteConnection, SqlitePool};
 
 use crate::error::StoreError;
 use crate::util::{now_unix, outcome_status_str, parse_outcome_status};
@@ -23,13 +24,45 @@ pub async fn insert_node_outcome(
     // The outcome row and its outbox enqueues are one transaction (design §3.4):
     // a failure anywhere commits neither, so a partial enqueue is impossible.
     let mut tx = pool.begin().await?;
+    insert_node_outcome_on_conn(&mut tx, run_id, node_id, outcome).await?;
+    tx.commit().await?;
+    Ok(())
+}
 
+/// Append an outcome and write the resulting checkpoint in one transaction.
+///
+/// # Errors
+/// Returns [`StoreError::Serde`] on JSON-encode failure, [`StoreError::Sqlx`] on db failure.
+pub async fn insert_node_outcome_and_checkpoint(
+    pool: &SqlitePool,
+    run_id: &RunId,
+    node_id: &NodeId,
+    outcome: &Outcome,
+    checkpoint: &Checkpoint,
+) -> Result<(), StoreError> {
+    let mut tx = pool.begin().await?;
+    insert_node_outcome_on_conn(&mut tx, run_id, node_id, outcome).await?;
+    crate::checkpoint_repo::write_checkpoint_on_conn(&mut tx, checkpoint).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Append a node outcome at the next attempt number using the caller's transaction.
+///
+/// # Errors
+/// Returns [`StoreError::Serde`] on JSON-encode failure, [`StoreError::Sqlx`] on db failure.
+pub async fn insert_node_outcome_on_conn(
+    conn: &mut SqliteConnection,
+    run_id: &RunId,
+    node_id: &NodeId,
+    outcome: &Outcome,
+) -> Result<(), StoreError> {
     let next_attempt: i64 = sqlx::query_scalar(
         "SELECT COALESCE(MAX(attempt), 0) + 1 FROM node_outcomes WHERE run_id = ? AND node_id = ?",
     )
     .bind(run_id.as_str())
     .bind(node_id.as_str())
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut *conn)
     .await?;
 
     let context_delta = serde_json::to_string(&outcome.context_updates)?;
@@ -57,12 +90,10 @@ pub async fn insert_node_outcome(
     .bind(artifacts)
     .bind(now)
     .bind(now)
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await?;
 
-    crate::outbox_repo::enqueue(&mut tx, run_id, node_id, &outcome.mempal_writes, now).await?;
-
-    tx.commit().await?;
+    crate::outbox_repo::enqueue(conn, run_id, node_id, &outcome.mempal_writes, now).await?;
     Ok(())
 }
 

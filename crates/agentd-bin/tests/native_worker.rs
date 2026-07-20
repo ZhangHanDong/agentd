@@ -154,6 +154,7 @@ async fn agentd_worker_binds_native_process_to_durable_runtime_state() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn agentd_worker_resume_reuses_persisted_native_session_reference() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = SqliteStore::connect(&dir.path().join("agentd.db"))

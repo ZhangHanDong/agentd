@@ -224,8 +224,26 @@ fn matrix_puppet_login_response() -> FakeResponse {
     )
 }
 
+fn native_caps_response() -> FakeResponse {
+    FakeResponse::status(
+        200,
+        json!({
+            "runtime": "native",
+            "runtimeApiVersion": 1,
+            "sessionResume": true,
+            "artifactAcknowledgement": true
+        })
+        .to_string(),
+    )
+}
+
+fn ack_response() -> FakeResponse {
+    FakeResponse::status(200, json!({"ok": true}).to_string())
+}
+
 fn bridge_runtime_responses(seq: i64, body: &str) -> Vec<FakeResponse> {
     vec![
+        native_caps_response(),
         FakeResponse::status(200, json!({"ok": true}).to_string()),
         FakeResponse::status(201, json!({"ok": true}).to_string()),
         FakeResponse::status(
@@ -245,6 +263,7 @@ fn bridge_runtime_responses(seq: i64, body: &str) -> Vec<FakeResponse> {
             })
             .to_string(),
         ),
+        ack_response(),
     ]
 }
 
@@ -349,6 +368,7 @@ fn file_matrix_transport_rejects_unmapped_target_without_writing() {
 #[test]
 fn matrix_bridge_once_runner_posts_files_polls_outbox_logs_sent_and_saves_cursor() {
     let server = FakeAgentdServer::new(vec![
+        native_caps_response(),
         FakeResponse::status(200, json!({"ok": true}).to_string()),
         FakeResponse::status(201, json!({"ok": true}).to_string()),
         FakeResponse::status(
@@ -368,6 +388,7 @@ fn matrix_bridge_once_runner_posts_files_polls_outbox_logs_sent_and_saves_cursor
             })
             .to_string(),
         ),
+        ack_response(),
     ]);
     let dir = tempfile::tempdir().expect("tempdir");
     let rooms_path = dir.path().join("rooms.json");
@@ -393,16 +414,20 @@ fn matrix_bridge_once_runner_posts_files_polls_outbox_logs_sent_and_saves_cursor
     assert_eq!(report.run.inbound_forwarded, 1);
     assert_eq!(report.run.outbound_sent, 1);
     assert_eq!(report.next_from_seq, 11);
-    assert_eq!(requests.len(), 3);
-    assert_eq!(requests[0].method, "POST");
-    assert_eq!(requests[0].path, "/api/matrix/rooms");
+    assert_eq!(requests.len(), 5);
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[0].path, "/api/runtime/capabilities");
     assert_eq!(requests[1].method, "POST");
-    assert_eq!(requests[1].path, "/api/matrix/inbound");
-    assert_eq!(requests[2].method, "GET");
-    assert_eq!(requests[2].path, "/api/matrix/outbox?from_seq=0");
-    let room_body: Value = serde_json::from_str(&requests[0].body).expect("room body");
+    assert_eq!(requests[1].path, "/api/matrix/rooms");
+    assert_eq!(requests[2].method, "POST");
+    assert_eq!(requests[2].path, "/api/matrix/inbound");
+    assert_eq!(requests[3].method, "GET");
+    assert_eq!(requests[3].path, "/api/matrix/outbox?from_seq=0");
+    assert_eq!(requests[4].method, "POST");
+    assert_eq!(requests[4].path, "/api/matrix/outbox/ack");
+    let room_body: Value = serde_json::from_str(&requests[1].body).expect("room body");
     assert_eq!(room_body["agent"], "codex-worker");
-    let inbound_body: Value = serde_json::from_str(&requests[1].body).expect("inbound body");
+    let inbound_body: Value = serde_json::from_str(&requests[2].body).expect("inbound body");
     assert_eq!(inbound_body["eventId"], "$event-1");
 
     let sent = std::fs::read_to_string(&sent_path).expect("sent log");

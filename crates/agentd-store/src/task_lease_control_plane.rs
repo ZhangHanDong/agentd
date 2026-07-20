@@ -75,7 +75,7 @@ impl TaskLeasePort for SqliteTaskLeaseControlPlane {
         let mut connection = self.pool.acquire().await.map_err(storage_error)?;
         begin_immediate(&mut connection).await?;
         let result = match authorize_claim(&mut connection, claim, observed_at).await {
-            Ok(ClaimAuthorization::Authorized(grant)) => Ok(Decision::Return(grant)),
+            Ok(ClaimAuthorization::Authorized(grant)) => Ok(Decision::Return(*grant)),
             Ok(ClaimAuthorization::Rejected(error)) => Ok(Decision::Reject(error)),
             Err(error) => Err(error),
         };
@@ -116,7 +116,7 @@ enum Decision<T> {
 }
 
 enum ClaimAuthorization {
-    Authorized(TaskLeaseGrant),
+    Authorized(Box<TaskLeaseGrant>),
     Rejected(TaskLeaseError),
 }
 
@@ -184,7 +184,7 @@ async fn renew_in_transaction(
     request: &TaskLeaseRenewRequest,
 ) -> Result<Decision<TaskLeaseGrant>, TaskLeaseError> {
     let grant = match authorize_claim(connection, &request.claim, request.observed_at).await? {
-        ClaimAuthorization::Authorized(grant) => grant,
+        ClaimAuthorization::Authorized(grant) => *grant,
         ClaimAuthorization::Rejected(error) => return Ok(Decision::Reject(error)),
     };
     if request.expires_at <= grant.expires_at {
@@ -352,7 +352,7 @@ async fn authorize_claim(
             format!("lease {} elapsed at {}", claim.lease_id, grant.expires_at),
         )));
     }
-    Ok(ClaimAuthorization::Authorized(grant))
+    Ok(ClaimAuthorization::Authorized(Box::new(grant)))
 }
 
 async fn worker_can_report(

@@ -9,5 +9,6 @@ pub mod check_inbox;
 pub mod post;
 pub mod query_run;
 pub mod send_message;
+pub mod submit_human_answer;
 pub mod submit_outcome;
 pub mod submit_review;

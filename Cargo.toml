@@ -5,6 +5,7 @@ members = [
     "crates/agentd-tmux",
     "crates/agentd-store",
     "crates/agentd-mempal",
+    "crates/agentd-specify",
     "crates/agentd-github",
     "crates/agentd-matrix",
     "crates/agentd-project-authority",

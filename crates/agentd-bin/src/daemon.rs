@@ -172,10 +172,10 @@ const fn default_drain_timeout_ms() -> u64 {
     30_000
 }
 
-/// Native runtime control-plane transport backed by the daemon SQLite store.
+/// Native runtime control-plane transport backed by the daemon `SQLite` store.
 ///
 /// Remote workers call this instead of opening the daemon database; the
-/// SQLite adapter stays daemon-side per the AD-E5 boundary.
+/// `SQLite` adapter stays daemon-side per the AD-E5 boundary.
 pub fn daemon_native_runtime_router(store: &SqliteStore, token: Option<String>) -> Router {
     let control = Arc::new(SqliteNativeRuntimeControlPlane::new(store.pool().clone()));
     let auth = AuthConfig {
@@ -423,7 +423,7 @@ async fn drain_cutover_project(
         .drain_project_until_ready(&project_id, request.timeout_ms)
         .await
     {
-        Ok(_) => match state
+        Ok(()) => match state
             .service
             .native_worker
             .transition_cutover_project(
@@ -599,6 +599,7 @@ impl WorkerFleetService {
     /// This is the worker-side lifecycle boundary used by transports and
     /// higher-level dispatchers; it intentionally accepts a pinned security
     /// binding rather than deriving authority from task metadata.
+    #[allow(clippy::too_many_arguments)]
     pub async fn execute_native_claim(
         &self,
         session_id: agentd_core::types::RuntimeSessionId,
@@ -655,6 +656,7 @@ impl WorkerFleetService {
     /// Execute a native claim and publish its bounded output before releasing
     /// the lease. Failed acknowledgement cancels the lease while leaving the
     /// content-addressed object available for an explicit retry.
+    #[allow(clippy::too_many_arguments)]
     pub async fn execute_native_claim_with_artifact(
         &self,
         session_id: agentd_core::types::RuntimeSessionId,
@@ -878,13 +880,10 @@ impl WorkerFleetService {
         let artifact_id = runtime_attempt_id
             .as_ref()
             .map(|attempt| {
-                ExecutionArtifactId::from_string(
-                    attempt
-                        .as_str()
-                        .strip_prefix("ra_")
-                        .map(|suffix| format!("ar_{suffix}"))
-                        .unwrap_or_else(|| format!("ar_{}", attempt.as_str())),
-                )
+                ExecutionArtifactId::from_string(attempt.as_str().strip_prefix("ra_").map_or_else(
+                    || format!("ar_{}", attempt.as_str()),
+                    |suffix| format!("ar_{suffix}"),
+                ))
             })
             .unwrap_or_default();
         let lease_port =
@@ -935,6 +934,7 @@ impl WorkerFleetService {
         .await
     }
 
+    #[must_use]
     pub fn start(self) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(5));
@@ -956,7 +956,9 @@ fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs() as i64
+        .as_secs()
+        .try_into()
+        .unwrap_or(i64::MAX)
 }
 
 /// Production media root colocated with the daemon database.
@@ -1071,6 +1073,7 @@ pub async fn build_production_host(config: &DaemonConfig) -> Result<ProductionRu
     )
     .with_agent_lifecycle(Box::new(TmuxAgentLifecycle(Arc::clone(&tmux_backend))))
     .with_tool_cwd(config.repo_dir.clone())
+    .with_accept_workflow_change(config.accept_workflow_change)
     .with_worktree_allocator(Some(Box::new(worktree_pool))))
 }
 
@@ -1256,6 +1259,7 @@ fn parse_worker_fleet_auth_proofs(value: Option<&str>) -> Option<Vec<String>> {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod worker_fleet_auth_tests {
     use super::parse_worker_fleet_auth_proofs;
 

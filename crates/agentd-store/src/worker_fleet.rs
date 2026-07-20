@@ -90,7 +90,7 @@ impl WorkerFleetPort for SqliteWorkerFleet {
         }
         if worker_repo::get_worker(&self.pool, &request.worker_id)
             .await
-            .map_err(storage_error)?
+            .map_err(|error| storage_error(&error))?
             .is_none()
         {
             worker_repo::create_worker(
@@ -102,7 +102,7 @@ impl WorkerFleetPort for SqliteWorkerFleet {
                 },
             )
             .await
-            .map_err(storage_error)?;
+            .map_err(|error| storage_error(&error))?;
         }
         worker_repo::register_incarnation(
             &self.pool,
@@ -116,7 +116,7 @@ impl WorkerFleetPort for SqliteWorkerFleet {
             },
         )
         .await
-        .map_err(storage_error)?;
+        .map_err(|error| storage_error(&error))?;
         Ok(WorkerFleetRegistration {
             worker_id: request.worker_id.clone(),
             incarnation_id: request.incarnation_id.clone(),
@@ -135,7 +135,7 @@ impl WorkerFleetPort for SqliteWorkerFleet {
             &request.incarnation_id,
         )
         .await
-        .map_err(storage_error)?
+        .map_err(|error| storage_error(&error))?
         {
             WorkerHeartbeatOutcome::Accepted(record) => Ok(WorkerFleetHeartbeatResult::Accepted {
                 last_seen_at: record.last_seen_at,
@@ -148,7 +148,7 @@ impl WorkerFleetPort for SqliteWorkerFleet {
         self.authorize(&request.auth_proof)?;
         let incarnation = worker_repo::get_incarnation(&self.pool, &request.incarnation_id)
             .await
-            .map_err(storage_error)?
+            .map_err(|error| storage_error(&error))?
             .ok_or_else(|| WorkerFleetError::NotFound(request.incarnation_id.to_string()))?;
         if incarnation.worker_id != request.worker_id || !incarnation.is_current {
             return Err(WorkerFleetError::Conflict(
@@ -163,13 +163,13 @@ impl WorkerFleetPort for SqliteWorkerFleet {
         worker_repo::transition_worker_status(&self.pool, &request.worker_id, target)
             .await
             .map(|_| ())
-            .map_err(storage_error)
+            .map_err(|error| storage_error(&error))
     }
 
     async fn recover_offline(&self, heartbeat_cutoff: i64) -> Result<u64, WorkerFleetError> {
         worker_repo::mark_stale_workers_offline(&self.pool, heartbeat_cutoff)
             .await
-            .map_err(storage_error)
+            .map_err(|error| storage_error(&error))
     }
 
     async fn pull(
@@ -179,7 +179,7 @@ impl WorkerFleetPort for SqliteWorkerFleet {
         self.authorize(&request.auth_proof)?;
         let worker = worker_repo::get_incarnation(&self.pool, &request.worker_incarnation_id)
             .await
-            .map_err(storage_error)?
+            .map_err(|error| storage_error(&error))?
             .ok_or_else(|| WorkerFleetError::NotFound(request.worker_incarnation_id.to_string()))?;
         if !worker.is_current {
             return Err(WorkerFleetError::Conflict(
@@ -188,7 +188,7 @@ impl WorkerFleetPort for SqliteWorkerFleet {
         }
         let worker_record = worker_repo::get_worker(&self.pool, &worker.worker_id)
             .await
-            .map_err(storage_error)?
+            .map_err(|error| storage_error(&error))?
             .ok_or_else(|| WorkerFleetError::NotFound(worker.worker_id.to_string()))?;
         if worker_record.status != WorkerStatus::Online {
             return Err(WorkerFleetError::Conflict(
@@ -223,7 +223,7 @@ impl WorkerFleetPort for SqliteWorkerFleet {
             let session =
                 crate::runtime_session_repo::latest_session_for_task(&self.pool, &task_id)
                     .await
-                    .map_err(storage_error)?
+                    .map_err(|error| storage_error(&error))?
                     .ok_or_else(|| {
                         WorkerFleetError::Conflict(
                             "native task has no runtime session authority snapshot".into(),
@@ -238,7 +238,7 @@ impl WorkerFleetPort for SqliteWorkerFleet {
             );
             let snapshot = crate::project_authority_repo::get_snapshot(&self.pool, &snapshot_ref)
                 .await
-                .map_err(storage_error)?;
+                .map_err(|error| storage_error(&error))?;
             grant.security_scope = Some(crate::capability_repo::scope_for_snapshot(
                 &snapshot,
                 grant.claim(),
@@ -304,6 +304,6 @@ impl TaskLeasePort for SqliteWorkerFleet {
     }
 }
 
-fn storage_error(error: crate::StoreError) -> WorkerFleetError {
+fn storage_error(error: &crate::StoreError) -> WorkerFleetError {
     WorkerFleetError::Unavailable(error.to_string())
 }

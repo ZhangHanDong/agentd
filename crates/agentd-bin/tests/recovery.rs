@@ -2,9 +2,11 @@
 //! reopening the same `SqliteStore`) + the signature idempotent-replay + the sha
 //! guard. Names match `specs/e2e/p92-kill9-replay.spec.md`.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use agentd_bin::{ProductionRunHost, SystemClock};
+use agentd_core::CoreError;
 use agentd_core::engine::{EngineEvent, RunProgress};
 use agentd_core::ports::Store;
 use agentd_core::test_support::{FakeBackend, MempalStub, RecordingCommandRunner};
@@ -19,6 +21,10 @@ fn workflows_dir() -> PathBuf {
 /// A production host over the `SqliteStore` at `db` (reopening the same file
 /// after a drop is the simulated restart).
 async fn host_at(db: &Path) -> ProductionRunHost {
+    host_at_workflows(db, workflows_dir()).await
+}
+
+async fn host_at_workflows(db: &Path, workflows_dir: PathBuf) -> ProductionRunHost {
     let store = SqliteStore::connect(db).await.expect("connect");
     ProductionRunHost::new(
         store,
@@ -26,8 +32,32 @@ async fn host_at(db: &Path) -> ProductionRunHost {
         Box::new(RecordingCommandRunner::new()),
         Box::new(MempalStub::new()),
         Box::new(SystemClock),
-        workflows_dir(),
+        workflows_dir,
     )
+}
+
+async fn accepting_host_at_workflows(db: &Path, workflows_dir: PathBuf) -> ProductionRunHost {
+    host_at_workflows(db, workflows_dir)
+        .await
+        .with_accept_workflow_change(true)
+}
+
+fn mutable_workflows_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("temp workflow dir");
+    std::fs::copy(
+        workflows_dir().join("draft.dot"),
+        dir.path().join("draft.dot"),
+    )
+    .expect("copy draft.dot");
+    dir
+}
+
+fn change_draft_workflow_sha(workflows_dir: &Path) {
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(workflows_dir.join("draft.dot"))
+        .expect("open draft.dot for append");
+    writeln!(file, "\n// p140 sha change").expect("append sha-changing comment");
 }
 
 /// The open `propose_spec` task run's id for `run`.
@@ -169,4 +199,80 @@ async fn resume_guard_gates_a_changed_workflow_sha() {
         checkpoint.resume_guard("changed-sha", true).is_ok(),
         "accept_change overrides the sha guard"
     );
+}
+
+#[tokio::test]
+async fn production_deliver_rejects_changed_workflow_sha_by_default() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let workflow_dir = mutable_workflows_dir();
+    let db = dir.path().join("agentd.db");
+    let run = RunId::from_string("r1");
+    let host = host_at_workflows(&db, workflow_dir.path().to_path_buf()).await;
+
+    host.start_workflow("draft", &run, serde_json::Value::Null)
+        .await
+        .expect("start draft");
+    let task_run_id = open_propose_spec(&host, &run).await;
+    change_draft_workflow_sha(workflow_dir.path());
+
+    let err = host
+        .deliver(EngineEvent::AgentOutcomeSubmitted {
+            task_run_id,
+            outcome: Outcome::success(),
+        })
+        .await
+        .expect_err("changed workflow sha is rejected by default");
+    assert!(matches!(err, CoreError::WorkflowShaChanged), "got {err:?}");
+
+    let attempts = outcome_repo::count_attempts(
+        host.store().pool(),
+        &run,
+        &NodeId::from_string("propose_spec"),
+    )
+    .await
+    .expect("count");
+    assert_eq!(attempts, 0, "the parked node outcome was not recorded");
+    let events = host.events_from(&run, 0).await.expect("events");
+    let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+    assert_eq!(
+        kinds,
+        vec!["run_parked"],
+        "no terminal event emitted after sha rejection"
+    );
+}
+
+#[tokio::test]
+async fn production_deliver_allows_changed_workflow_sha_with_operator_accept() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let workflow_dir = mutable_workflows_dir();
+    let db = dir.path().join("agentd.db");
+    let run = RunId::from_string("r1");
+    let host = accepting_host_at_workflows(&db, workflow_dir.path().to_path_buf()).await;
+
+    host.start_workflow("draft", &run, serde_json::Value::Null)
+        .await
+        .expect("start draft");
+    let task_run_id = open_propose_spec(&host, &run).await;
+    change_draft_workflow_sha(workflow_dir.path());
+
+    let done = host
+        .deliver(EngineEvent::AgentOutcomeSubmitted {
+            task_run_id,
+            outcome: Outcome::success(),
+        })
+        .await
+        .expect("operator-accepted changed sha resumes");
+    assert!(
+        matches!(done, RunProgress::Finished { .. }),
+        "accepted changed sha should finish draft.dot, got {done:?}"
+    );
+
+    let attempts = outcome_repo::count_attempts(
+        host.store().pool(),
+        &run,
+        &NodeId::from_string("propose_spec"),
+    )
+    .await
+    .expect("count");
+    assert_eq!(attempts, 1, "the parked node outcome was recorded once");
 }

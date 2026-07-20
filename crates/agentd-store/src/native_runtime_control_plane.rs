@@ -36,6 +36,7 @@ fn state(record: runtime_session_repo::RuntimeAttemptRecord) -> NativeRuntimeAtt
         session_id: record.runtime_session_id,
         status: record.status,
         native_session_ref: record.native_session_ref,
+        exit_code: None,
         observed_at: record.started_at,
     }
 }
@@ -140,8 +141,12 @@ impl NativeRuntimeControlPort for SqliteNativeRuntimeControlPlane {
                 &self.pool,
                 &state.session_id,
                 &state.attempt_id,
-                None,
-                Some("native_exit"),
+                state.exit_code,
+                Some(if state.exit_code == Some(0) {
+                    "native_exit"
+                } else {
+                    "native_failure"
+                }),
             )
             .await
             .map(|_| ())

@@ -49,7 +49,7 @@ async fn register(
     headers: HeaderMap,
     Json(request): Json<WorkerFleetRegisterRequest>,
 ) -> Response {
-    if let Err(response) = authenticate(&state.auth, &headers) {
+    if let Some(response) = authenticate(&state.auth, &headers) {
         return response;
     }
     respond(state.fleet.register(&request).await)
@@ -60,7 +60,7 @@ async fn heartbeat(
     headers: HeaderMap,
     Json(request): Json<WorkerFleetHeartbeat>,
 ) -> Response {
-    if let Err(response) = authenticate(&state.auth, &headers) {
+    if let Some(response) = authenticate(&state.auth, &headers) {
         return response;
     }
     respond(state.fleet.heartbeat(&request).await)
@@ -71,7 +71,7 @@ async fn pull(
     headers: HeaderMap,
     Json(request): Json<WorkerFleetPullRequest>,
 ) -> Response {
-    if let Err(response) = authenticate(&state.auth, &headers) {
+    if let Some(response) = authenticate(&state.auth, &headers) {
         return response;
     }
     respond(state.fleet.pull(&request).await)
@@ -82,7 +82,7 @@ async fn drain(
     headers: HeaderMap,
     Json(request): Json<WorkerFleetDrainRequest>,
 ) -> Response {
-    if let Err(response) = authenticate(&state.auth, &headers) {
+    if let Some(response) = authenticate(&state.auth, &headers) {
         return response;
     }
     respond(
@@ -99,7 +99,7 @@ async fn renew(
     headers: HeaderMap,
     Json(request): Json<TaskLeaseRenewRequest>,
 ) -> Response {
-    if let Err(response) = authenticate(&state.auth, &headers) {
+    if let Some(response) = authenticate(&state.auth, &headers) {
         return response;
     }
     respond(state.fleet.renew(&request).await)
@@ -110,7 +110,7 @@ async fn release(
     headers: HeaderMap,
     Json(request): Json<TaskLeaseCloseRequest>,
 ) -> Response {
-    if let Err(response) = authenticate(&state.auth, &headers) {
+    if let Some(response) = authenticate(&state.auth, &headers) {
         return response;
     }
     respond(state.fleet.release(&request).await)
@@ -121,7 +121,7 @@ async fn cancel(
     headers: HeaderMap,
     Json(request): Json<TaskLeaseCloseRequest>,
 ) -> Response {
-    if let Err(response) = authenticate(&state.auth, &headers) {
+    if let Some(response) = authenticate(&state.auth, &headers) {
         return response;
     }
     respond(state.fleet.cancel(&request).await)
@@ -138,26 +138,26 @@ fn respond<T: serde::Serialize, E: std::fmt::Display>(result: Result<T, E>) -> R
     }
 }
 
-fn authenticate(auth: &AuthConfig, headers: &HeaderMap) -> Result<(), Response> {
-    let Some(expected) = auth
+/// Returns the rejection response when the bearer token is missing or wrong.
+fn authenticate(auth: &AuthConfig, headers: &HeaderMap) -> Option<Response> {
+    let expected = auth
         .api_token
         .as_deref()
-        .filter(|token| !token.trim().is_empty())
-    else {
-        return Ok(());
-    };
+        .filter(|token| !token.trim().is_empty())?;
     let valid = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .is_some_and(|token| token == expected);
     if valid {
-        Ok(())
+        None
     } else {
-        Err((
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": "operator bearer token required"})),
+        Some(
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "operator bearer token required"})),
+            )
+                .into_response(),
         )
-            .into_response())
     }
 }
