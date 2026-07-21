@@ -12,8 +12,9 @@ use agentd_core::ports::{
     ArtifactIndexPort, ArtifactListRequest, CapabilityAdmission, Clock, ExecutionArtifactKind,
     ExecutionArtifactPublish, ExecutionEvidenceError, ExecutionEvidenceLinks,
     ExecutionSecurityScope, NativeRuntimeAttemptStart, NativeRuntimeAttemptState,
-    NativeRuntimeControlPort, PageLimit, ProtectedAction, ProtectedResource, TaskLeaseCloseRequest,
-    TaskLeasePort, TaskLeaseRenewRequest, WorkerArtifactAcknowledgement, WorkerArtifactReport,
+    NativeRuntimeControlPort, NativeRuntimeSessionView, PageLimit, ProtectedAction,
+    ProtectedResource, TaskLeaseCloseRequest, TaskLeasePort, TaskLeaseRenewRequest,
+    WorkerArtifactAcknowledgement, WorkerArtifactReport,
 };
 use agentd_core::types::{
     ExecutionArtifactId, NativeExecutionSpec, RunId, RuntimeAttemptId, RuntimeSessionId,
@@ -730,20 +731,40 @@ impl AgentdWorker {
         &self,
         session_id: RuntimeSessionId,
         worker_incarnation_id: WorkerIncarnationId,
+        config: NativeProcessConfig,
+    ) -> Result<AgentdWorkerHandle, NativeWorkerError> {
+        // Resolve both the task identity and provider resume reference through
+        // the control plane. Remote workers do not own a shadow session DB.
+        let view = self
+            .runtime_control
+            .session_view(&session_id)
+            .await
+            .map_err(|error| NativeWorkerError::InvalidRecovery(error.to_string()))?
+            .ok_or_else(|| {
+                NativeWorkerError::InvalidRecovery("runtime session not found".into())
+            })?;
+        self.resume_with_view(view, session_id, worker_incarnation_id, config)
+            .await
+    }
+
+    /// Resume from an already-resolved control-plane view. Callers that have
+    /// just read the view (e.g. `recover_if_pending`) pass it in to avoid a
+    /// second control-plane round trip.
+    async fn resume_with_view(
+        &self,
+        view: NativeRuntimeSessionView,
+        session_id: RuntimeSessionId,
+        worker_incarnation_id: WorkerIncarnationId,
         mut config: NativeProcessConfig,
     ) -> Result<AgentdWorkerHandle, NativeWorkerError> {
         if config.native_session_ref.is_none() {
-            config.native_session_ref = self
-                .runtime_control
-                .session_view(&session_id)
-                .await
-                .map_err(|error| NativeWorkerError::InvalidRecovery(error.to_string()))?
-                .and_then(|view| view.latest_native_session_ref);
+            config.native_session_ref = view.latest_native_session_ref;
         }
         if let Some(thread_ref) = config.native_session_ref.clone() {
             config = provider_resume_config(config, thread_ref);
         }
-        self.start(session_id, worker_incarnation_id, config).await
+        self.start_for_task(session_id, view.task_id, worker_incarnation_id, config)
+            .await
     }
 
     /// Recover a session only when durable control state explicitly requests
@@ -766,7 +787,7 @@ impl AgentdWorker {
         if view.status != RuntimeSessionStatus::ResumePending {
             return Ok(None);
         }
-        self.resume(session_id, worker_incarnation_id, config)
+        self.resume_with_view(view, session_id, worker_incarnation_id, config)
             .await
             .map(Some)
     }

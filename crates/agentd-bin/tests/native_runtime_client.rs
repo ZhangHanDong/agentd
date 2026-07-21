@@ -1,8 +1,12 @@
 //! AD-E5: worker-side HTTP adapter for the native runtime control-plane port,
 //! exercised against the daemon-composed router over real TCP.
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use agentd_bin::daemon::daemon_native_runtime_router;
 use agentd_bin::native_runtime_client::NativeRuntimeHttpClient;
+use agentd_bin::native_worker::AgentdWorker;
 use agentd_core::ports::{
     NativeRuntimeAttemptStart, NativeRuntimeAttemptState, NativeRuntimeControlError,
     NativeRuntimeControlPort,
@@ -15,6 +19,7 @@ use agentd_store::agent_profile_repo::{self, AgentProfileCreate};
 use agentd_store::runtime_session_repo::{self, ExecutionSnapshotRef, RuntimeSessionCreate};
 use agentd_store::worker_repo::{self, WorkerCreate, WorkerRegistration};
 use agentd_store::{SqliteStore, run_repo, task_repo};
+use agentd_tmux::native::NativeProcessConfig;
 use serde_json::json;
 
 struct Fixture {
@@ -189,6 +194,87 @@ async fn http_adapter_round_trips_attempt_lifecycle_against_daemon() {
         .await
         .expect("view over HTTP");
     assert!(unknown.is_none());
+}
+
+#[tokio::test]
+async fn remote_worker_recovers_without_a_local_runtime_session() {
+    let fixture = fixture().await;
+    let base_url = serve_daemon(fixture.store.clone(), "worker-secret").await;
+    let client = NativeRuntimeHttpClient::new(base_url, "worker-secret").expect("client");
+
+    let lost_attempt_id = RuntimeAttemptId::new();
+    client
+        .start_attempt(&NativeRuntimeAttemptStart {
+            attempt_id: lost_attempt_id.clone(),
+            session_id: fixture.session_id.clone(),
+            task_id: fixture.task_id.clone(),
+            worker_incarnation_id: fixture.incarnation_id.clone(),
+            observed_at: 1,
+        })
+        .await
+        .expect("initial attempt");
+    client
+        .update_attempt(&NativeRuntimeAttemptState {
+            attempt_id: lost_attempt_id.clone(),
+            session_id: fixture.session_id.clone(),
+            status: RuntimeAttemptStatus::Running,
+            native_session_ref: Some("thread-remote-1".to_string()),
+            exit_code: None,
+            observed_at: 2,
+        })
+        .await
+        .expect("initial attempt running");
+    client
+        .mark_attempt_terminal(&NativeRuntimeAttemptState {
+            attempt_id: lost_attempt_id,
+            session_id: fixture.session_id.clone(),
+            status: RuntimeAttemptStatus::Gone,
+            native_session_ref: Some("thread-remote-1".to_string()),
+            exit_code: None,
+            observed_at: 3,
+        })
+        .await
+        .expect("initial attempt lost");
+
+    let worker_dir = tempfile::tempdir().expect("worker tempdir");
+    let worker_store = SqliteStore::connect(&worker_dir.path().join("worker.db"))
+        .await
+        .expect("worker store");
+    assert!(
+        runtime_session_repo::get_session(worker_store.pool(), &fixture.session_id)
+            .await
+            .expect("local session lookup")
+            .is_none(),
+        "remote worker must not have a shadow runtime session"
+    );
+
+    let worker = AgentdWorker::with_runtime_control(worker_store, Arc::new(client));
+    let handle = worker
+        .recover_if_pending(
+            fixture.session_id.clone(),
+            fixture.incarnation_id,
+            NativeProcessConfig {
+                program: "/bin/sh".to_string(),
+                args: vec!["-c".to_string(), "exit 0".to_string()],
+                ..NativeProcessConfig::default()
+            },
+        )
+        .await
+        .expect("remote recovery")
+        .expect("resume-pending session");
+    handle
+        .wait(Duration::from_secs(5))
+        .await
+        .expect("recovered process exits");
+
+    let session = runtime_session_repo::get_session(fixture.store.pool(), &fixture.session_id)
+        .await
+        .expect("control-plane session lookup")
+        .expect("control-plane session");
+    assert_eq!(
+        session.status,
+        agentd_core::types::RuntimeSessionStatus::Completed
+    );
 }
 
 #[tokio::test]

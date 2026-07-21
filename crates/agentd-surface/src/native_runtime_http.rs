@@ -144,7 +144,8 @@ fn respond<T: serde::Serialize>(result: Result<T, NativeRuntimeControlError>) ->
     }
 }
 
-/// Returns the rejection response when the bearer token is missing or wrong.
+/// When authentication is configured, reject a missing or wrong bearer token.
+/// An empty token preserves `AuthConfig`'s local-development open mode.
 fn authenticate(auth: &AuthConfig, headers: &HeaderMap) -> Option<Response> {
     let expected = auth
         .api_token
