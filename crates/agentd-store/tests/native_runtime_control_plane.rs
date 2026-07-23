@@ -261,6 +261,26 @@ async fn sqlite_adapter_serves_session_view_for_resume() {
 }
 
 #[tokio::test]
+async fn sqlite_adapter_resolves_session_by_task() {
+    let fixture = fixture().await;
+    let plane = SqliteNativeRuntimeControlPlane::new(fixture.store.pool().clone());
+
+    let view = plane
+        .session_for_task(&fixture.task_id)
+        .await
+        .expect("lookup")
+        .expect("session bound to task");
+    assert_eq!(view.session_id, fixture.session_id);
+    assert_eq!(view.task_id, fixture.task_id);
+
+    let missing = plane
+        .session_for_task(&TaskRunId::new())
+        .await
+        .expect("lookup");
+    assert!(missing.is_none());
+}
+
+#[tokio::test]
 async fn sqlite_adapter_rejects_attempt_for_foreign_task() {
     let fixture = fixture().await;
     let plane = SqliteNativeRuntimeControlPlane::new(fixture.store.pool().clone());

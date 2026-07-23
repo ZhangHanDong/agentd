@@ -7,7 +7,7 @@ use agentd_core::ports::{
     NativeRuntimeControlPort,
 };
 use agentd_core::types::{
-    RuntimeAttemptId, RuntimeAttemptStatus, RuntimeSessionId, TaskRunId, WorkerIncarnationId,
+    RunId, RuntimeAttemptId, RuntimeAttemptStatus, RuntimeSessionId, TaskRunId, WorkerIncarnationId,
 };
 use agentd_surface::http::AuthConfig;
 use agentd_surface::native_runtime_http::native_runtime_router;
@@ -46,9 +46,18 @@ impl NativeRuntimeControlPort for FakeControlPlane {
         Ok(Some(agentd_core::ports::NativeRuntimeSessionView {
             session_id: session_id.clone(),
             task_id: TaskRunId::new(),
+            run_id: RunId::new(),
             status: agentd_core::types::RuntimeSessionStatus::ResumePending,
             latest_native_session_ref: Some("thread-view-1".to_string()),
         }))
+    }
+
+    async fn session_for_task(
+        &self,
+        _task_id: &TaskRunId,
+    ) -> Result<Option<agentd_core::ports::NativeRuntimeSessionView>, NativeRuntimeControlError>
+    {
+        Ok(None)
     }
 
     async fn start_attempt(

@@ -151,6 +151,19 @@ impl NativeRuntimeHttpClient {
             .map_err(|error| NativeRuntimeControlError::Unavailable(error.to_string()))
     }
 
+    /// Resolve the runtime session the control plane bound to a task, if any.
+    pub async fn session_for_task(
+        &self,
+        task_id: &TaskRunId,
+    ) -> Result<Option<agentd_core::ports::NativeRuntimeSessionView>, NativeRuntimeControlError>
+    {
+        self.post(
+            "/api/runtime/native/session/for-task",
+            &serde_json::json!({ "task_id": task_id }),
+        )
+        .await
+    }
+
     /// Store artifact bytes content-addressed on the daemon.
     pub async fn upload_artifact(
         &self,
@@ -210,6 +223,18 @@ impl NativeRuntimeControlPort for NativeRuntimeHttpClient {
         self.post(
             "/api/runtime/native/session/view",
             &serde_json::json!({ "session_id": session_id }),
+        )
+        .await
+    }
+
+    async fn session_for_task(
+        &self,
+        task_id: &TaskRunId,
+    ) -> Result<Option<agentd_core::ports::NativeRuntimeSessionView>, NativeRuntimeControlError>
+    {
+        self.post(
+            "/api/runtime/native/session/for-task",
+            &serde_json::json!({ "task_id": task_id }),
         )
         .await
     }

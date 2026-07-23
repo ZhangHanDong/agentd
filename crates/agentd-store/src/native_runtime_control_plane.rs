@@ -72,12 +72,40 @@ impl NativeRuntimeControlPort for SqliteNativeRuntimeControlPlane {
                 .await
                 .map_err(map_error)?
                 .and_then(|attempt| attempt.native_session_ref);
+        let run_id: String = sqlx::query_scalar("SELECT run_id FROM task_runs WHERE id = ?")
+            .bind(session.execution_task_id.as_str())
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|error| NativeRuntimeControlError::Unavailable(error.to_string()))?;
         Ok(Some(agentd_core::ports::NativeRuntimeSessionView {
             session_id: session.id,
             task_id: session.execution_task_id,
+            run_id: agentd_core::types::RunId::from_string(run_id),
             status: session.status,
             latest_native_session_ref,
         }))
+    }
+
+    async fn session_for_task(
+        &self,
+        task_id: &agentd_core::types::TaskRunId,
+    ) -> Result<Option<agentd_core::ports::NativeRuntimeSessionView>, NativeRuntimeControlError>
+    {
+        let session_id: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM runtime_sessions WHERE execution_task_id = ? \
+             ORDER BY created_at DESC, id DESC LIMIT 1",
+        )
+        .bind(task_id.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| NativeRuntimeControlError::Unavailable(error.to_string()))?;
+        let Some(session_id) = session_id else {
+            return Ok(None);
+        };
+        self.session_view(&agentd_core::types::RuntimeSessionId::from_string(
+            session_id,
+        ))
+        .await
     }
 
     async fn start_attempt(

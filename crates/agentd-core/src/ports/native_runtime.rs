@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::types::{
-    RuntimeAttemptId, RuntimeAttemptStatus, RuntimeSessionId, TaskRunId, WorkerIncarnationId,
+    RunId, RuntimeAttemptId, RuntimeAttemptStatus, RuntimeSessionId, TaskRunId, WorkerIncarnationId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -63,6 +63,7 @@ pub struct NativeRuntimeSessionValidate {
 pub struct NativeRuntimeSessionView {
     pub session_id: RuntimeSessionId,
     pub task_id: TaskRunId,
+    pub run_id: RunId,
     pub status: crate::types::RuntimeSessionStatus,
     pub latest_native_session_ref: Option<String>,
 }
@@ -81,6 +82,12 @@ pub trait NativeRuntimeControlPort: Send + Sync {
     async fn session_view(
         &self,
         session_id: &RuntimeSessionId,
+    ) -> Result<Option<NativeRuntimeSessionView>, NativeRuntimeControlError>;
+
+    /// Resolve the runtime session the control plane bound to a task, if any.
+    async fn session_for_task(
+        &self,
+        task_id: &TaskRunId,
     ) -> Result<Option<NativeRuntimeSessionView>, NativeRuntimeControlError>;
 
     /// Create the worker-bound attempt under the control-plane lease.

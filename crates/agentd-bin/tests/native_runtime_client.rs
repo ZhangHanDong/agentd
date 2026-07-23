@@ -212,6 +212,13 @@ async fn http_adapter_round_trips_attempt_lifecycle_against_daemon() {
         .await
         .expect("view over HTTP");
     assert!(unknown.is_none());
+
+    let by_task = client
+        .session_for_task(&fixture.task_id)
+        .await
+        .expect("session_for_task over HTTP")
+        .expect("bound session");
+    assert_eq!(by_task.session_id, fixture.session_id);
 }
 
 #[tokio::test]

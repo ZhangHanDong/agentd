@@ -42,6 +42,10 @@ pub fn native_runtime_router(
     Router::new()
         .route("/api/runtime/native/session/validate", post(validate))
         .route("/api/runtime/native/session/view", post(session_view))
+        .route(
+            "/api/runtime/native/session/for-task",
+            post(session_for_task),
+        )
         .route("/api/runtime/native/attempt/start", post(start_attempt))
         .route("/api/runtime/native/attempt/update", post(update_attempt))
         .route("/api/runtime/native/attempt/terminal", post(mark_terminal))
@@ -80,6 +84,23 @@ async fn session_view(
         return response;
     }
     respond(state.control.session_view(&request.session_id).await)
+}
+
+/// Task-keyed session lookup request body: only the task id is required.
+#[derive(Debug, serde::Deserialize)]
+struct SessionForTaskRequest {
+    task_id: agentd_core::types::TaskRunId,
+}
+
+async fn session_for_task(
+    State(state): State<NativeRuntimeHttpState>,
+    headers: HeaderMap,
+    Json(request): Json<SessionForTaskRequest>,
+) -> Response {
+    if let Some(response) = authenticate(&state.auth, &headers) {
+        return response;
+    }
+    respond(state.control.session_for_task(&request.task_id).await)
 }
 
 async fn start_attempt(
