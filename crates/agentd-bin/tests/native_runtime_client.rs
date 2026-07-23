@@ -9,7 +9,7 @@ use agentd_bin::native_runtime_client::NativeRuntimeHttpClient;
 use agentd_bin::native_worker::AgentdWorker;
 use agentd_core::ports::{
     NativeRuntimeAttemptStart, NativeRuntimeAttemptState, NativeRuntimeControlError,
-    NativeRuntimeControlPort,
+    NativeRuntimeControlPort, TaskLeasePort,
 };
 use agentd_core::types::{
     AgentProfileId, NodeId, RunId, RuntimeAttemptId, RuntimeAttemptStatus, RuntimeSessionId,
@@ -25,6 +25,7 @@ use serde_json::json;
 struct Fixture {
     store: SqliteStore,
     _dir: tempfile::TempDir,
+    run_id: RunId,
     session_id: RuntimeSessionId,
     task_id: TaskRunId,
     incarnation_id: WorkerIncarnationId,
@@ -102,6 +103,7 @@ async fn fixture() -> Fixture {
     Fixture {
         store,
         _dir: dir,
+        run_id,
         session_id,
         task_id,
         incarnation_id,
@@ -109,7 +111,23 @@ async fn fixture() -> Fixture {
 }
 
 async fn serve_daemon(store: SqliteStore, token: &str) -> String {
-    let app = daemon_native_runtime_router(&store, Some(token.to_string()));
+    let fleet = std::sync::Arc::new(agentd_store::worker_fleet::SqliteWorkerFleet::new(
+        store.pool().clone(),
+    ));
+    let artifacts = std::sync::Arc::new(
+        agentd_store::content_store::LocalContentStore::new(
+            std::env::temp_dir().join(format!("agentd-m1-artifacts-{}", std::process::id())),
+        )
+        .expect("content store"),
+    );
+    let service = std::sync::Arc::new(agentd_bin::daemon::WorkerFleetService::new(
+        fleet,
+        agentd_bin::native_worker::AgentdWorker::new(store.clone()),
+        artifacts,
+    ));
+    let app = daemon_native_runtime_router(&store, Some(token.to_string())).merge(
+        agentd_bin::daemon::recovery_router(service, token.to_string()),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -314,4 +332,70 @@ async fn http_adapter_classifies_terminal_and_transient_errors() {
 async fn http_adapter_rejects_non_http_url() {
     assert!(NativeRuntimeHttpClient::new("https://daemon:1", "token").is_err());
     assert!(NativeRuntimeHttpClient::new("http://a/b", "token").is_err());
+}
+
+#[tokio::test]
+async fn http_adapter_uploads_and_acknowledges_artifact() {
+    let fixture = fixture().await;
+    let lease_port = agentd_store::task_lease_control_plane::SqliteTaskLeaseControlPlane::new(
+        fixture.store.pool().clone(),
+    );
+    let grant = lease_port
+        .dispatch(&agentd_core::ports::TaskLeaseDispatchRequest {
+            execution_task_id: fixture.task_id.clone(),
+            worker_incarnation_id: fixture.incarnation_id.clone(),
+            observed_at: 100,
+            expires_at: 10_000,
+        })
+        .await
+        .expect("dispatch");
+
+    let base_url = serve_daemon(fixture.store.clone(), "worker-secret").await;
+    let client = NativeRuntimeHttpClient::new(base_url, "worker-secret").expect("client");
+
+    let stored = client
+        .upload_artifact(b"worker output".to_vec())
+        .await
+        .expect("upload over HTTP");
+    assert_eq!(stored.size_bytes, 13);
+    assert!(!stored.storage_ref.is_empty());
+    assert_eq!(stored.content_sha256.len(), 64);
+
+    let report = agentd_core::ports::WorkerArtifactReport {
+        claim: grant.claim(),
+        observed_at: grant.acquired_at + 1,
+        artifact: agentd_core::ports::ExecutionArtifactPublish {
+            id: agentd_core::types::ExecutionArtifactId::new(),
+            kind: agentd_core::ports::ExecutionArtifactKind::Transcript,
+            content_sha256: stored.content_sha256.clone(),
+            size_bytes: stored.size_bytes,
+            media_type: "text/plain".to_string(),
+            storage_ref: stored.storage_ref.clone(),
+            provenance: serde_json::json!({"source": "m1-test"}),
+            links: agentd_core::ports::ExecutionEvidenceLinks {
+                execution_run_id: fixture.run_id.clone(),
+                execution_task_id: Some(fixture.task_id.clone()),
+                runtime_session_id: None,
+                runtime_attempt_id: None,
+                worker_incarnation_id: Some(fixture.incarnation_id.clone()),
+                snapshot: agentd_core::ports::ExecutionSnapshotLink {
+                    authority_key: "specify:corp".to_string(),
+                    resource_kind: "execution_snapshot".to_string(),
+                    resource_id: "snapshot-1".to_string(),
+                    resource_version: "1".to_string(),
+                    content_sha256: "a".repeat(64),
+                },
+                target_repository_id: "repo_test".to_string(),
+                target_base_commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            },
+        },
+    };
+    let acknowledgement = client
+        .acknowledge_artifact(&report)
+        .await
+        .expect("acknowledge over HTTP");
+    assert_eq!(
+        acknowledgement.artifact.publish.content_sha256,
+        stored.content_sha256
+    );
 }

@@ -110,6 +110,68 @@ impl NativeRuntimeHttpClient {
         serde_json::from_str(body)
             .map_err(|error| NativeRuntimeControlError::Unavailable(error.to_string()))
     }
+
+    fn post_bytes_blocking<Response: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &[u8],
+    ) -> Result<Response, NativeRuntimeControlError> {
+        let mut stream = TcpStream::connect(&self.authority)
+            .map_err(|error| NativeRuntimeControlError::Unavailable(error.to_string()))?;
+        stream.set_read_timeout(Some(self.timeout)).ok();
+        stream.set_write_timeout(Some(self.timeout)).ok();
+        write!(
+            stream,
+            "POST {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
+            self.authority,
+            body.len(),
+            self.auth_proof
+        )
+        .and_then(|()| stream.write_all(body))
+        .map_err(|error| NativeRuntimeControlError::Unavailable(error.to_string()))?;
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .map_err(|error| NativeRuntimeControlError::Unavailable(error.to_string()))?;
+        let response = String::from_utf8(response)
+            .map_err(|_| NativeRuntimeControlError::Unavailable("non-UTF8 response".into()))?;
+        let (head, body) = response.split_once("\r\n\r\n").ok_or_else(|| {
+            NativeRuntimeControlError::Unavailable("malformed HTTP response".into())
+        })?;
+        let status = head
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|value| value.parse::<u16>().ok())
+            .unwrap_or(0);
+        if !(200..300).contains(&status) {
+            return Err(classify_http_error(status, body));
+        }
+        serde_json::from_str(body)
+            .map_err(|error| NativeRuntimeControlError::Unavailable(error.to_string()))
+    }
+
+    /// Store artifact bytes content-addressed on the daemon.
+    pub async fn upload_artifact(
+        &self,
+        bytes: Vec<u8>,
+    ) -> Result<agentd_tmux::native::NativeSpoolRecord, NativeRuntimeControlError> {
+        let client = self.clone();
+        tokio::task::spawn_blocking(move || {
+            client.post_bytes_blocking("/api/runtime/artifacts/upload", &bytes)
+        })
+        .await
+        .map_err(|error| NativeRuntimeControlError::Unavailable(error.to_string()))?
+    }
+
+    /// Acknowledge an uploaded artifact under the fenced lease claim.
+    pub async fn acknowledge_artifact(
+        &self,
+        report: &agentd_core::ports::WorkerArtifactReport,
+    ) -> Result<agentd_core::ports::WorkerArtifactAcknowledgement, NativeRuntimeControlError> {
+        self.post("/api/runtime/artifacts/acknowledge", report)
+            .await
+    }
 }
 
 fn classify_http_error(status: u16, body: &str) -> NativeRuntimeControlError {

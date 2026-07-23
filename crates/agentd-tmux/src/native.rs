@@ -51,7 +51,7 @@ pub enum NativeProcessEvent {
     Gone { reason: String, output: Vec<u8> },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NativeSpoolRecord {
     pub storage_ref: String,
     pub content_sha256: String,
