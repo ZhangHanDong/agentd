@@ -269,3 +269,197 @@ async fn agentd_worker_resume_reuses_persisted_native_session_reference() {
         RuntimeSessionStatus::Completed
     );
 }
+
+#[derive(Debug, Default)]
+struct RecordingLeasePort {
+    calls: std::sync::Mutex<Vec<&'static str>>,
+}
+
+#[async_trait::async_trait]
+impl agentd_core::ports::TaskLeasePort for RecordingLeasePort {
+    async fn dispatch(
+        &self,
+        _request: &agentd_core::ports::TaskLeaseDispatchRequest,
+    ) -> Result<agentd_core::types::TaskLeaseGrant, agentd_core::ports::TaskLeaseError> {
+        Err(agentd_core::ports::TaskLeaseError::Unavailable(
+            "dispatch unused".into(),
+        ))
+    }
+
+    async fn renew(
+        &self,
+        request: &agentd_core::ports::TaskLeaseRenewRequest,
+    ) -> Result<agentd_core::types::TaskLeaseGrant, agentd_core::ports::TaskLeaseError> {
+        self.calls.lock().expect("calls lock").push("renew");
+        Ok(fake_grant(&request.claim))
+    }
+
+    async fn release(
+        &self,
+        request: &agentd_core::ports::TaskLeaseCloseRequest,
+    ) -> Result<agentd_core::types::TaskLeaseGrant, agentd_core::ports::TaskLeaseError> {
+        self.calls.lock().expect("calls lock").push("release");
+        Ok(fake_grant(&request.claim))
+    }
+
+    async fn cancel(
+        &self,
+        request: &agentd_core::ports::TaskLeaseCloseRequest,
+    ) -> Result<agentd_core::types::TaskLeaseGrant, agentd_core::ports::TaskLeaseError> {
+        self.calls.lock().expect("calls lock").push("cancel");
+        Ok(fake_grant(&request.claim))
+    }
+
+    async fn validate_claim(
+        &self,
+        claim: &agentd_core::types::TaskLeaseClaim,
+        _observed_at: i64,
+    ) -> Result<agentd_core::types::TaskLeaseGrant, agentd_core::ports::TaskLeaseError> {
+        self.calls.lock().expect("calls lock").push("validate");
+        Ok(fake_grant(claim))
+    }
+
+    async fn expire_due(
+        &self,
+        _observed_at: i64,
+    ) -> Result<u64, agentd_core::ports::TaskLeaseError> {
+        Ok(0)
+    }
+}
+
+fn fake_grant(claim: &agentd_core::types::TaskLeaseClaim) -> agentd_core::types::TaskLeaseGrant {
+    agentd_core::types::TaskLeaseGrant {
+        lease_id: claim.lease_id.clone(),
+        execution_task_id: claim.execution_task_id.clone(),
+        worker_incarnation_id: claim.worker_incarnation_id.clone(),
+        fencing_token: claim.fencing_token,
+        status: agentd_core::types::LeaseStatus::Active,
+        acquired_at: 1,
+        expires_at: 100,
+        renewed_at: None,
+        terminal_at: None,
+        terminal_reason: None,
+        record_version: 1,
+        execution_spec: None,
+        security_scope: None,
+        runtime_session_id: None,
+    }
+}
+
+fn fake_claim() -> agentd_core::types::TaskLeaseClaim {
+    agentd_core::types::TaskLeaseClaim {
+        lease_id: agentd_core::types::LeaseId::from_string("ls_fake".to_string()),
+        execution_task_id: agentd_core::types::TaskRunId::from_string("tr_fake".to_string()),
+        worker_incarnation_id: agentd_core::types::WorkerIncarnationId::from_string(
+            "wi_fake".to_string(),
+        ),
+        fencing_token: agentd_core::types::FencingToken::new(1).expect("token"),
+    }
+}
+
+#[tokio::test]
+async fn handle_lease_operations_use_the_injected_port() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteStore::connect(&dir.path().join("agentd.db"))
+        .await
+        .expect("store");
+    let run_id = RunId::new();
+    run_repo::insert_run(store.pool(), &run_id, "workflow-sha")
+        .await
+        .expect("run");
+    let task_id = task_repo::insert_task_run(store.pool(), &run_id, &NodeId::parsed("impl"))
+        .await
+        .expect("task");
+    let profile_id = AgentProfileId::new();
+    agent_profile_repo::create_profile(
+        store.pool(),
+        AgentProfileCreate {
+            id: profile_id.clone(),
+            role: "implementer".into(),
+            capability: Some("implementation".into()),
+            runtime: "codex".into(),
+            model: None,
+            prompt_profile: None,
+        },
+    )
+    .await
+    .expect("profile");
+    let worker_id = WorkerId::new();
+    worker_repo::create_worker(
+        store.pool(),
+        WorkerCreate {
+            id: worker_id.clone(),
+            trust_domain: "local".into(),
+            labels: json!({}),
+        },
+    )
+    .await
+    .expect("worker");
+    let incarnation_id = WorkerIncarnationId::new();
+    worker_repo::register_incarnation(
+        store.pool(),
+        &worker_id,
+        WorkerRegistration {
+            id: incarnation_id.clone(),
+            daemon_version: "test".into(),
+            host_name: "test-host".into(),
+            network_zone: None,
+            capabilities: json!({"runtime": ["native"]}),
+        },
+    )
+    .await
+    .expect("incarnation");
+    let session_id = RuntimeSessionId::new();
+    runtime_session_repo::create_session(
+        store.pool(),
+        RuntimeSessionCreate {
+            id: session_id.clone(),
+            execution_task_id: task_id,
+            agent_profile_id: profile_id,
+            snapshot: ExecutionSnapshotRef {
+                authority_key: "local".into(),
+                resource_kind: "execution_snapshot".into(),
+                resource_id: "snapshot".into(),
+                resource_version: "1".into(),
+                content_sha256: "c".repeat(64),
+            },
+        },
+    )
+    .await
+    .expect("session");
+
+    let lease_port = std::sync::Arc::new(RecordingLeasePort::default());
+    let runtime_control = std::sync::Arc::new(
+        agentd_store::native_runtime_control_plane::SqliteNativeRuntimeControlPlane::new(
+            store.pool().clone(),
+        ),
+    );
+    let worker =
+        AgentdWorker::with_control_planes(store.clone(), runtime_control, lease_port.clone());
+    let handle = worker
+        .start(
+            session_id,
+            incarnation_id,
+            NativeProcessConfig {
+                program: "sh".into(),
+                args: vec!["-c".into(), "exit 0".into()],
+                ..NativeProcessConfig::default()
+            },
+        )
+        .await
+        .expect("start");
+
+    let claim = fake_claim();
+    handle.renew_lease(&claim, 10, 100).await.expect("renew");
+    handle
+        .release_lease(&claim, 11, "test-release")
+        .await
+        .expect("release");
+    handle.wait(Duration::from_secs(5)).await.expect("wait");
+
+    assert_eq!(
+        *lease_port.calls.lock().expect("calls lock"),
+        vec!["renew", "release"],
+        "lease operations must route through the injected TaskLeasePort"
+    );
+}

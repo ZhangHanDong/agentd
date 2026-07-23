@@ -57,6 +57,7 @@ impl From<ExecutionEvidenceError> for NativeWorkerError {
 pub struct AgentdWorker {
     store: SqliteStore,
     runtime_control: Arc<dyn NativeRuntimeControlPort>,
+    lease_control: Arc<dyn TaskLeasePort>,
 }
 
 impl std::fmt::Debug for AgentdWorker {
@@ -285,8 +286,8 @@ pub fn provider_resume_config(
 }
 
 pub struct AgentdWorkerHandle {
-    store: SqliteStore,
     runtime_control: Arc<dyn NativeRuntimeControlPort>,
+    lease_control: Arc<dyn TaskLeasePort>,
     runtime: Arc<NativeRuntime>,
     session_id: RuntimeSessionId,
     attempt_id: RuntimeAttemptId,
@@ -355,22 +356,39 @@ impl AgentdWorker {
                 store.pool().clone(),
             ),
         );
-        Self {
-            store,
-            runtime_control,
-        }
+        Self::with_runtime_control(store, runtime_control)
     }
 
     /// Construct a worker whose runtime identity mutations cross the supplied
     /// control-plane port. The `SQLite` store remains available for daemon-only
-    /// concerns such as artifact publication and lease operations.
+    /// concerns such as artifact publication; lease operations default to the
+    /// local `SQLite` lease control plane.
+    #[must_use]
     pub fn with_runtime_control(
         store: SqliteStore,
         runtime_control: Arc<dyn NativeRuntimeControlPort>,
     ) -> Self {
+        let lease_control = Arc::new(
+            agentd_store::task_lease_control_plane::SqliteTaskLeaseControlPlane::new(
+                store.pool().clone(),
+            ),
+        );
+        Self::with_control_planes(store, runtime_control, lease_control)
+    }
+
+    /// Fully injected constructor for remote workers: runtime session/attempt
+    /// state and lease fencing both resolve through control-plane ports, never
+    /// through this process's `SQLite` store.
+    #[must_use]
+    pub fn with_control_planes(
+        store: SqliteStore,
+        runtime_control: Arc<dyn NativeRuntimeControlPort>,
+        lease_control: Arc<dyn TaskLeasePort>,
+    ) -> Self {
         Self {
             store,
             runtime_control,
+            lease_control,
         }
     }
 
@@ -564,12 +582,14 @@ impl AgentdWorker {
         observed_at: i64,
     ) -> Result<AgentdWorkerHandle, NativeWorkerError> {
         Self::validate_security_binding(binding, &worker_incarnation_id, observed_at)?;
-        agentd_store::task_lease_control_plane::SqliteTaskLeaseControlPlane::new(
-            self.store.pool().clone(),
-        )
-        .validate_claim(&binding.scope.lease_claim, observed_at)
-        .await
-        .map_err(|error| NativeWorkerError::InvalidRecovery(error.to_string()))?;
+        // `WorkerFleetHttpClient::validate_claim` intentionally returns
+        // `Unavailable` — claim validation is daemon-owned, so this entry
+        // point stays daemon-side. Remote workers use `start_for_task` with
+        // fencing enforced at renew/release instead.
+        self.lease_control
+            .validate_claim(&binding.scope.lease_claim, observed_at)
+            .await
+            .map_err(|error| NativeWorkerError::InvalidRecovery(error.to_string()))?;
         let runtime = std::env::var("AGENTD_SECURITY_SANDBOX_RUNTIME").map_err(|_| {
             NativeWorkerError::InvalidRecovery(
                 "secured native worker requires AGENTD_SECURITY_SANDBOX_RUNTIME".to_string(),
@@ -716,8 +736,8 @@ impl AgentdWorker {
             return Err(NativeWorkerError::InvalidRecovery(error.to_string()));
         }
         Ok(AgentdWorkerHandle {
-            store: self.store.clone(),
             runtime_control: self.runtime_control.clone(),
+            lease_control: self.lease_control.clone(),
             runtime,
             session_id,
             attempt_id,
@@ -891,16 +911,14 @@ impl AgentdWorkerHandle {
         observed_at: i64,
         expires_at: i64,
     ) -> Result<agentd_core::types::TaskLeaseGrant, NativeWorkerError> {
-        agentd_store::task_lease_control_plane::SqliteTaskLeaseControlPlane::new(
-            self.store.pool().clone(),
-        )
-        .renew(&TaskLeaseRenewRequest {
-            claim: claim.clone(),
-            observed_at,
-            expires_at,
-        })
-        .await
-        .map_err(|error| NativeWorkerError::InvalidRecovery(error.to_string()))
+        self.lease_control
+            .renew(&TaskLeaseRenewRequest {
+                claim: claim.clone(),
+                observed_at,
+                expires_at,
+            })
+            .await
+            .map_err(|error| NativeWorkerError::InvalidRecovery(error.to_string()))
     }
 
     /// Release a completed native execution through the fenced control plane.
@@ -910,16 +928,14 @@ impl AgentdWorkerHandle {
         observed_at: i64,
         reason: impl Into<String>,
     ) -> Result<agentd_core::types::TaskLeaseGrant, NativeWorkerError> {
-        agentd_store::task_lease_control_plane::SqliteTaskLeaseControlPlane::new(
-            self.store.pool().clone(),
-        )
-        .release(&TaskLeaseCloseRequest {
-            claim: claim.clone(),
-            observed_at,
-            reason: reason.into(),
-        })
-        .await
-        .map_err(|error| NativeWorkerError::InvalidRecovery(error.to_string()))
+        self.lease_control
+            .release(&TaskLeaseCloseRequest {
+                claim: claim.clone(),
+                observed_at,
+                reason: reason.into(),
+            })
+            .await
+            .map_err(|error| NativeWorkerError::InvalidRecovery(error.to_string()))
     }
 
     /// Cancel a native execution through the same fencing boundary.
@@ -929,16 +945,14 @@ impl AgentdWorkerHandle {
         observed_at: i64,
         reason: impl Into<String>,
     ) -> Result<agentd_core::types::TaskLeaseGrant, NativeWorkerError> {
-        agentd_store::task_lease_control_plane::SqliteTaskLeaseControlPlane::new(
-            self.store.pool().clone(),
-        )
-        .cancel(&TaskLeaseCloseRequest {
-            claim: claim.clone(),
-            observed_at,
-            reason: reason.into(),
-        })
-        .await
-        .map_err(|error| NativeWorkerError::InvalidRecovery(error.to_string()))
+        self.lease_control
+            .cancel(&TaskLeaseCloseRequest {
+                claim: claim.clone(),
+                observed_at,
+                reason: reason.into(),
+            })
+            .await
+            .map_err(|error| NativeWorkerError::InvalidRecovery(error.to_string()))
     }
 
     /// Start periodic, fenced lease renewal for this running process.
@@ -949,7 +963,7 @@ impl AgentdWorkerHandle {
         interval: Duration,
         lease_duration: Duration,
     ) -> NativeLeaseRenewal {
-        let store = self.store.clone();
+        let lease_control = Arc::clone(&self.lease_control);
         let runtime = Arc::clone(&self.runtime);
         let task = tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval.max(Duration::from_millis(10)));
@@ -962,10 +976,7 @@ impl AgentdWorkerHandle {
                 let observed_at = crate::clock::SystemClock.now_unix();
                 let expires_at = observed_at
                     .saturating_add(i64::try_from(lease_duration.as_secs()).unwrap_or(i64::MAX));
-                let renewal =
-                    agentd_store::task_lease_control_plane::SqliteTaskLeaseControlPlane::new(
-                        store.pool().clone(),
-                    )
+                let renewal = lease_control
                     .renew(&TaskLeaseRenewRequest {
                         claim: claim.clone(),
                         observed_at,
