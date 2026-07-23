@@ -101,7 +101,7 @@ evidence_kind!(
     }
 );
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionSnapshotLink {
     pub authority_key: String,
     pub resource_kind: String,

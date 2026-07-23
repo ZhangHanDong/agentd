@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::ports::execution_evidence::ExecutionSnapshotLink;
 use crate::types::{
     RunId, RuntimeAttemptId, RuntimeAttemptStatus, RuntimeSessionId, TaskRunId, WorkerIncarnationId,
 };
@@ -66,6 +67,11 @@ pub struct NativeRuntimeSessionView {
     pub run_id: RunId,
     pub status: crate::types::RuntimeSessionStatus,
     pub latest_native_session_ref: Option<String>,
+    /// The session's immutable authority snapshot reference, carried so a
+    /// remote worker can populate `ExecutionEvidenceLinks.snapshot` on an
+    /// artifact acknowledgement without opening the daemon database.
+    #[serde(default)]
+    pub snapshot: ExecutionSnapshotLink,
 }
 
 #[async_trait::async_trait]

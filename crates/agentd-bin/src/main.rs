@@ -95,6 +95,7 @@ async fn main() -> ExitCode {
                 }
             }
         }
+        Some(AgentdCommand::Worker(args)) => run_worker_command(&args).await,
         None => daemon::serve(cli.config).await,
     };
     match result {
@@ -102,6 +103,37 @@ async fn main() -> ExitCode {
         Err(err) => {
             tracing::error!("agentd daemon error: {err}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run_worker_command(
+    args: &agentd_bin::cli::WorkerArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let poll = std::time::Duration::from_millis(args.poll_ms.max(10));
+    let deadline = if args.deadline_secs == 0 {
+        std::time::Duration::from_secs(u64::MAX / 4)
+    } else {
+        std::time::Duration::from_secs(args.deadline_secs)
+    };
+    loop {
+        match agentd_bin::worker_main::run_worker_once(
+            &args.daemon_url,
+            &args.auth_proof,
+            &args.state_dir,
+            poll,
+            deadline,
+        )
+        .await
+        {
+            Ok(report) => println!(
+                "worker: executed={} released={}",
+                report.executed, report.released
+            ),
+            Err(err) => return Err(Box::new(err)),
+        }
+        if args.once {
+            return Ok(());
         }
     }
 }

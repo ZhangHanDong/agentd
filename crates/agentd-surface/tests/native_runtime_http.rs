@@ -49,6 +49,7 @@ impl NativeRuntimeControlPort for FakeControlPlane {
             run_id: RunId::new(),
             status: agentd_core::types::RuntimeSessionStatus::ResumePending,
             latest_native_session_ref: Some("thread-view-1".to_string()),
+            snapshot: agentd_core::ports::ExecutionSnapshotLink::default(),
         }))
     }
 

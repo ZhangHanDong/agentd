@@ -35,6 +35,8 @@ pub enum AgentdCommand {
     MatrixBridgeOnce(MatrixBridgeOnceArgs),
     /// Serve the agent-facing MCP dispatcher over line-delimited stdio JSON-RPC.
     McpStdio(McpStdioArgs),
+    /// Run a remote native worker against a daemon's HTTP control plane.
+    Worker(WorkerArgs),
 }
 
 #[derive(Debug, Args)]
@@ -62,6 +64,29 @@ pub struct McpStdioArgs {
     /// Bind this stdio MCP session to one agent identity.
     #[arg(long)]
     pub agent_id: Option<String>,
+}
+
+/// Arguments for `agentd worker`.
+#[derive(Debug, Args)]
+pub struct WorkerArgs {
+    /// Daemon base URL, e.g. <http://127.0.0.1:8787>
+    #[arg(long)]
+    pub daemon_url: String,
+    /// Worker auth proof (bearer token registered with the daemon fleet).
+    #[arg(long)]
+    pub auth_proof: String,
+    /// Directory for worker-local scratch state.
+    #[arg(long, default_value = ".agentd/worker")]
+    pub state_dir: std::path::PathBuf,
+    /// Execute at most one task, then exit.
+    #[arg(long, default_value_t = false)]
+    pub once: bool,
+    /// Poll interval in milliseconds while waiting for work.
+    #[arg(long, default_value_t = 1000)]
+    pub poll_ms: u64,
+    /// Give up waiting for work after this many seconds (0 = wait forever).
+    #[arg(long, default_value_t = 0)]
+    pub deadline_secs: u64,
 }
 
 /// Arguments for `agentd matrix-bridge-once`.
@@ -327,10 +352,18 @@ fn clean_token(value: Option<&str>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentdCli, AgentdCommand, CleanupWorktreesArgs, MatrixBridgeOnceArgs};
+    use super::{AgentdCli, AgentdCommand, CleanupWorktreesArgs, MatrixBridgeOnceArgs, WorkerArgs};
     use clap::Parser;
     use clap::error::ErrorKind;
     use std::path::PathBuf;
+
+    fn worker_args(cli: &AgentdCli) -> &WorkerArgs {
+        match cli.command.as_ref() {
+            Some(AgentdCommand::Worker(args)) => Some(args),
+            _ => None,
+        }
+        .expect("expected worker command")
+    }
 
     fn cleanup_worktrees_args(cli: &AgentdCli) -> &CleanupWorktreesArgs {
         match cli.command.as_ref() {
@@ -775,6 +808,24 @@ mod tests {
             args.matrix_registration_token.as_deref(),
             Some("registration-token")
         );
+    }
+
+    #[test]
+    fn agentd_cli_worker_accepts_daemon_url_and_once() {
+        let cli = AgentdCli::try_parse_from([
+            "agentd",
+            "worker",
+            "--daemon-url",
+            "http://127.0.0.1:8787",
+            "--auth-proof",
+            "worker-secret",
+            "--once",
+        ])
+        .expect("worker parses");
+        let args = worker_args(&cli);
+        assert_eq!(args.daemon_url, "http://127.0.0.1:8787");
+        assert!(args.once);
+        assert_eq!(args.poll_ms, 1000);
     }
 
     #[test]

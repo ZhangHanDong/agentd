@@ -272,13 +272,29 @@ impl WorkerFleetHttpClient {
         }
     }
 
-    fn post<Request: Serialize, Response: DeserializeOwned>(
+    /// Run one request without blocking the async runtime; the raw socket IO
+    /// stays on the blocking pool. Without this, a client and server sharing
+    /// one (e.g. current-thread test) runtime would deadlock: the blocking
+    /// socket call would starve the executor the server needs to respond.
+    async fn post<Request: Serialize, Response: DeserializeOwned + Send + 'static>(
         &self,
         path: &str,
         request: &Request,
     ) -> Result<Response, WorkerFleetError> {
         let body = serde_json::to_vec(request)
             .map_err(|error| WorkerFleetError::Invalid(error.to_string()))?;
+        let client = self.clone();
+        let path = path.to_string();
+        tokio::task::spawn_blocking(move || client.post_blocking(&path, &body))
+            .await
+            .map_err(|error| WorkerFleetError::Unavailable(error.to_string()))?
+    }
+
+    fn post_blocking<Response: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &[u8],
+    ) -> Result<Response, WorkerFleetError> {
         let mut stream = TcpStream::connect(&self.authority)
             .map_err(|error| WorkerFleetError::Unavailable(error.to_string()))?;
         stream.set_read_timeout(Some(self.timeout)).ok();
@@ -294,7 +310,7 @@ impl WorkerFleetHttpClient {
             String::new()
         };
         write!(stream, "POST {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{authorization}{certificate_header}Connection: close\r\n\r\n", self.authority, body.len())
-            .and_then(|()| stream.write_all(&body))
+            .and_then(|()| stream.write_all(body))
             .map_err(|error| WorkerFleetError::Unavailable(error.to_string()))?;
         let mut response = Vec::new();
         stream
@@ -317,12 +333,13 @@ impl WorkerFleetHttpClient {
         serde_json::from_str(body).map_err(|error| WorkerFleetError::Unavailable(error.to_string()))
     }
 
-    fn close(
+    async fn close(
         &self,
         path: &str,
         request: &TaskLeaseCloseRequest,
     ) -> Result<TaskLeaseGrant, TaskLeaseError> {
         self.post(path, request)
+            .await
             .map_err(|error| TaskLeaseError::Unavailable(error.to_string()))
     }
 }
@@ -386,6 +403,7 @@ impl WorkerFleetPort for WorkerFleetHttpClient {
             ),
             request,
         )
+        .await
     }
 
     async fn heartbeat(
@@ -399,13 +417,16 @@ impl WorkerFleetPort for WorkerFleetHttpClient {
             ),
             request,
         )
+        .await
     }
 
     async fn set_drain(&self, request: &WorkerFleetDrainRequest) -> Result<(), WorkerFleetError> {
-        let _: serde_json::Value = self.post(
-            self.endpoint("/api/worker-fleet/drain", "/api/worker-fleet/mtls/drain"),
-            request,
-        )?;
+        let _: serde_json::Value = self
+            .post(
+                self.endpoint("/api/worker-fleet/drain", "/api/worker-fleet/mtls/drain"),
+                request,
+            )
+            .await?;
         Ok(())
     }
 
@@ -423,6 +444,7 @@ impl WorkerFleetPort for WorkerFleetHttpClient {
             self.endpoint("/api/worker-fleet/pull", "/api/worker-fleet/mtls/pull"),
             request,
         )
+        .await
     }
 }
 
@@ -448,6 +470,7 @@ impl TaskLeasePort for WorkerFleetHttpClient {
             ),
             request,
         )
+        .await
         .map_err(|error| TaskLeaseError::Unavailable(error.to_string()))
     }
 
@@ -462,6 +485,7 @@ impl TaskLeasePort for WorkerFleetHttpClient {
             ),
             request,
         )
+        .await
     }
 
     async fn cancel(
@@ -475,6 +499,7 @@ impl TaskLeasePort for WorkerFleetHttpClient {
             ),
             request,
         )
+        .await
     }
 
     async fn validate_claim(

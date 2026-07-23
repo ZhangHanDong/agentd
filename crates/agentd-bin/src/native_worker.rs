@@ -12,9 +12,9 @@ use agentd_core::ports::{
     ArtifactIndexPort, ArtifactListRequest, CapabilityAdmission, Clock, ExecutionArtifactKind,
     ExecutionArtifactPublish, ExecutionEvidenceError, ExecutionEvidenceLinks,
     ExecutionSecurityScope, NativeRuntimeAttemptStart, NativeRuntimeAttemptState,
-    NativeRuntimeControlPort, NativeRuntimeSessionView, PageLimit, ProtectedAction,
-    ProtectedResource, TaskLeaseCloseRequest, TaskLeasePort, TaskLeaseRenewRequest,
-    WorkerArtifactAcknowledgement, WorkerArtifactReport,
+    NativeRuntimeControlError, NativeRuntimeControlPort, NativeRuntimeSessionView, PageLimit,
+    ProtectedAction, ProtectedResource, TaskLeaseCloseRequest, TaskLeasePort,
+    TaskLeaseRenewRequest, WorkerArtifactAcknowledgement, WorkerArtifactReport,
 };
 use agentd_core::types::{
     ExecutionArtifactId, NativeExecutionSpec, RunId, RuntimeAttemptId, RuntimeSessionId,
@@ -50,6 +50,12 @@ pub enum NativeWorkerError {
 impl From<ExecutionEvidenceError> for NativeWorkerError {
     fn from(error: ExecutionEvidenceError) -> Self {
         Self::Evidence(error.to_string())
+    }
+}
+
+impl From<NativeRuntimeControlError> for NativeWorkerError {
+    fn from(error: NativeRuntimeControlError) -> Self {
+        Self::InvalidRecovery(error.to_string())
     }
 }
 

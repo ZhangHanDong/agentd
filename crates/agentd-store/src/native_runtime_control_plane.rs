@@ -83,6 +83,13 @@ impl NativeRuntimeControlPort for SqliteNativeRuntimeControlPlane {
             run_id: agentd_core::types::RunId::from_string(run_id),
             status: session.status,
             latest_native_session_ref,
+            snapshot: agentd_core::ports::ExecutionSnapshotLink {
+                authority_key: session.snapshot.authority_key,
+                resource_kind: session.snapshot.resource_kind,
+                resource_id: session.snapshot.resource_id,
+                resource_version: session.snapshot.resource_version,
+                content_sha256: session.snapshot.content_sha256,
+            },
         }))
     }
 
