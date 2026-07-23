@@ -85,7 +85,9 @@ Established since the `2026-07-09` roadmap and merged to main:
 
 ## 4. The spine
 
-Six milestones, strictly linear. Each states its **Outcome** (what becomes
+Six milestones, strictly linear as the default reading order. One dependency
+is soft: M3 (coordination) needs M1 but only lightly needs M2, so it may start
+early if M2 stalls. Each states its **Outcome** (what becomes
 possible), **Building on** (what already exists), **Remaining** (the new work),
 **Covers** (parity rows advanced to covered), and **Done when** (verifiable exit
 gate). Auth stays at the operator/agent-token level throughout; no milestone
@@ -109,10 +111,14 @@ and content-addressed artifact store exist but are still reached through
 daemon-local composition.
 
 **Remaining.**
-1. Lease `renew`/`release`/`cancel` over the control-plane port (today the
-   native worker constructs `SqliteTaskLeaseControlPlane` directly).
+1. Lease `renew`/`release`/`cancel` through an injected `TaskLeasePort`. The
+   HTTP transport already exists (`WorkerFleetHttpClient` implements
+   `TaskLeasePort` against `/api/worker-fleet/lease/*`); the work is replacing
+   the six sites where `native_worker.rs` constructs
+   `SqliteTaskLeaseControlPlane` inline with the injected port — wiring, not a
+   new transport.
 2. Artifact `upload`/`acknowledge` over the control-plane port (today evidence
-   ack is daemon-local).
+   ack is daemon-local; the daemon exposes only a GET artifact listing).
 3. `agentd worker` process entry (CLI) that runs the pull→execute→upload→report
    loop against a remote daemon.
 4. Opt-in real smoke: worker pulls a lease, launches a supported agent, the
@@ -120,12 +126,14 @@ daemon-local composition.
    or explicitly terminates the runtime state.
 
 **Covers.** `native_runtime_process`, `native_runtime_session_restore`,
-`runtime_launch_tmux` (→ native), `durable_runtime_identity`,
+`runtime_launch_tmux` (worker path → native), `durable_runtime_identity`,
 `worker_fleet_protocol` (worker side), `artifact_audit_provenance` (upload/ack).
 
 **Done when.** Fake-process tests prove lifecycle and recovery; the real smoke
-passes with a remote worker holding no local runtime-session DB; production
-runtime control no longer depends on tmux.
+passes with a remote worker holding no local runtime-session DB; the remote
+worker execution path has no tmux dependency. (The daemon's workflow dispatch
+path still composes `TmuxBackend`; it goes native when M2 routes dispatch to
+native workers, and tmux is removed entirely in M6.)
 
 ### M2 — Durable scheduler and worker fleet
 
@@ -154,7 +162,9 @@ heartbeat/supersession. Missing is their composition into one authority.
 
 **Done when.** Control-plane restart loses no accepted task/lease; worker
 disappearance does not corrupt ownership; duplicate acquire/release/upload is
-idempotent; failure-injection covers reassignment and network partition.
+idempotent; failure-injection covers reassignment and network partition; the
+production workflow dispatch path can route work to native workers, so tmux is
+no longer the only production launch path.
 
 ### M3 — Coordination product complete
 
@@ -242,7 +252,9 @@ row.
 3. Advance every remaining partial parity row to covered.
 
 **Covers.** `operational_doctor_health`, `dashboard_cli_operations` (full), and
-the closure of all remaining `partial` rows.
+the closure of all remaining `partial` rows except those carried by an explicit
+approved product-scope decision (today: `auth_rbac_quota`, right-sized to the
+token boundary per §2).
 
 **Done when.** `agentctl parity audit --agent-chat` reports no required
 missing/partial row without an explicit approved product-scope decision; after
