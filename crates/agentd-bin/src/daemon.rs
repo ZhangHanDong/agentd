@@ -214,7 +214,82 @@ pub fn recovery_router(service: Arc<WorkerFleetService>, token: String) -> Route
             "/api/runtime/runs/:run_id/artifacts",
             get(runtime_run_artifacts),
         )
+        .route("/api/runtime/artifacts/upload", post(upload_artifact))
+        .route(
+            "/api/runtime/artifacts/acknowledge",
+            post(acknowledge_artifact),
+        )
         .with_state(RecoveryApiState { service, token })
+}
+
+/// Shared bearer-token check for the two new artifact routes. Existing
+/// handlers on this router keep their inline check; only new handlers use
+/// this helper.
+fn recovery_unauthorized(state: &RecoveryApiState, headers: &HeaderMap) -> Option<Response> {
+    let expected = format!("Bearer {}", state.token);
+    if headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        != Some(expected.as_str())
+    {
+        return Some(
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "unauthorized" })),
+            )
+                .into_response(),
+        );
+    }
+    None
+}
+
+async fn upload_artifact(
+    State(state): State<RecoveryApiState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Some(response) = recovery_unauthorized(&state, &headers) {
+        return response;
+    }
+    match state.service.store_artifact_bytes(&body) {
+        Ok(stored) => (
+            StatusCode::OK,
+            Json(json!({
+                "storage_ref": stored.storage_ref,
+                "content_sha256": stored.sha256,
+                "size_bytes": stored.size_bytes,
+            })),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": error })),
+        )
+            .into_response(),
+    }
+}
+
+async fn acknowledge_artifact(
+    State(state): State<RecoveryApiState>,
+    headers: HeaderMap,
+    Json(report): Json<agentd_core::ports::WorkerArtifactReport>,
+) -> Response {
+    if let Some(response) = recovery_unauthorized(&state, &headers) {
+        return response;
+    }
+    match state.service.acknowledge_worker_artifact(&report).await {
+        Ok(acknowledgement) => (StatusCode::OK, Json(acknowledgement)).into_response(),
+        Err(error) => {
+            use agentd_core::ports::ExecutionEvidenceError as E;
+            let status = match &error {
+                E::Invalid(_) => StatusCode::BAD_REQUEST,
+                E::NotFound(_) => StatusCode::NOT_FOUND,
+                E::Conflict(_) | E::LeaseRejected { .. } => StatusCode::CONFLICT,
+                E::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            };
+            (status, Json(json!({ "error": error.to_string() }))).into_response()
+        }
+    }
 }
 
 async fn cutover_inventory(State(state): State<RecoveryApiState>, headers: HeaderMap) -> Response {
@@ -573,6 +648,34 @@ impl WorkerFleetService {
         request: crate::native_worker::NativeRecoveryRequest,
     ) -> Result<(), crate::native_worker::NativeWorkerError> {
         self.recovery_registry.register(request)
+    }
+
+    /// Store artifact bytes content-addressed, so a remote worker can upload
+    /// without opening the daemon database.
+    pub fn store_artifact_bytes(
+        &self,
+        bytes: &[u8],
+    ) -> Result<agentd_store::content_store::StoredContent, String> {
+        self.content_store
+            .put_bytes(bytes)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Validate and record a worker's fenced artifact report through the
+    /// evidence control plane; duplicates with an identical envelope replay
+    /// idempotently.
+    pub async fn acknowledge_worker_artifact(
+        &self,
+        report: &agentd_core::ports::WorkerArtifactReport,
+    ) -> Result<
+        agentd_core::ports::WorkerArtifactAcknowledgement,
+        agentd_core::ports::ExecutionEvidenceError,
+    > {
+        use agentd_core::ports::ArtifactIndexPort as _;
+        let pool = self.native_worker.store().pool().clone();
+        let lease_port = SqliteTaskLeaseControlPlane::new(pool.clone());
+        let evidence = SqliteExecutionEvidenceControlPlane::new(pool, lease_port);
+        evidence.acknowledge_worker_artifact(report).await
     }
 
     pub fn register_codex_recovery(
