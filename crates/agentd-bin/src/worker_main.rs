@@ -139,49 +139,83 @@ async fn execute_grant(
         Duration::from_secs(60),
     );
 
-    let event = handle.wait(Duration::from_secs(3600)).await?;
+    // From here the lease is held and every exit path must account for it:
+    // on success we release with a normal reason below; on any failure the
+    // check after this block makes a best-effort release explicit instead
+    // of silently falling back to TTL expiry. Fencing means an ignored
+    // release error is safe either way — a stale claim simply can't win a
+    // future renewal.
+    let outcome: Result<WorkerRunReport, NativeWorkerError> = async {
+        let event = handle.wait(Duration::from_secs(3600)).await?;
+
+        // Upload the bounded transcript and acknowledge it under the claim.
+        let output = handle.output_snapshot();
+        let stored = runtime.upload_artifact(output).await?;
+        let observed_at = crate::clock::SystemClock.now_unix();
+        let report = WorkerArtifactReport {
+            claim: claim.clone(),
+            observed_at,
+            artifact: ExecutionArtifactPublish {
+                id: ExecutionArtifactId::new(),
+                kind: ExecutionArtifactKind::Transcript,
+                content_sha256: stored.content_sha256,
+                size_bytes: stored.size_bytes,
+                media_type: "text/plain".to_string(),
+                storage_ref: stored.storage_ref,
+                provenance: json!({
+                    "source": "agentd-worker",
+                    "event": format!("{event:?}"),
+                }),
+                links: ExecutionEvidenceLinks {
+                    execution_run_id: view.run_id.clone(),
+                    execution_task_id: Some(grant.execution_task_id.clone()),
+                    runtime_session_id: Some(view.session_id.clone()),
+                    runtime_attempt_id: Some(handle.attempt_id().clone()),
+                    worker_incarnation_id: Some(claim.worker_incarnation_id.clone()),
+                    snapshot: view.snapshot.clone(),
+                    // The repository binding is not yet transmitted to
+                    // remote workers; ExecutionSecurityScope carries no
+                    // repository reference for the worker to report
+                    // honestly. Threading it through the control plane is
+                    // tracked for M2 (same pattern as run_id/snapshot were
+                    // threaded in Tasks 4-5). Matches the daemon-local
+                    // convention at daemon.rs's acknowledge path.
+                    target_repository_id: "unspecified".into(),
+                    target_base_commit: "unspecified".into(),
+                },
+            },
+        };
+        runtime.acknowledge_artifact(&report).await?;
+
+        let observed_at = crate::clock::SystemClock.now_unix();
+        handle
+            .release_lease(&claim, observed_at, "worker execution complete")
+            .await?;
+        Ok(WorkerRunReport {
+            executed: 1,
+            released: 1,
+        })
+    }
+    .await;
+
+    // The renewal task is only needed while the lease is still ours to keep
+    // alive; abort it once the outcome is decided, whether that took the
+    // success path (where it was previously aborted right after `wait`) or
+    // a failure path (where it may still be running).
     renewal.abort();
 
-    // Upload the bounded transcript and acknowledge it under the claim.
-    let output = handle.output_snapshot();
-    let stored = runtime.upload_artifact(output).await?;
-    let observed_at = crate::clock::SystemClock.now_unix();
-    let report = WorkerArtifactReport {
-        claim: claim.clone(),
-        observed_at,
-        artifact: ExecutionArtifactPublish {
-            id: ExecutionArtifactId::new(),
-            kind: ExecutionArtifactKind::Transcript,
-            content_sha256: stored.content_sha256,
-            size_bytes: stored.size_bytes,
-            media_type: "text/plain".to_string(),
-            storage_ref: stored.storage_ref,
-            provenance: json!({
-                "source": "agentd-worker",
-                "event": format!("{event:?}"),
-            }),
-            links: ExecutionEvidenceLinks {
-                execution_run_id: view.run_id.clone(),
-                execution_task_id: Some(grant.execution_task_id.clone()),
-                runtime_session_id: Some(view.session_id.clone()),
-                runtime_attempt_id: Some(handle.attempt_id().clone()),
-                worker_incarnation_id: Some(claim.worker_incarnation_id.clone()),
-                snapshot: view.snapshot.clone(),
-                target_repository_id: "repo_test".to_string(),
-                target_base_commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
-            },
-        },
-    };
-    runtime.acknowledge_artifact(&report).await?;
+    if let Err(error) = &outcome {
+        let observed_at = crate::clock::SystemClock.now_unix();
+        let _ = handle
+            .release_lease(
+                &claim,
+                observed_at,
+                &format!("worker execution failed: {error}"),
+            )
+            .await;
+    }
 
-    let observed_at = crate::clock::SystemClock.now_unix();
-    handle
-        .release_lease(&claim, observed_at, "worker execution complete")
-        .await?;
-    Ok(WorkerRunReport {
-        executed: 1,
-        released: 1,
-    })
+    outcome
 }
 
 fn hostname_or_default() -> String {
