@@ -298,3 +298,56 @@ async fn worker_once_executes_a_dispatched_task_end_to_end() {
         assert_eq!(record.publish.links.target_base_commit, "unspecified");
     }
 }
+
+/// Opt-in real smoke (M1 exit gate): requires a real provider CLI.
+/// Run with: `AGENTD_REAL_WORKER_SMOKE=1` cargo test -p agentd-bin \
+///   --test `worker_main` `real_remote_worker_smoke` -- --ignored --nocapture
+#[tokio::test]
+#[ignore = "requires AGENTD_REAL_WORKER_SMOKE=1 and a real codex CLI"]
+async fn real_remote_worker_smoke() {
+    if std::env::var("AGENTD_REAL_WORKER_SMOKE").as_deref() != Ok("1") {
+        eprintln!("skipping: AGENTD_REAL_WORKER_SMOKE!=1");
+        return;
+    }
+    let codex = which_codex().expect("codex CLI on PATH");
+    let fixture = fixture().await;
+    let workdir = tempfile::tempdir().expect("workdir");
+    let spec = agentd_core::types::NativeExecutionSpec {
+        version: 1,
+        provider: "codex".into(),
+        program: codex,
+        args: vec![
+            "exec".into(),
+            "--json".into(),
+            "reply with the word done".into(),
+        ],
+        cwd: Some(workdir.path().to_string_lossy().into_owned()),
+        env: vec![],
+    };
+    fixture
+        .store
+        .set_task_execution_spec(&fixture.task_id, &spec)
+        .await
+        .expect("attach spec");
+    let base_url = serve_daemon(fixture.store.clone(), "worker-secret").await;
+    let state = tempfile::tempdir().expect("state");
+
+    let report = agentd_bin::worker_main::run_worker_once(
+        &base_url,
+        "worker-secret",
+        state.path(),
+        std::time::Duration::from_millis(200),
+        std::time::Duration::from_secs(600),
+    )
+    .await
+    .expect("real worker run");
+    assert_eq!(report.executed, 1);
+}
+
+fn which_codex() -> Option<String> {
+    let path = std::env::var("PATH").ok()?;
+    path.split(':')
+        .map(|dir| std::path::Path::new(dir).join("codex"))
+        .find(|candidate| candidate.is_file())
+        .map(|p| p.to_string_lossy().into_owned())
+}
