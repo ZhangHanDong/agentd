@@ -217,6 +217,23 @@ pub async fn current_incarnation(
     row.as_ref().map(row_to_incarnation).transpose()
 }
 
+/// List every current worker incarnation for fleet inventory/exposure.
+///
+/// # Errors
+/// Returns [`StoreError`] if a row cannot be read or decoded.
+pub async fn list_current_incarnations(
+    pool: &SqlitePool,
+) -> Result<Vec<WorkerIncarnationRecord>, StoreError> {
+    let rows = sqlx::query(
+        "SELECT id, worker_id, daemon_version, host_name, network_zone, capabilities_json, \
+         capacity, is_current, registered_at, last_seen_at, superseded_at \
+         FROM worker_incarnations WHERE is_current = 1 ORDER BY registered_at ASC",
+    )
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_incarnation).collect()
+}
+
 /// Accept heartbeat only from the current incarnation.
 ///
 /// # Errors

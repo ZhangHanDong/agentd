@@ -539,3 +539,77 @@ async fn recovery_http_explains_scheduler_task_state() {
     assert_eq!(json["queue"]["status"], "queued");
     assert!(json["active_lease"].is_null());
 }
+
+#[tokio::test]
+async fn recovery_http_exposes_fleet_inventory() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteStore::connect(&dir.path().join("agentd.db"))
+        .await
+        .expect("store");
+
+    let worker_id = WorkerId::new();
+    worker_repo::create_worker(
+        store.pool(),
+        WorkerCreate {
+            id: worker_id.clone(),
+            trust_domain: "corp-coding".to_string(),
+            labels: json!({}),
+        },
+    )
+    .await
+    .expect("worker");
+    worker_repo::register_incarnation(
+        store.pool(),
+        &worker_id,
+        WorkerRegistration {
+            id: WorkerIncarnationId::new(),
+            daemon_version: "0.0.0-test".to_string(),
+            host_name: "host-a".to_string(),
+            network_zone: Some("us-east".to_string()),
+            capabilities: json!({"runtime": ["codex"]}),
+            capacity: 2,
+        },
+    )
+    .await
+    .expect("incarnation");
+
+    let fleet = Arc::new(SqliteWorkerFleet::new(store.pool().clone()));
+    let artifacts =
+        Arc::new(LocalContentStore::new(dir.path().join("artifacts")).expect("content store"));
+    let service = Arc::new(WorkerFleetService::new(
+        fleet,
+        AgentdWorker::new(store),
+        artifacts,
+    ));
+    let app = recovery_router(service, "operator-secret".into());
+
+    let unauthorized = app
+        .clone()
+        .oneshot(
+            Request::get("/api/fleet/workers")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let listed = app
+        .clone()
+        .oneshot(
+            Request::get("/api/fleet/workers")
+                .header("authorization", "Bearer operator-secret")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(listed.status(), StatusCode::OK);
+    let body = listed.into_body().collect().await.expect("body").to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    let workers = json["workers"].as_array().expect("workers array");
+    assert_eq!(workers.len(), 1);
+    assert_eq!(workers[0]["network_zone"], "us-east");
+    assert_eq!(workers[0]["capacity"], 2);
+    assert_eq!(workers[0]["open_leases"], 0);
+}

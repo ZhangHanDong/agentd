@@ -80,6 +80,13 @@ impl WorkerFleetPort for SqliteWorkerFleet {
         request: &WorkerFleetRegisterRequest,
     ) -> Result<WorkerFleetRegistration, WorkerFleetError> {
         self.authorize(&request.auth_proof)?;
+        if request.protocol_version < agentd_core::ports::MIN_WORKER_PROTOCOL_VERSION {
+            return Err(WorkerFleetError::Invalid(format!(
+                "worker protocol version {} is below the minimum supported {}",
+                request.protocol_version,
+                agentd_core::ports::MIN_WORKER_PROTOCOL_VERSION
+            )));
+        }
         if request.trust_domain.trim().is_empty()
             || request.daemon_version.trim().is_empty()
             || request.host_name.trim().is_empty()

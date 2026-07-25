@@ -225,6 +225,7 @@ pub fn recovery_router(service: Arc<WorkerFleetService>, token: String) -> Route
             "/api/scheduler/tasks/:task_id/explain",
             get(explain_scheduler_task),
         )
+        .route("/api/fleet/workers", get(fleet_inventory))
         .with_state(RecoveryApiState { service, token })
 }
 
@@ -327,6 +328,47 @@ async fn explain_scheduler_task(
         )
             .into_response(),
     }
+}
+
+/// Operator-facing fleet inventory: every current worker incarnation with
+/// its zone, declared capacity, and current active-lease count.
+async fn fleet_inventory(State(state): State<RecoveryApiState>, headers: HeaderMap) -> Response {
+    if let Some(response) = recovery_unauthorized(&state, &headers) {
+        return response;
+    }
+    let pool = state.service.store_pool();
+    let incarnations = match agentd_store::worker_repo::list_current_incarnations(&pool).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": error.to_string() })),
+            )
+                .into_response();
+        }
+    };
+    let mut workers = Vec::with_capacity(incarnations.len());
+    for incarnation in incarnations {
+        let open_leases: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM execution_task_leases \
+             WHERE worker_incarnation_id = ? AND status = 'active'",
+        )
+        .bind(incarnation.id.as_str())
+        .fetch_one(&pool)
+        .await
+        .unwrap_or(0);
+        workers.push(json!({
+            "worker_id": incarnation.worker_id.as_str(),
+            "incarnation_id": incarnation.id.as_str(),
+            "network_zone": incarnation.network_zone,
+            "capabilities": incarnation.capabilities,
+            "capacity": incarnation.capacity,
+            "open_leases": open_leases,
+            "daemon_version": incarnation.daemon_version,
+            "host_name": incarnation.host_name,
+        }));
+    }
+    (StatusCode::OK, Json(json!({ "workers": workers }))).into_response()
 }
 
 async fn cutover_inventory(State(state): State<RecoveryApiState>, headers: HeaderMap) -> Response {

@@ -1,6 +1,6 @@
 use agentd_core::ports::{
-    WorkerFleetDrainRequest, WorkerFleetHeartbeat, WorkerFleetHeartbeatResult, WorkerFleetPort,
-    WorkerFleetPullRequest, WorkerFleetRegisterRequest,
+    WorkerFleetDrainRequest, WorkerFleetError, WorkerFleetHeartbeat, WorkerFleetHeartbeatResult,
+    WorkerFleetPort, WorkerFleetPullRequest, WorkerFleetRegisterRequest,
 };
 use agentd_core::types::{NodeId, RunId, WorkerId, WorkerIncarnationId, WorkerStatus};
 use agentd_store::SqliteStore;
@@ -376,4 +376,70 @@ async fn register_incarnation_persists_declared_capacity() {
         .expect("incarnation exists");
     assert_eq!(record.capacity, 4);
     assert_eq!(record.network_zone.as_deref(), Some("dev"));
+}
+
+#[tokio::test]
+async fn register_rejects_worker_below_protocol_floor() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteStore::connect(&dir.path().join("agentd.db"))
+        .await
+        .expect("connect");
+    let fleet = SqliteWorkerFleet::new(store.pool().clone());
+    let request = WorkerFleetRegisterRequest {
+        auth_proof: String::new(),
+        worker_id: WorkerId::new(),
+        trust_domain: "corp-coding".to_string(),
+        labels: serde_json::json!({}),
+        incarnation_id: WorkerIncarnationId::new(),
+        daemon_version: "0.0.0-test".to_string(),
+        host_name: "host-a".to_string(),
+        network_zone: Some("dev".to_string()),
+        capabilities: serde_json::json!({"runtime": ["codex"]}),
+        capacity: 1,
+        protocol_version: 0, // below the floor of 1
+    };
+    let error = fleet
+        .register(&request)
+        .await
+        .expect_err("stale protocol must be rejected");
+    assert!(matches!(error, WorkerFleetError::Invalid(_)));
+}
+
+#[tokio::test]
+async fn list_current_incarnations_exposes_zone_and_capacity() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteStore::connect(&dir.path().join("agentd.db"))
+        .await
+        .expect("connect");
+    let worker_id = WorkerId::new();
+    worker_repo::create_worker(
+        store.pool(),
+        WorkerCreate {
+            id: worker_id.clone(),
+            trust_domain: "corp-coding".to_string(),
+            labels: serde_json::json!({}),
+        },
+    )
+    .await
+    .expect("worker");
+    worker_repo::register_incarnation(
+        store.pool(),
+        &worker_id,
+        WorkerRegistration {
+            id: WorkerIncarnationId::new(),
+            daemon_version: "0.0.0-test".to_string(),
+            host_name: "host-a".to_string(),
+            network_zone: Some("us-east".to_string()),
+            capabilities: serde_json::json!({"runtime": ["codex"]}),
+            capacity: 3,
+        },
+    )
+    .await
+    .expect("incarnation");
+    let listed = worker_repo::list_current_incarnations(store.pool())
+        .await
+        .expect("list");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].capacity, 3);
+    assert_eq!(listed[0].network_zone.as_deref(), Some("us-east"));
 }
