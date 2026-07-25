@@ -48,6 +48,25 @@ fn queue_record(
     })
 }
 
+/// Extract the worker's runnable runtime kinds from its capabilities JSON,
+/// e.g. `{"runtime": ["codex", "claude-code"]}` -> `["codex", "claude-code"]`.
+fn worker_runtime_capabilities(capabilities_json: &str) -> Vec<String> {
+    serde_json::from_str::<serde_json::Value>(capabilities_json)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("runtime")
+                .and_then(serde_json::Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(str::to_owned))
+                        .collect()
+                })
+        })
+        .unwrap_or_default()
+}
+
 const QUEUE_COLUMNS: &str = "id, execution_task_id, status, attempts, max_attempts, \
      available_at, current_lease_id, last_reason, request_id, enqueued_at, updated_at";
 
@@ -239,23 +258,72 @@ async fn acquire_in_transaction(
         return Ok(Some(grant));
     }
 
+    // Capacity + capability preamble. Read the acquiring incarnation once.
+    let Some((capacity, capabilities_json)) = sqlx::query_as::<_, (i64, String)>(
+        "SELECT capacity, capabilities_json FROM worker_incarnations WHERE id = ?",
+    )
+    .bind(request.worker_incarnation_id.as_str())
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(storage_error)?
+    else {
+        return Err(DurableSchedulerError::NotFound(
+            "worker incarnation not found".into(),
+        ));
+    };
+
+    // Capacity: never grant beyond the incarnation's open active leases.
+    let open_leases: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM execution_task_leases \
+         WHERE worker_incarnation_id = ? AND status = 'active'",
+    )
+    .bind(request.worker_incarnation_id.as_str())
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(storage_error)?;
+    if open_leases >= capacity {
+        return Ok(None);
+    }
+
+    // Capability filter, applied in SQL so an incompatible row is never
+    // selected (and thus never spins the terminalize loop). A task with no
+    // execution spec declares no provider and stays unconstrained.
+    let runtimes = worker_runtime_capabilities(&capabilities_json);
+    let provider_expr = "json_extract(t.execution_spec_json, '$.provider')";
+    let capability_clause = if runtimes.is_empty() {
+        format!("{provider_expr} IS NULL")
+    } else {
+        let placeholders = std::iter::repeat_n("?", runtimes.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("({provider_expr} IS NULL OR {provider_expr} IN ({placeholders}))")
+    };
+    let select_sql = format!(
+        "SELECT q.id, q.execution_task_id FROM execution_task_queue q \
+         JOIN task_runs t ON t.id = q.execution_task_id \
+         WHERE q.status = 'queued' AND q.available_at <= ? AND {capability_clause} \
+         ORDER BY q.enqueued_at ASC, q.id ASC LIMIT 1"
+    );
+
     // Select the oldest eligible queue row. A row whose task closed while it
     // sat queued (finished_at set / status no longer 'running') is
     // terminalized in place and skipped rather than retried: leaving it
     // 'queued' would let it keep winning selection forever and wedge the
     // scheduler, since reconcile() only handles 'leased' rows. Every skipped
     // row is terminalized before the next iteration, so the eligible set
-    // strictly shrinks and the loop is bounded.
+    // strictly shrinks and the loop is bounded. A capability-incompatible row
+    // is excluded by the SELECT itself (never terminalized) so another worker
+    // can still take it.
     loop {
-        let row: Option<(String, String)> = sqlx::query_as(
-            "SELECT id, execution_task_id FROM execution_task_queue \
-             WHERE status = 'queued' AND available_at <= ? \
-             ORDER BY enqueued_at ASC, id ASC LIMIT 1",
-        )
-        .bind(request.observed_at)
-        .fetch_optional(&mut *connection)
-        .await
-        .map_err(storage_error)?;
+        let mut query =
+            sqlx::query_as::<_, (String, String)>(&select_sql).bind(request.observed_at);
+        for runtime in &runtimes {
+            query = query.bind(runtime);
+        }
+        let row = query
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(storage_error)?;
         let Some((queue_id, task_id)) = row else {
             return Ok(None);
         };
