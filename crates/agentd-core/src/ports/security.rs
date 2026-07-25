@@ -77,7 +77,11 @@ pub struct ExecutionSecurityScope {
     pub lease_claim: TaskLeaseClaim,
     pub sandbox_profile: String,
     pub egress_profile: String,
+    // serde-defaulted for wire compatibility: an older daemon's scope object
+    // lacks these keys and must still deserialize on a newer worker.
+    #[serde(default)]
     pub target_repository_id: String,
+    #[serde(default)]
     pub target_base_commit: String,
     pub policy_revocation_epoch: u64,
     pub valid_from: i64,
