@@ -7,6 +7,7 @@ pub mod agent_allocator;
 pub mod backend;
 pub mod clock;
 pub mod command_runner;
+pub mod durable_scheduler;
 pub mod execution_evidence;
 pub mod mempal;
 pub mod native_runtime;
@@ -24,6 +25,10 @@ pub use agent_allocator::{
 pub use backend::AgentBackend;
 pub use clock::Clock;
 pub use command_runner::{CommandError, CommandOutput, CommandRunner, RunOpts};
+pub use durable_scheduler::{
+    DurableSchedulerError, DurableSchedulerPort, SchedulerAcquireRequest, SchedulerEnqueueRequest,
+    SchedulerQueueRecord, SchedulerTaskExplanation,
+};
 pub use execution_evidence::{
     ArtifactCursor, ArtifactIndexPort, ArtifactListRequest, ArtifactPage, AuditActorKind,
     AuditPage, AuditReadRequest, CertificationReferenceAppend, CertificationReferenceKind,

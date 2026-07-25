@@ -166,6 +166,17 @@ contract_status!(
     terminal { Released, Expired, Cancelled, Superseded }
 );
 
+contract_status!(
+    SchedulerQueueStatus {
+        Queued => "queued",
+        Leased => "leased",
+        Completed => "completed",
+        DeadLetter => "dead_letter",
+        Cancelled => "cancelled",
+    }
+    terminal { Completed, DeadLetter, Cancelled }
+);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct FencingToken(u64);
