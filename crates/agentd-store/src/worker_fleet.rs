@@ -217,6 +217,12 @@ impl WorkerFleetPort for SqliteWorkerFleet {
                 enqueued_at: request.observed_at,
             };
             // A racing pull creating the row first (Conflict) is fine.
+            // INVARIANT: the fixed "auto-{task_id}" key also occupies
+            // idx_queue_request forever, which is what stops a task whose
+            // queue row went terminal from being bridged and re-executed
+            // again (native task_runs are never marked finished today).
+            // Changing this key derivation or enqueue replay semantics
+            // reintroduces infinite re-dispatch.
             match scheduler.enqueue(&enqueue).await {
                 Ok(_) | Err(agentd_core::ports::DurableSchedulerError::Conflict(_)) => {}
                 Err(error) => {
