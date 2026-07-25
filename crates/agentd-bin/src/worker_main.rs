@@ -77,6 +77,7 @@ pub async fn run_worker_once(
             worker_incarnation_id: incarnation_id.clone(),
             observed_at,
             expires_at: observed_at.saturating_add(60),
+            request_id: Some(format!("pull-{}-{}", incarnation_id.as_str(), observed_at)),
         };
         match fleet
             .pull_native_with_scope(&request, policy)
