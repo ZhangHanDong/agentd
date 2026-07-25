@@ -227,9 +227,8 @@ impl WorkerFleetPort for SqliteWorkerFleet {
 
         let acquire_id = request.request_id.clone().unwrap_or_else(|| {
             format!(
-                "pull-{}-{}",
-                request.worker_incarnation_id.as_str(),
-                request.observed_at
+                "pull-{}",
+                agentd_core::types::SchedulerEventId::new().as_str()
             )
         });
         let grant = scheduler

@@ -239,26 +239,105 @@ async fn acquire_in_transaction(
         return Ok(Some(grant));
     }
 
-    // Select the oldest eligible queue row.
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT id, execution_task_id FROM execution_task_queue \
-         WHERE status = 'queued' AND available_at <= ? \
-         ORDER BY enqueued_at ASC, id ASC LIMIT 1",
+    // Select the oldest eligible queue row. A row whose task closed while it
+    // sat queued (finished_at set / status no longer 'running') is
+    // terminalized in place and skipped rather than retried: leaving it
+    // 'queued' would let it keep winning selection forever and wedge the
+    // scheduler, since reconcile() only handles 'leased' rows. Every skipped
+    // row is terminalized before the next iteration, so the eligible set
+    // strictly shrinks and the loop is bounded.
+    loop {
+        let row: Option<(String, String)> = sqlx::query_as(
+            "SELECT id, execution_task_id FROM execution_task_queue \
+             WHERE status = 'queued' AND available_at <= ? \
+             ORDER BY enqueued_at ASC, id ASC LIMIT 1",
+        )
+        .bind(request.observed_at)
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(storage_error)?;
+        let Some((queue_id, task_id)) = row else {
+            return Ok(None);
+        };
+
+        if !task_is_open(connection, &task_id).await? {
+            terminalize_closed_row(connection, &queue_id, &task_id, request.observed_at).await?;
+            continue;
+        }
+
+        // A Conflict from dispatch here is worker-related (stale incarnation,
+        // worker offline) since the task-open check above just passed;
+        // abort the whole acquire rather than terminalizing the row.
+        let grant = grant_and_transition(connection, request, &queue_id, &task_id).await?;
+        return Ok(Some(grant));
+    }
+}
+
+async fn task_is_open(
+    connection: &mut sqlx::SqliteConnection,
+    task_id: &str,
+) -> Result<bool, DurableSchedulerError> {
+    let open: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM task_runs WHERE id = ? AND finished_at IS NULL \
+         AND status = 'running'",
     )
-    .bind(request.observed_at)
-    .fetch_optional(&mut *connection)
+    .bind(task_id)
+    .fetch_one(&mut *connection)
     .await
     .map_err(storage_error)?;
-    let Some((queue_id, task_id)) = row else {
-        return Ok(None);
-    };
+    Ok(open != 0)
+}
 
-    // Grant the lease through the existing fenced primitive (validates the
-    // open task, the current online incarnation, and allocates the token).
+async fn terminalize_closed_row(
+    connection: &mut sqlx::SqliteConnection,
+    queue_id: &str,
+    task_id: &str,
+    observed_at: i64,
+) -> Result<(), DurableSchedulerError> {
+    let cancelled = sqlx::query(
+        "UPDATE execution_task_queue SET status = 'cancelled', current_lease_id = NULL, \
+         last_reason = ?, updated_at = ? WHERE id = ? AND status = 'queued'",
+    )
+    .bind(format!("task {task_id} closed before lease"))
+    .bind(observed_at)
+    .bind(queue_id)
+    .execute(&mut *connection)
+    .await
+    .map_err(storage_error)?;
+    if cancelled.rows_affected() != 1 {
+        return Err(DurableSchedulerError::Conflict(
+            "queue row changed during acquisition".into(),
+        ));
+    }
+    sqlx::query(
+        "INSERT INTO execution_scheduler_outbox \
+         (event_id, kind, queue_id, task_id, lease_id, payload, created_at) \
+         VALUES (?, 'task_cancelled', ?, ?, ?, '{}', ?)",
+    )
+    .bind(SchedulerEventId::new().as_str())
+    .bind(queue_id)
+    .bind(task_id)
+    .bind(Option::<String>::None)
+    .bind(observed_at)
+    .execute(&mut *connection)
+    .await
+    .map_err(storage_error)?;
+    Ok(())
+}
+
+/// Grant the lease through the existing fenced primitive (validates the open
+/// task, the current online incarnation, and allocates the token), then
+/// transition the queue row and record the acquisition/outbox event.
+async fn grant_and_transition(
+    connection: &mut sqlx::SqliteConnection,
+    request: &SchedulerAcquireRequest,
+    queue_id: &str,
+    task_id: &str,
+) -> Result<TaskLeaseGrant, DurableSchedulerError> {
     let grant = crate::task_lease_control_plane::dispatch_in_transaction(
         connection,
         &TaskLeaseDispatchRequest {
-            execution_task_id: TaskRunId::from_string(task_id.clone()),
+            execution_task_id: TaskRunId::from_string(task_id.to_string()),
             worker_incarnation_id: request.worker_incarnation_id.clone(),
             observed_at: request.observed_at,
             expires_at: request.expires_at,
@@ -277,7 +356,7 @@ async fn acquire_in_transaction(
     )
     .bind(grant.lease_id.as_str())
     .bind(request.observed_at)
-    .bind(&queue_id)
+    .bind(queue_id)
     .execute(&mut *connection)
     .await
     .map_err(storage_error)?;
@@ -294,7 +373,7 @@ async fn acquire_in_transaction(
          VALUES (?, ?, ?, ?, ?)",
     )
     .bind(&request.request_id)
-    .bind(&queue_id)
+    .bind(queue_id)
     .bind(grant.lease_id.as_str())
     .bind(request.worker_incarnation_id.as_str())
     .bind(request.observed_at)
@@ -307,15 +386,15 @@ async fn acquire_in_transaction(
          VALUES (?, 'lease_granted', ?, ?, ?, '{}', ?)",
     )
     .bind(SchedulerEventId::new().as_str())
-    .bind(&queue_id)
-    .bind(&task_id)
+    .bind(queue_id)
+    .bind(task_id)
     .bind(grant.lease_id.as_str())
     .bind(request.observed_at)
     .execute(&mut *connection)
     .await
     .map_err(storage_error)?;
 
-    Ok(Some(grant))
+    Ok(grant)
 }
 
 async fn reconcile_in_transaction(

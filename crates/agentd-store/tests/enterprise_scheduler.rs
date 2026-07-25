@@ -13,6 +13,7 @@ struct Fixture {
     store: SqliteStore,
     _dir: tempfile::TempDir,
     task_id: TaskRunId,
+    task_b_id: TaskRunId,
     incarnation_id: WorkerIncarnationId,
 }
 
@@ -28,6 +29,9 @@ async fn fixture() -> Fixture {
     let task_id = task_repo::insert_task_run(store.pool(), &run_id, &NodeId::parsed("impl"))
         .await
         .expect("task");
+    let task_b_id = task_repo::insert_task_run(store.pool(), &run_id, &NodeId::parsed("impl-b"))
+        .await
+        .expect("task b");
     let worker_id = agentd_core::types::WorkerId::new();
     worker_repo::create_worker(
         store.pool(),
@@ -57,6 +61,7 @@ async fn fixture() -> Fixture {
         store,
         _dir: dir,
         task_id,
+        task_b_id,
         incarnation_id,
     }
 }
@@ -69,6 +74,20 @@ fn enqueue_request(
     SchedulerEnqueueRequest {
         request_id: request_id.to_string(),
         execution_task_id: fixture.task_id.clone(),
+        max_attempts: 3,
+        available_at,
+        enqueued_at: available_at,
+    }
+}
+
+fn enqueue_request_for(
+    task_id: &TaskRunId,
+    request_id: &str,
+    available_at: i64,
+) -> SchedulerEnqueueRequest {
+    SchedulerEnqueueRequest {
+        request_id: request_id.to_string(),
+        execution_task_id: task_id.clone(),
         max_attempts: 3,
         available_at,
         enqueued_at: available_at,
@@ -398,4 +417,85 @@ async fn reconcile_requeues_expired_lease_until_dead_letter() {
             .unwrap_or("")
             .contains("expired")
     );
+}
+
+#[tokio::test]
+async fn acquire_skips_closed_task_and_grants_next() {
+    let fixture = fixture().await;
+    let scheduler = scheduler_for(&fixture);
+    scheduler
+        .enqueue(&enqueue_request_for(&fixture.task_id, "rq-a", 10))
+        .await
+        .expect("enqueue a");
+    scheduler
+        .enqueue(&enqueue_request_for(&fixture.task_b_id, "rq-b", 11))
+        .await
+        .expect("enqueue b");
+
+    // Task A closes while its queue row still sits 'queued'.
+    sqlx::query("UPDATE task_runs SET finished_at = 99, status = 'finished' WHERE id = ?")
+        .bind(fixture.task_id.as_str())
+        .execute(fixture.store.pool())
+        .await
+        .expect("close task a");
+
+    let grant = scheduler
+        .acquire(&acquire_request(&fixture, "acq-1", 20, 80))
+        .await
+        .expect("acquire")
+        .expect("grant for the next eligible task");
+    assert_eq!(grant.execution_task_id, fixture.task_b_id);
+
+    let explanation_a = scheduler
+        .explain_task(&fixture.task_id)
+        .await
+        .expect("explain a")
+        .expect("row a");
+    assert_eq!(explanation_a.queue.status, SchedulerQueueStatus::Cancelled);
+    assert!(
+        explanation_a
+            .queue
+            .last_reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("closed before lease")
+    );
+
+    let (kind, task_id): (String, String) = sqlx::query_as(
+        "SELECT kind, task_id FROM execution_scheduler_outbox WHERE kind = 'task_cancelled' \
+         ORDER BY seq DESC LIMIT 1",
+    )
+    .fetch_one(fixture.store.pool())
+    .await
+    .expect("outbox row");
+    assert_eq!(kind, "task_cancelled");
+    assert_eq!(task_id, fixture.task_id.as_str());
+}
+
+#[tokio::test]
+async fn acquire_returns_none_when_only_closed_tasks_queued() {
+    let fixture = fixture().await;
+    let scheduler = scheduler_for(&fixture);
+    scheduler
+        .enqueue(&enqueue_request(&fixture, "rq-a", 10))
+        .await
+        .expect("enqueue a");
+    sqlx::query("UPDATE task_runs SET finished_at = 99, status = 'finished' WHERE id = ?")
+        .bind(fixture.task_id.as_str())
+        .execute(fixture.store.pool())
+        .await
+        .expect("close task a");
+
+    let grant = scheduler
+        .acquire(&acquire_request(&fixture, "acq-1", 20, 80))
+        .await
+        .expect("acquire");
+    assert!(grant.is_none());
+
+    let explanation = scheduler
+        .explain_task(&fixture.task_id)
+        .await
+        .expect("explain")
+        .expect("row");
+    assert_eq!(explanation.queue.status, SchedulerQueueStatus::Cancelled);
 }
