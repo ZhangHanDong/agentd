@@ -1,8 +1,10 @@
 use agentd_core::ports::{
     DurableSchedulerError, DurableSchedulerPort, SchedulerAcquireRequest, SchedulerEnqueueRequest,
+    TaskLeaseCloseRequest, TaskLeasePort,
 };
 use agentd_core::types::{NodeId, RunId, SchedulerQueueStatus, TaskRunId, WorkerIncarnationId};
 use agentd_store::durable_scheduler::SqliteDurableScheduler;
+use agentd_store::task_lease_control_plane::SqliteTaskLeaseControlPlane;
 use agentd_store::worker_repo::{self, WorkerCreate, WorkerRegistration};
 use agentd_store::{SqliteStore, run_repo, task_repo};
 use serde_json::json;
@@ -75,6 +77,20 @@ fn enqueue_request(
 
 fn scheduler_for(fixture: &Fixture) -> SqliteDurableScheduler {
     SqliteDurableScheduler::new(fixture.store.pool().clone())
+}
+
+fn acquire_request(
+    fixture: &Fixture,
+    request_id: &str,
+    observed_at: i64,
+    expires_at: i64,
+) -> SchedulerAcquireRequest {
+    SchedulerAcquireRequest {
+        request_id: request_id.to_string(),
+        worker_incarnation_id: fixture.incarnation_id.clone(),
+        observed_at,
+        expires_at,
+    }
 }
 
 #[tokio::test]
@@ -294,4 +310,92 @@ async fn concurrent_acquire_grants_exactly_one_winner() {
         }
     }
     assert_eq!(grants, 1, "exactly one concurrent acquirer wins");
+}
+
+#[tokio::test]
+async fn reconcile_completes_row_when_lease_released() {
+    let fixture = fixture().await;
+    let scheduler = scheduler_for(&fixture);
+    scheduler
+        .enqueue(&enqueue_request(&fixture, "rq-1", 10))
+        .await
+        .expect("enqueue");
+    let grant = scheduler
+        .acquire(&acquire_request(&fixture, "acq-1", 20, 80))
+        .await
+        .expect("acquire")
+        .expect("grant");
+    let lease_plane = SqliteTaskLeaseControlPlane::new(fixture.store.pool().clone());
+    lease_plane
+        .release(&TaskLeaseCloseRequest {
+            claim: grant.claim(),
+            observed_at: 30,
+            reason: "done".to_string(),
+        })
+        .await
+        .expect("release");
+
+    let changed = scheduler.reconcile(31).await.expect("reconcile");
+    assert_eq!(changed, 1);
+    let explanation = scheduler
+        .explain_task(&fixture.task_id)
+        .await
+        .expect("explain")
+        .expect("row");
+    assert_eq!(explanation.queue.status, SchedulerQueueStatus::Completed);
+}
+
+#[tokio::test]
+async fn reconcile_requeues_expired_lease_until_dead_letter() {
+    let fixture = fixture().await;
+    let scheduler = scheduler_for(&fixture);
+    // max_attempts = 2: first expiry requeues, second dead-letters.
+    let mut enqueue = enqueue_request(&fixture, "rq-1", 10);
+    enqueue.max_attempts = 2;
+    scheduler.enqueue(&enqueue).await.expect("enqueue");
+    let lease_plane = SqliteTaskLeaseControlPlane::new(fixture.store.pool().clone());
+
+    // Attempt 1: acquire then let it expire.
+    scheduler
+        .acquire(&acquire_request(&fixture, "acq-1", 20, 25))
+        .await
+        .expect("acquire")
+        .expect("grant");
+    lease_plane.expire_due(30).await.expect("expire");
+    let changed = scheduler.reconcile(30).await.expect("reconcile");
+    assert_eq!(changed, 1);
+    let explanation = scheduler
+        .explain_task(&fixture.task_id)
+        .await
+        .expect("explain")
+        .expect("row");
+    assert_eq!(
+        explanation.queue.status,
+        SchedulerQueueStatus::Queued,
+        "first expiry requeues"
+    );
+    assert_eq!(explanation.queue.attempts, 1);
+
+    // Attempt 2: acquire again, expire again -> dead letter.
+    scheduler
+        .acquire(&acquire_request(&fixture, "acq-2", 40, 45))
+        .await
+        .expect("acquire")
+        .expect("grant");
+    lease_plane.expire_due(50).await.expect("expire");
+    scheduler.reconcile(50).await.expect("reconcile");
+    let explanation = scheduler
+        .explain_task(&fixture.task_id)
+        .await
+        .expect("explain")
+        .expect("row");
+    assert_eq!(explanation.queue.status, SchedulerQueueStatus::DeadLetter);
+    assert!(
+        explanation
+            .queue
+            .last_reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("expired")
+    );
 }

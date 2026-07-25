@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agentd_core::CoreError;
 use agentd_core::ports::{
-    AgentAllocation, AgentBackend, ArtifactIndexPort, ExecutionArtifactKind,
+    AgentAllocation, AgentBackend, ArtifactIndexPort, DurableSchedulerPort, ExecutionArtifactKind,
     ExecutionEvidenceLinks, ExecutionSnapshotLink, MtlsWorkloadVerifier, WorkerFleetPort,
     WorkerFleetPullRequest, WorktreeAllocator,
 };
@@ -115,10 +115,12 @@ pub async fn worker_fleet_tick(
     fleet: &dyn WorkerFleetPort,
     recovery_registry: &NativeRecoveryRegistry,
     native_worker: &AgentdWorker,
+    scheduler: &agentd_store::durable_scheduler::SqliteDurableScheduler,
     observed_at: i64,
 ) {
     let _ = fleet.recover_offline(observed_at - 30).await;
     let _ = fleet.expire_due(observed_at).await;
+    let _ = scheduler.reconcile(observed_at).await;
     let _ = recovery_registry.recover_one(native_worker).await;
 }
 
@@ -1040,6 +1042,9 @@ impl WorkerFleetService {
     #[must_use]
     pub fn start(self) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
+            let scheduler = agentd_store::durable_scheduler::SqliteDurableScheduler::new(
+                self.native_worker.store().pool().clone(),
+            );
             let mut interval = tokio::time::interval(Duration::from_secs(5));
             loop {
                 interval.tick().await;
@@ -1047,6 +1052,7 @@ impl WorkerFleetService {
                     self.fleet.as_ref(),
                     self.recovery_registry.as_ref(),
                     &self.native_worker,
+                    &scheduler,
                     unix_now(),
                 )
                 .await;

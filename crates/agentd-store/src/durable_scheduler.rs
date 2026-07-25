@@ -170,10 +170,26 @@ impl DurableSchedulerPort for SqliteDurableScheduler {
         }
     }
 
-    async fn reconcile(&self, _observed_at: i64) -> Result<u64, DurableSchedulerError> {
-        Err(DurableSchedulerError::Unavailable(
-            "reconcile lands in a later task".into(),
-        ))
+    async fn reconcile(&self, observed_at: i64) -> Result<u64, DurableSchedulerError> {
+        let mut connection = self.pool.acquire().await.map_err(storage_error)?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await
+            .map_err(storage_error)?;
+        let result = reconcile_in_transaction(&mut connection, observed_at).await;
+        match result {
+            Ok(count) => {
+                sqlx::query("COMMIT")
+                    .execute(&mut *connection)
+                    .await
+                    .map_err(storage_error)?;
+                Ok(count)
+            }
+            Err(error) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                Err(error)
+            }
+        }
     }
 
     async fn explain_task(
@@ -300,4 +316,78 @@ async fn acquire_in_transaction(
     .map_err(storage_error)?;
 
     Ok(Some(grant))
+}
+
+async fn reconcile_in_transaction(
+    connection: &mut sqlx::SqliteConnection,
+    observed_at: i64,
+) -> Result<u64, DurableSchedulerError> {
+    let rows: Vec<(String, String, String, i64, i64, String)> = sqlx::query_as(
+        "SELECT q.id, q.execution_task_id, q.current_lease_id, q.attempts, q.max_attempts, l.status \
+         FROM execution_task_queue q \
+         JOIN execution_task_leases l ON l.id = q.current_lease_id \
+         WHERE q.status = 'leased' AND l.status != 'active'",
+    )
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(storage_error)?;
+    let mut changed = 0_u64;
+    for (queue_id, task_id, lease_id, attempts, max_attempts, lease_status) in rows {
+        let (new_status, reason, kind) = match lease_status.as_str() {
+            "released" => (
+                "completed",
+                format!("lease {lease_id} released"),
+                "task_completed",
+            ),
+            "cancelled" => (
+                "cancelled",
+                format!("lease {lease_id} cancelled"),
+                "task_cancelled",
+            ),
+            // expired / superseded: retry or dead-letter.
+            other => {
+                if attempts >= max_attempts {
+                    (
+                        "dead_letter",
+                        format!("lease {lease_id} {other}; attempts exhausted"),
+                        "task_dead_lettered",
+                    )
+                } else {
+                    (
+                        "queued",
+                        format!("lease {lease_id} {other}; requeued"),
+                        "task_requeued",
+                    )
+                }
+            }
+        };
+        sqlx::query(
+            "UPDATE execution_task_queue SET status = ?, current_lease_id = NULL, \
+             last_reason = ?, available_at = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(new_status)
+        .bind(&reason)
+        .bind(observed_at)
+        .bind(observed_at)
+        .bind(&queue_id)
+        .execute(&mut *connection)
+        .await
+        .map_err(storage_error)?;
+        sqlx::query(
+            "INSERT INTO execution_scheduler_outbox \
+             (event_id, kind, queue_id, task_id, lease_id, payload, created_at) \
+             VALUES (?, ?, ?, ?, ?, '{}', ?)",
+        )
+        .bind(SchedulerEventId::new().as_str())
+        .bind(kind)
+        .bind(&queue_id)
+        .bind(&task_id)
+        .bind(&lease_id)
+        .bind(observed_at)
+        .execute(&mut *connection)
+        .await
+        .map_err(storage_error)?;
+        changed += 1;
+    }
+    Ok(changed)
 }
