@@ -1046,6 +1046,9 @@ impl WorkerFleetService {
         )
         .await?
         .map(|attempt| attempt.id);
+        let (target_repository_id, target_base_commit) =
+            resolve_target_repository_binding(self.native_worker.store().pool(), &session.snapshot)
+                .await;
         let links = ExecutionEvidenceLinks {
             execution_run_id: run_id,
             execution_task_id: Some(grant.execution_task_id.clone()),
@@ -1059,8 +1062,8 @@ impl WorkerFleetService {
                 resource_version: session.snapshot.resource_version,
                 content_sha256: session.snapshot.content_sha256,
             },
-            target_repository_id: "unspecified".into(),
-            target_base_commit: "unspecified".into(),
+            target_repository_id,
+            target_base_commit,
         };
         // The attempt is the durable execution boundary. Deriving the artifact
         // id from it makes a reconnect/retry idempotent instead of publishing a
@@ -1141,6 +1144,34 @@ impl WorkerFleetService {
                 .await;
             }
         })
+    }
+}
+
+/// Resolve the target repository binding for a runtime session's
+/// project-authority snapshot, falling back to the "unspecified" sentinel
+/// when the snapshot cannot be found or declares no target repository.
+async fn resolve_target_repository_binding(
+    pool: &sqlx::SqlitePool,
+    snapshot: &agentd_store::runtime_session_repo::ExecutionSnapshotRef,
+) -> (String, String) {
+    let snapshot_ref = format!(
+        "{}:{}:{}:{}",
+        snapshot.authority_key,
+        snapshot.resource_kind,
+        snapshot.resource_id,
+        snapshot.resource_version
+    );
+    match agentd_store::project_authority_repo::get_snapshot(pool, &snapshot_ref).await {
+        Ok(snapshot) => snapshot.target_repository().map_or_else(
+            |_| ("unspecified".to_string(), "unspecified".to_string()),
+            |binding| {
+                (
+                    binding.repository_ref.resource_id().to_string(),
+                    binding.base_commit.clone(),
+                )
+            },
+        ),
+        Err(_) => ("unspecified".to_string(), "unspecified".to_string()),
     }
 }
 

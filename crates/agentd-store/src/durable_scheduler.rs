@@ -465,12 +465,16 @@ async fn grant_and_transition(
     Ok(grant)
 }
 
+/// `(queue_id, task_id, lease_id, attempts, max_attempts, lease_status, terminal_reason)`
+type ReconcileRow = (String, String, String, i64, i64, String, Option<String>);
+
 async fn reconcile_in_transaction(
     connection: &mut sqlx::SqliteConnection,
     observed_at: i64,
 ) -> Result<u64, DurableSchedulerError> {
-    let rows: Vec<(String, String, String, i64, i64, String)> = sqlx::query_as(
-        "SELECT q.id, q.execution_task_id, q.current_lease_id, q.attempts, q.max_attempts, l.status \
+    let rows: Vec<ReconcileRow> = sqlx::query_as(
+        "SELECT q.id, q.execution_task_id, q.current_lease_id, q.attempts, q.max_attempts, \
+         l.status, l.terminal_reason \
          FROM execution_task_queue q \
          JOIN execution_task_leases l ON l.id = q.current_lease_id \
          WHERE q.status = 'leased' AND l.status != 'active'",
@@ -479,16 +483,18 @@ async fn reconcile_in_transaction(
     .await
     .map_err(storage_error)?;
     let mut changed = 0_u64;
-    for (queue_id, task_id, lease_id, attempts, max_attempts, lease_status) in rows {
+    for (queue_id, task_id, lease_id, attempts, max_attempts, lease_status, terminal_reason) in rows
+    {
+        let lease_reason = terminal_reason.unwrap_or_default();
         let (new_status, reason, kind) = match lease_status.as_str() {
             "released" => (
                 "completed",
-                format!("lease {lease_id} released"),
+                format!("lease {lease_id} released: {lease_reason}"),
                 "task_completed",
             ),
             "cancelled" => (
                 "cancelled",
-                format!("lease {lease_id} cancelled"),
+                format!("lease {lease_id} cancelled: {lease_reason}"),
                 "task_cancelled",
             ),
             // expired / superseded: retry or dead-letter.
@@ -496,13 +502,13 @@ async fn reconcile_in_transaction(
                 if attempts >= max_attempts {
                     (
                         "dead_letter",
-                        format!("lease {lease_id} {other}; attempts exhausted"),
+                        format!("lease {lease_id} {other}: {lease_reason}; attempts exhausted"),
                         "task_dead_lettered",
                     )
                 } else {
                     (
                         "queued",
-                        format!("lease {lease_id} {other}; requeued"),
+                        format!("lease {lease_id} {other}: {lease_reason}; requeued"),
                         "task_requeued",
                     )
                 }

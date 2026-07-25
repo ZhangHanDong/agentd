@@ -26,6 +26,15 @@ pub fn scope_for_snapshot(
     snapshot: &ProjectExecutionSnapshot,
     claim: TaskLeaseClaim,
 ) -> ExecutionSecurityScope {
+    let (target_repository_id, target_base_commit) = snapshot.target_repository().map_or_else(
+        |_| ("unspecified".to_string(), "unspecified".to_string()),
+        |binding| {
+            (
+                binding.repository_ref.resource_id().to_string(),
+                binding.base_commit.clone(),
+            )
+        },
+    );
     ExecutionSecurityScope {
         authority_key: snapshot.authority_key.clone(),
         organization_ref: snapshot.organization_ref.clone(),
@@ -36,6 +45,8 @@ pub fn scope_for_snapshot(
         lease_claim: claim,
         sandbox_profile: "native-default".into(),
         egress_profile: "project-default".into(),
+        target_repository_id,
+        target_base_commit,
         policy_revocation_epoch: 0,
         valid_from: snapshot.issued_at,
         valid_until: snapshot.valid_until,

@@ -290,13 +290,15 @@ async fn worker_once_executes_a_dispatched_task_end_to_end() {
         !artifacts.records.is_empty(),
         "worker must acknowledge at least the transcript artifact"
     );
-    // The worker has no legitimate source for a repository binding (M1's
-    // ExecutionSecurityScope carries none), so it must report the honest
-    // "unspecified" sentinel rather than a fabricated repository id or
-    // commit — matching the daemon-local acknowledge path's convention.
+    // The security scope now carries the target repository binding, so the
+    // worker reports the real repository id and base commit from the
+    // project-authority snapshot instead of the "unspecified" sentinel.
     for record in &artifacts.records {
-        assert_eq!(record.publish.links.target_repository_id, "unspecified");
-        assert_eq!(record.publish.links.target_base_commit, "unspecified");
+        assert_eq!(record.publish.links.target_repository_id, "repo-1");
+        assert_eq!(
+            record.publish.links.target_base_commit,
+            "0123456789abcdef0123456789abcdef01234567"
+        );
     }
 }
 

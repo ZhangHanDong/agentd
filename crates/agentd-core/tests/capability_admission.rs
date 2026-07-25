@@ -30,6 +30,8 @@ fn admission(token: FencingToken) -> CapabilityAdmission {
             },
             sandbox_profile: "sha256:profile".into(),
             egress_profile: "none".into(),
+            target_repository_id: "unspecified".into(),
+            target_base_commit: "unspecified".into(),
             policy_revocation_epoch: 1,
             valid_from: 10,
             valid_until: 20,

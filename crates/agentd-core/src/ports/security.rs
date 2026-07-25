@@ -77,6 +77,8 @@ pub struct ExecutionSecurityScope {
     pub lease_claim: TaskLeaseClaim,
     pub sandbox_profile: String,
     pub egress_profile: String,
+    pub target_repository_id: String,
+    pub target_base_commit: String,
     pub policy_revocation_epoch: u64,
     pub valid_from: i64,
     pub valid_until: i64,

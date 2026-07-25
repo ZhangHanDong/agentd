@@ -641,3 +641,45 @@ async fn acquire_refuses_to_exceed_worker_capacity() {
         "capacity 1 worker must not get a second lease"
     );
 }
+
+#[tokio::test]
+async fn reconcile_threads_release_reason_into_last_reason() {
+    let fixture = fixture().await;
+    let scheduler = scheduler_for(&fixture);
+    scheduler
+        .enqueue(&enqueue_request(&fixture, "rq-1", 10))
+        .await
+        .expect("enqueue");
+    let grant = scheduler
+        .acquire(&acquire_request(&fixture, "acq-1", 20, 80))
+        .await
+        .expect("acquire")
+        .expect("grant");
+    let lease_plane = SqliteTaskLeaseControlPlane::new(fixture.store.pool().clone());
+    lease_plane
+        .release(&TaskLeaseCloseRequest {
+            claim: grant.claim(),
+            observed_at: 30,
+            reason: "worker execution failed: boom".to_string(),
+        })
+        .await
+        .expect("release");
+
+    scheduler.reconcile(31).await.expect("reconcile");
+    let explanation = scheduler
+        .explain_task(&fixture.task_id)
+        .await
+        .expect("explain")
+        .expect("row");
+    assert_eq!(explanation.queue.status, SchedulerQueueStatus::Completed);
+    assert!(
+        explanation
+            .queue
+            .last_reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("worker execution failed: boom"),
+        "explain must carry the worker's release reason, got {:?}",
+        explanation.queue.last_reason
+    );
+}
