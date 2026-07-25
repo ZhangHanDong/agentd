@@ -20,7 +20,7 @@ async fn operational_doctor_reports_control_plane_domains_without_raw_logs() {
     assert_eq!(report.authority_snapshots_expired, 0);
     assert_eq!(report.active_leases_expired, 0);
     assert_eq!(report.tasks_missing_execution_spec, 0);
-    assert_eq!(report.schema_version, 22);
+    assert_eq!(report.schema_version, 23);
     assert_eq!(report.active_leases, 0);
     assert_eq!(report.runtime_resume_pending, 0);
     assert_eq!(report.matrix_rooms, 0);

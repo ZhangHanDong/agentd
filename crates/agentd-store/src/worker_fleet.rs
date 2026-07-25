@@ -1,9 +1,9 @@
 //! Local durable implementation of the worker-fleet registration boundary.
 
 use agentd_core::ports::{
-    TaskLeaseCloseRequest, TaskLeaseDispatchRequest, TaskLeaseError, TaskLeasePort,
-    TaskLeaseRenewRequest, WorkerFleetDrainRequest, WorkerFleetError, WorkerFleetHeartbeat,
-    WorkerFleetHeartbeatResult, WorkerFleetPort, WorkerFleetPullRequest,
+    DurableSchedulerPort, TaskLeaseCloseRequest, TaskLeaseDispatchRequest, TaskLeaseError,
+    TaskLeasePort, TaskLeaseRenewRequest, WorkerFleetDrainRequest, WorkerFleetError,
+    WorkerFleetHeartbeat, WorkerFleetHeartbeatResult, WorkerFleetPort, WorkerFleetPullRequest,
     WorkerFleetRegisterRequest, WorkerFleetRegistration,
 };
 use agentd_core::types::{TaskLeaseGrant, TaskRunId, WorkerStatus};
@@ -195,40 +195,78 @@ impl WorkerFleetPort for SqliteWorkerFleet {
                 "worker is not accepting new leases".to_string(),
             ));
         }
-        let task_id = sqlx::query_scalar::<_, String>(
+        // Bridge: give every open, unleased task an open queue row so the
+        // durable queue is the single dispatch authority even for tasks
+        // created before the queue existed.
+        let open_tasks: Vec<String> = sqlx::query_scalar(
             "SELECT t.id FROM task_runs t \
              WHERE t.finished_at IS NULL AND t.status = 'running' \
-             AND NOT EXISTS (SELECT 1 FROM execution_task_leases l \
-                 WHERE l.execution_task_id = t.id AND l.status = 'active') \
-             ORDER BY t.started_at ASC, t.id ASC LIMIT 1",
+             AND NOT EXISTS (SELECT 1 FROM execution_task_queue q \
+                 WHERE q.execution_task_id = t.id AND q.status IN ('queued','leased'))",
         )
-        .fetch_optional(&self.pool)
+        .fetch_all(&self.pool)
         .await
         .map_err(|error| WorkerFleetError::Unavailable(error.to_string()))?;
-        let Some(task_id) = task_id else {
-            return Ok(None);
-        };
-        let task_id = TaskRunId::from_string(task_id);
-        let grant = self
-            .dispatch(&TaskLeaseDispatchRequest {
-                execution_task_id: task_id.clone(),
+        let scheduler = crate::durable_scheduler::SqliteDurableScheduler::new(self.pool.clone());
+        for task_id in open_tasks {
+            let enqueue = agentd_core::ports::SchedulerEnqueueRequest {
+                request_id: format!("auto-{task_id}"),
+                execution_task_id: TaskRunId::from_string(task_id),
+                max_attempts: 3,
+                available_at: request.observed_at,
+                enqueued_at: request.observed_at,
+            };
+            // A racing pull creating the row first (Conflict) is fine.
+            // INVARIANT: the fixed "auto-{task_id}" key also occupies
+            // idx_queue_request forever, which is what stops a task whose
+            // queue row went terminal from being bridged and re-executed
+            // again (native task_runs are never marked finished today).
+            // Changing this key derivation or enqueue replay semantics
+            // reintroduces infinite re-dispatch.
+            match scheduler.enqueue(&enqueue).await {
+                Ok(_) | Err(agentd_core::ports::DurableSchedulerError::Conflict(_)) => {}
+                Err(error) => {
+                    return Err(WorkerFleetError::Unavailable(error.to_string()));
+                }
+            }
+        }
+
+        let acquire_id = request.request_id.clone().unwrap_or_else(|| {
+            format!(
+                "pull-{}",
+                agentd_core::types::SchedulerEventId::new().as_str()
+            )
+        });
+        let grant = scheduler
+            .acquire(&agentd_core::ports::SchedulerAcquireRequest {
+                request_id: acquire_id,
                 worker_incarnation_id: request.worker_incarnation_id.clone(),
                 observed_at: request.observed_at,
                 expires_at: request.expires_at,
             })
             .await
-            .map_err(|error| WorkerFleetError::Conflict(error.to_string()))?;
+            .map_err(|error| match error {
+                agentd_core::ports::DurableSchedulerError::Conflict(message) => {
+                    WorkerFleetError::Conflict(message)
+                }
+                other => WorkerFleetError::Unavailable(other.to_string()),
+            })?;
+        let Some(grant) = grant else {
+            return Ok(None);
+        };
         let mut grant = grant;
         if grant.execution_spec.is_some() {
-            let session =
-                crate::runtime_session_repo::latest_session_for_task(&self.pool, &task_id)
-                    .await
-                    .map_err(|error| storage_error(&error))?
-                    .ok_or_else(|| {
-                        WorkerFleetError::Conflict(
-                            "native task has no runtime session authority snapshot".into(),
-                        )
-                    })?;
+            let session = crate::runtime_session_repo::latest_session_for_task(
+                &self.pool,
+                &grant.execution_task_id,
+            )
+            .await
+            .map_err(|error| storage_error(&error))?
+            .ok_or_else(|| {
+                WorkerFleetError::Conflict(
+                    "native task has no runtime session authority snapshot".into(),
+                )
+            })?;
             let snapshot_ref = format!(
                 "{}:{}:{}:{}",
                 session.snapshot.authority_key,

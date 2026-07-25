@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agentd_core::CoreError;
 use agentd_core::ports::{
-    AgentAllocation, AgentBackend, ArtifactIndexPort, ExecutionArtifactKind,
+    AgentAllocation, AgentBackend, ArtifactIndexPort, DurableSchedulerPort, ExecutionArtifactKind,
     ExecutionEvidenceLinks, ExecutionSnapshotLink, MtlsWorkloadVerifier, WorkerFleetPort,
     WorkerFleetPullRequest, WorktreeAllocator,
 };
@@ -115,10 +115,12 @@ pub async fn worker_fleet_tick(
     fleet: &dyn WorkerFleetPort,
     recovery_registry: &NativeRecoveryRegistry,
     native_worker: &AgentdWorker,
+    scheduler: &agentd_store::durable_scheduler::SqliteDurableScheduler,
     observed_at: i64,
 ) {
     let _ = fleet.recover_offline(observed_at - 30).await;
     let _ = fleet.expire_due(observed_at).await;
+    let _ = scheduler.reconcile(observed_at).await;
     let _ = recovery_registry.recover_one(native_worker).await;
 }
 
@@ -219,6 +221,10 @@ pub fn recovery_router(service: Arc<WorkerFleetService>, token: String) -> Route
             "/api/runtime/artifacts/acknowledge",
             post(acknowledge_artifact),
         )
+        .route(
+            "/api/scheduler/tasks/:task_id/explain",
+            get(explain_scheduler_task),
+        )
         .with_state(RecoveryApiState { service, token })
 }
 
@@ -289,6 +295,37 @@ async fn acknowledge_artifact(
             };
             (status, Json(json!({ "error": error.to_string() }))).into_response()
         }
+    }
+}
+
+/// Operator-facing scheduling explanation for one task: its durable-queue
+/// row and any active lease grant. 404 when the task never entered the
+/// durable scheduler.
+async fn explain_scheduler_task(
+    State(state): State<RecoveryApiState>,
+    headers: HeaderMap,
+    AxumPath(task_id): AxumPath<String>,
+) -> Response {
+    if let Some(response) = recovery_unauthorized(&state, &headers) {
+        return response;
+    }
+    let scheduler =
+        agentd_store::durable_scheduler::SqliteDurableScheduler::new(state.service.store_pool());
+    match scheduler
+        .explain_task(&agentd_core::types::TaskRunId::from_string(task_id))
+        .await
+    {
+        Ok(Some(explanation)) => (StatusCode::OK, Json(explanation)).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "task has no scheduler state" })),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": error.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -659,6 +696,12 @@ impl WorkerFleetService {
         self.content_store
             .put_bytes(bytes)
             .map_err(|error| error.to_string())
+    }
+
+    /// Pool for building daemon-side control-plane adapters (e.g. the
+    /// durable scheduler) directly against the underlying store.
+    pub(crate) fn store_pool(&self) -> sqlx::SqlitePool {
+        self.native_worker.store().pool().clone()
     }
 
     /// Validate and record a worker's fenced artifact report through the
@@ -1040,6 +1083,9 @@ impl WorkerFleetService {
     #[must_use]
     pub fn start(self) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
+            let scheduler = agentd_store::durable_scheduler::SqliteDurableScheduler::new(
+                self.native_worker.store().pool().clone(),
+            );
             let mut interval = tokio::time::interval(Duration::from_secs(5));
             loop {
                 interval.tick().await;
@@ -1047,6 +1093,7 @@ impl WorkerFleetService {
                     self.fleet.as_ref(),
                     self.recovery_registry.as_ref(),
                     &self.native_worker,
+                    &scheduler,
                     unix_now(),
                 )
                 .await;

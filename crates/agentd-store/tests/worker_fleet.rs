@@ -199,6 +199,7 @@ async fn worker_fleet_pull_selects_oldest_unleased_open_task() {
             worker_incarnation_id: incarnation_id,
             observed_at: 10,
             expires_at: 20,
+            request_id: None,
         })
         .await
         .expect("pull")
@@ -252,4 +253,72 @@ async fn empty_rotation_proof_set_fails_closed() {
         .await
         .expect_err("empty configured proof set must reject");
     assert!(error.to_string().contains("authentication failed"));
+}
+
+#[tokio::test]
+async fn pull_routes_through_durable_queue_and_replays_by_request_id() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteStore::connect(&dir.path().join("agentd.db"))
+        .await
+        .expect("store");
+    let proof = "fleet-secret".to_string();
+    let fleet = SqliteWorkerFleet::new(store.pool().clone()).with_auth_proof(proof.clone());
+
+    let run_id = RunId::new();
+    run_repo::insert_run(store.pool(), &run_id, "workflow-sha")
+        .await
+        .expect("run");
+    task_repo::insert_task_run(store.pool(), &run_id, &NodeId::parsed("impl"))
+        .await
+        .expect("task");
+
+    let worker_id = WorkerId::new();
+    worker_repo::create_worker(
+        store.pool(),
+        worker_repo::WorkerCreate {
+            id: worker_id.clone(),
+            trust_domain: "local".into(),
+            labels: json!({}),
+        },
+    )
+    .await
+    .expect("worker");
+    let incarnation_id = WorkerIncarnationId::new();
+    worker_repo::register_incarnation(
+        store.pool(),
+        &worker_id,
+        worker_repo::WorkerRegistration {
+            id: incarnation_id.clone(),
+            daemon_version: "test".into(),
+            host_name: "host".into(),
+            network_zone: None,
+            capabilities: json!({}),
+        },
+    )
+    .await
+    .expect("incarnation");
+
+    let request = WorkerFleetPullRequest {
+        auth_proof: proof.clone(),
+        worker_incarnation_id: incarnation_id.clone(),
+        observed_at: 20,
+        expires_at: 80,
+        request_id: Some("pull-1".to_string()),
+    };
+    let first = fleet.pull(&request).await.expect("pull").expect("grant");
+
+    // The queue row is the authority now.
+    let (status, lease): (String, Option<String>) = sqlx::query_as(
+        "SELECT status, current_lease_id FROM execution_task_queue WHERE execution_task_id = ?",
+    )
+    .bind(first.execution_task_id.as_str())
+    .fetch_one(store.pool())
+    .await
+    .expect("queue row");
+    assert_eq!(status, "leased");
+    assert_eq!(lease.as_deref(), Some(first.lease_id.as_str()));
+
+    // Same request_id replays the same grant instead of erroring.
+    let replay = fleet.pull(&request).await.expect("replay").expect("grant");
+    assert_eq!(replay.lease_id, first.lease_id);
 }

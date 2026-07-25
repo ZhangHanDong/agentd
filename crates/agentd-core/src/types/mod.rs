@@ -9,12 +9,14 @@ pub mod verdict;
 pub use context::RunContext;
 pub use enterprise::{
     AgentProfileStatus, FencingToken, InvalidFencingToken, LeaseStatus, NativeExecutionSpec,
-    RuntimeAttemptStatus, RuntimeSessionStatus, TaskLeaseClaim, TaskLeaseGrant, WorkerStatus,
+    RuntimeAttemptStatus, RuntimeSessionStatus, SchedulerQueueStatus, TaskLeaseClaim,
+    TaskLeaseGrant, WorkerStatus,
 };
 pub use handle::{AgentHandle, AgentStatus, BackendKind, CliKind, LaunchStrategy, SpawnRequest};
 pub use ids::{
     AgentId, AgentProfileId, AuditEventId, ExecutionArtifactId, LeaseId, NodeId, ReviewRunId,
-    RunId, RuntimeAttemptId, RuntimeSessionId, TaskRunId, WorkerId, WorkerIncarnationId,
+    RunId, RuntimeAttemptId, RuntimeSessionId, SchedulerEventId, SchedulerQueueId, TaskRunId,
+    WorkerId, WorkerIncarnationId,
 };
 pub use outcome::{Artifact, ArtifactKind, MempalWrite, Outcome, Status};
 pub use project_authority::{

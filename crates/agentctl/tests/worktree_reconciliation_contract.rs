@@ -127,8 +127,8 @@ fn p263_parity_map_adds_enterprise_requirements_without_completion_claim() {
     assert!(map.contains("P200-P262"));
     let rows = parity_rows(&map);
     let expected = [
-        ("native_runtime_process", "missing"),
-        ("native_runtime_session_restore", "missing"),
+        ("native_runtime_process", "partial"),
+        ("native_runtime_session_restore", "covered"),
         ("durable_runtime_identity", "partial"),
         ("project_room_repo_binding", "partial"),
         ("worker_fleet_protocol", "partial"),

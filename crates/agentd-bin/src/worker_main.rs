@@ -77,6 +77,12 @@ pub async fn run_worker_once(
             worker_incarnation_id: incarnation_id.clone(),
             observed_at,
             expires_at: observed_at.saturating_add(60),
+            // Unique per poll: a second-granularity key could replay a stale
+            // grant if two polls land in the same second.
+            request_id: Some(format!(
+                "pull-{}",
+                agentd_core::types::SchedulerEventId::new().as_str()
+            )),
         };
         match fleet
             .pull_native_with_scope(&request, policy)

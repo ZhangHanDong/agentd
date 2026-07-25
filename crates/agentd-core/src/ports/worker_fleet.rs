@@ -48,6 +48,10 @@ pub struct WorkerFleetPullRequest {
     pub worker_incarnation_id: WorkerIncarnationId,
     pub observed_at: i64,
     pub expires_at: i64,
+    /// Optional idempotency key: replaying the same id returns the original
+    /// grant. `None` derives a per-call key (no replay protection).
+    #[serde(default)]
+    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

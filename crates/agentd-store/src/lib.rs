@@ -22,6 +22,7 @@ pub mod checkpoint_repo;
 pub mod content_store;
 pub mod cutover_repo;
 pub mod doctor;
+pub mod durable_scheduler;
 pub mod error;
 pub mod event_repo;
 pub mod execution_artifact_repo;

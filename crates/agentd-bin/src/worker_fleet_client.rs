@@ -536,6 +536,7 @@ impl WorkerFleetHttpClient {
             worker_incarnation_id: incarnation_id,
             observed_at,
             expires_at,
+            request_id: None,
         }
     }
 }
