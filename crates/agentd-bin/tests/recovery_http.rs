@@ -1,9 +1,12 @@
 use agentd_bin::daemon::{WorkerFleetService, recovery_router};
 use agentd_bin::native_worker::AgentdWorker;
-use agentd_core::ports::{TaskLeaseDispatchRequest, TaskLeasePort};
+use agentd_core::ports::{
+    DurableSchedulerPort, SchedulerEnqueueRequest, TaskLeaseDispatchRequest, TaskLeasePort,
+};
 use agentd_core::types::{NodeId, RunId, RuntimeSessionId, WorkerId, WorkerIncarnationId};
 use agentd_store::SqliteStore;
 use agentd_store::content_store::LocalContentStore;
+use agentd_store::durable_scheduler::SqliteDurableScheduler;
 use agentd_store::task_lease_control_plane::SqliteTaskLeaseControlPlane;
 use agentd_store::worker_fleet::SqliteWorkerFleet;
 use agentd_store::worker_repo::{self, WorkerCreate, WorkerRegistration};
@@ -452,4 +455,86 @@ async fn recovery_http_acknowledges_worker_artifact_under_fenced_lease() {
         .await
         .expect("response");
     assert_eq!(rejected.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn recovery_http_explains_scheduler_task_state() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteStore::connect(&dir.path().join("agentd.db"))
+        .await
+        .expect("store");
+
+    let run_id = RunId::new();
+    run_repo::insert_run(store.pool(), &run_id, "workflow-sha")
+        .await
+        .expect("run");
+    let task_id = task_repo::insert_task_run(store.pool(), &run_id, &NodeId::parsed("impl"))
+        .await
+        .expect("task");
+
+    let scheduler = SqliteDurableScheduler::new(store.pool().clone());
+    scheduler
+        .enqueue(&SchedulerEnqueueRequest {
+            request_id: "rq-explain".to_string(),
+            execution_task_id: task_id.clone(),
+            max_attempts: 3,
+            available_at: 0,
+            enqueued_at: 0,
+        })
+        .await
+        .expect("enqueue");
+
+    let fleet = Arc::new(SqliteWorkerFleet::new(store.pool().clone()));
+    let artifacts =
+        Arc::new(LocalContentStore::new(dir.path().join("artifacts")).expect("content store"));
+    let service = Arc::new(WorkerFleetService::new(
+        fleet,
+        AgentdWorker::new(store),
+        artifacts,
+    ));
+    let app = recovery_router(service, "operator-secret".into());
+
+    let unauthorized = app
+        .clone()
+        .oneshot(
+            Request::get(format!("/api/scheduler/tasks/{}/explain", task_id.as_str()))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let missing = app
+        .clone()
+        .oneshot(
+            Request::get("/api/scheduler/tasks/tr_unknown/explain")
+                .header("authorization", "Bearer operator-secret")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    let explained = app
+        .clone()
+        .oneshot(
+            Request::get(format!("/api/scheduler/tasks/{}/explain", task_id.as_str()))
+                .header("authorization", "Bearer operator-secret")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(explained.status(), StatusCode::OK);
+    let body = explained
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["queue"]["status"], "queued");
+    assert!(json["active_lease"].is_null());
 }

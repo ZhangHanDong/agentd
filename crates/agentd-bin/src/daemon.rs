@@ -221,6 +221,10 @@ pub fn recovery_router(service: Arc<WorkerFleetService>, token: String) -> Route
             "/api/runtime/artifacts/acknowledge",
             post(acknowledge_artifact),
         )
+        .route(
+            "/api/scheduler/tasks/:task_id/explain",
+            get(explain_scheduler_task),
+        )
         .with_state(RecoveryApiState { service, token })
 }
 
@@ -291,6 +295,37 @@ async fn acknowledge_artifact(
             };
             (status, Json(json!({ "error": error.to_string() }))).into_response()
         }
+    }
+}
+
+/// Operator-facing scheduling explanation for one task: its durable-queue
+/// row and any active lease grant. 404 when the task never entered the
+/// durable scheduler.
+async fn explain_scheduler_task(
+    State(state): State<RecoveryApiState>,
+    headers: HeaderMap,
+    AxumPath(task_id): AxumPath<String>,
+) -> Response {
+    if let Some(response) = recovery_unauthorized(&state, &headers) {
+        return response;
+    }
+    let scheduler =
+        agentd_store::durable_scheduler::SqliteDurableScheduler::new(state.service.store_pool());
+    match scheduler
+        .explain_task(&agentd_core::types::TaskRunId::from_string(task_id))
+        .await
+    {
+        Ok(Some(explanation)) => (StatusCode::OK, Json(explanation)).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "task has no scheduler state" })),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": error.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -661,6 +696,12 @@ impl WorkerFleetService {
         self.content_store
             .put_bytes(bytes)
             .map_err(|error| error.to_string())
+    }
+
+    /// Pool for building daemon-side control-plane adapters (e.g. the
+    /// durable scheduler) directly against the underlying store.
+    pub(crate) fn store_pool(&self) -> sqlx::SqlitePool {
+        self.native_worker.store().pool().clone()
     }
 
     /// Validate and record a worker's fenced artifact report through the
