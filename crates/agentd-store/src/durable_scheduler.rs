@@ -251,8 +251,11 @@ async fn acquire_in_transaction(
     .await
     .map_err(|error| DurableSchedulerError::Conflict(error.to_string()))?;
 
-    // Transition the queue row.
-    sqlx::query(
+    // Transition the queue row. The guard is defensive: BEGIN IMMEDIATE
+    // serializes writers, so a raced row is unreachable today, but a zero-row
+    // update must never let the acquisition/outbox writes proceed against an
+    // un-transitioned queue row.
+    let transitioned = sqlx::query(
         "UPDATE execution_task_queue SET status = 'leased', attempts = attempts + 1, \
          current_lease_id = ?, updated_at = ? WHERE id = ? AND status = 'queued'",
     )
@@ -262,6 +265,11 @@ async fn acquire_in_transaction(
     .execute(&mut *connection)
     .await
     .map_err(storage_error)?;
+    if transitioned.rows_affected() != 1 {
+        return Err(DurableSchedulerError::Conflict(
+            "queue row changed during acquisition".into(),
+        ));
+    }
 
     // Record the acquisition for replay and append the outbox event.
     sqlx::query(
