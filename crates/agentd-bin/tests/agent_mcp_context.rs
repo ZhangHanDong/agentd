@@ -109,6 +109,7 @@ fn config_with_relative_paths() -> DaemonConfig {
         repo_dir: PathBuf::from("."),
         worktree_base: PathBuf::from(".agentd/worktrees"),
         accept_workflow_change: false,
+        native_dispatch: false,
         log_level: "debug".to_string(),
         api_token: None,
         agent_tokens: Vec::new(),

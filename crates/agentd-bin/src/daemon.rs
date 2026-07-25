@@ -1300,6 +1300,55 @@ pub async fn build_production_host(config: &DaemonConfig) -> Result<ProductionRu
     .with_worktree_allocator(Some(Box::new(worktree_pool))))
 }
 
+/// Which launch path production workflow dispatch uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchRoute {
+    /// Compose tmux (the default, legacy production launch path).
+    Tmux,
+    /// Enqueue into the durable scheduler queue for native workers to pull.
+    NativeQueue,
+}
+
+/// Select the production dispatch route from configuration. `NativeQueue` only
+/// when the operator opts in; otherwise tmux remains the launch path.
+#[must_use]
+pub fn production_dispatch_route(config: &DaemonConfig) -> DispatchRoute {
+    if config.native_dispatch {
+        DispatchRoute::NativeQueue
+    } else {
+        DispatchRoute::Tmux
+    }
+}
+
+/// Native launch primitive: attach the versioned execution spec to the task and
+/// enqueue it into the durable scheduler queue so an online native worker pulls
+/// and executes it — no tmux. This is the `NativeQueue` route's dispatch action.
+///
+/// # Errors
+/// [`CoreError`] if the spec cannot be persisted or the enqueue fails.
+pub async fn dispatch_task_to_fleet(
+    store: &SqliteStore,
+    task_id: &agentd_core::types::TaskRunId,
+    spec: &agentd_core::types::NativeExecutionSpec,
+    observed_at: i64,
+) -> Result<(), CoreError> {
+    use agentd_core::ports::{DurableSchedulerPort as _, Store as _};
+    store.set_task_execution_spec(task_id, spec).await?;
+    let scheduler =
+        agentd_store::durable_scheduler::SqliteDurableScheduler::new(store.pool().clone());
+    scheduler
+        .enqueue(&agentd_core::ports::SchedulerEnqueueRequest {
+            request_id: format!("dispatch-{}", task_id.as_str()),
+            execution_task_id: task_id.clone(),
+            max_attempts: 3,
+            available_at: observed_at,
+            enqueued_at: observed_at,
+        })
+        .await
+        .map_err(|error| CoreError::Backend(error.to_string()))?;
+    Ok(())
+}
+
 /// Run daemon boot-GC over the worktree pool while preserving worktrees that
 /// the durable store still references for non-finished runs.
 ///
