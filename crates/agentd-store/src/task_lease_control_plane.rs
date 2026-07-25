@@ -394,6 +394,16 @@ pub(crate) async fn get_grant_by_id(
     get_optional_grant(&mut connection, lease_id).await
 }
 
+/// Read one lease grant by id inside an in-progress transaction (durable
+/// scheduler acquire replay). Thin wrapper over `get_grant`, the single
+/// reader shared with `close_in_transaction`/`renew_in_transaction`.
+pub(crate) async fn get_grant_in_tx(
+    connection: &mut SqliteConnection,
+    lease_id: &str,
+) -> Result<TaskLeaseGrant, TaskLeaseError> {
+    get_grant(connection, lease_id).await
+}
+
 async fn get_optional_grant(
     connection: &mut SqliteConnection,
     lease_id: &str,
@@ -459,7 +469,7 @@ fn parse_execution_spec(
         .transpose()
 }
 
-async fn dispatch_in_transaction(
+pub(crate) async fn dispatch_in_transaction(
     connection: &mut SqliteConnection,
     request: &TaskLeaseDispatchRequest,
 ) -> Result<TaskLeaseGrant, TaskLeaseError> {

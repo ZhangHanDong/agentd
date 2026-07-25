@@ -2,10 +2,10 @@
 
 use agentd_core::ports::{
     DurableSchedulerError, DurableSchedulerPort, SchedulerAcquireRequest, SchedulerEnqueueRequest,
-    SchedulerQueueRecord, SchedulerTaskExplanation,
+    SchedulerQueueRecord, SchedulerTaskExplanation, TaskLeaseDispatchRequest,
 };
 use agentd_core::types::{
-    LeaseId, SchedulerQueueId, SchedulerQueueStatus, TaskLeaseGrant, TaskRunId,
+    LeaseId, SchedulerEventId, SchedulerQueueId, SchedulerQueueStatus, TaskLeaseGrant, TaskRunId,
 };
 use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
@@ -142,11 +142,32 @@ impl DurableSchedulerPort for SqliteDurableScheduler {
 
     async fn acquire(
         &self,
-        _request: &SchedulerAcquireRequest,
+        request: &SchedulerAcquireRequest,
     ) -> Result<Option<TaskLeaseGrant>, DurableSchedulerError> {
-        Err(DurableSchedulerError::Unavailable(
-            "acquire lands in the next task".into(),
-        ))
+        if request.request_id.trim().is_empty() {
+            return Err(DurableSchedulerError::Invalid(
+                "acquire request_id is required".into(),
+            ));
+        }
+        let mut connection = self.pool.acquire().await.map_err(storage_error)?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await
+            .map_err(storage_error)?;
+        let result = acquire_in_transaction(&mut connection, request).await;
+        match result {
+            Ok(value) => {
+                sqlx::query("COMMIT")
+                    .execute(&mut *connection)
+                    .await
+                    .map_err(storage_error)?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                Err(error)
+            }
+        }
     }
 
     async fn reconcile(&self, _observed_at: i64) -> Result<u64, DurableSchedulerError> {
@@ -182,4 +203,93 @@ impl DurableSchedulerPort for SqliteDurableScheduler {
             active_lease,
         }))
     }
+}
+
+async fn acquire_in_transaction(
+    connection: &mut sqlx::SqliteConnection,
+    request: &SchedulerAcquireRequest,
+) -> Result<Option<TaskLeaseGrant>, DurableSchedulerError> {
+    // Idempotent replay: a completed acquisition returns its original grant.
+    let existing: Option<String> =
+        sqlx::query_scalar("SELECT lease_id FROM scheduler_acquisitions WHERE request_id = ?")
+            .bind(&request.request_id)
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(storage_error)?;
+    if let Some(lease_id) = existing {
+        let grant = crate::task_lease_control_plane::get_grant_in_tx(connection, &lease_id)
+            .await
+            .map_err(storage_error)?;
+        return Ok(Some(grant));
+    }
+
+    // Select the oldest eligible queue row.
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT id, execution_task_id FROM execution_task_queue \
+         WHERE status = 'queued' AND available_at <= ? \
+         ORDER BY enqueued_at ASC, id ASC LIMIT 1",
+    )
+    .bind(request.observed_at)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(storage_error)?;
+    let Some((queue_id, task_id)) = row else {
+        return Ok(None);
+    };
+
+    // Grant the lease through the existing fenced primitive (validates the
+    // open task, the current online incarnation, and allocates the token).
+    let grant = crate::task_lease_control_plane::dispatch_in_transaction(
+        connection,
+        &TaskLeaseDispatchRequest {
+            execution_task_id: TaskRunId::from_string(task_id.clone()),
+            worker_incarnation_id: request.worker_incarnation_id.clone(),
+            observed_at: request.observed_at,
+            expires_at: request.expires_at,
+        },
+    )
+    .await
+    .map_err(|error| DurableSchedulerError::Conflict(error.to_string()))?;
+
+    // Transition the queue row.
+    sqlx::query(
+        "UPDATE execution_task_queue SET status = 'leased', attempts = attempts + 1, \
+         current_lease_id = ?, updated_at = ? WHERE id = ? AND status = 'queued'",
+    )
+    .bind(grant.lease_id.as_str())
+    .bind(request.observed_at)
+    .bind(&queue_id)
+    .execute(&mut *connection)
+    .await
+    .map_err(storage_error)?;
+
+    // Record the acquisition for replay and append the outbox event.
+    sqlx::query(
+        "INSERT INTO scheduler_acquisitions \
+         (request_id, queue_id, lease_id, worker_incarnation_id, acquired_at) \
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(&request.request_id)
+    .bind(&queue_id)
+    .bind(grant.lease_id.as_str())
+    .bind(request.worker_incarnation_id.as_str())
+    .bind(request.observed_at)
+    .execute(&mut *connection)
+    .await
+    .map_err(storage_error)?;
+    sqlx::query(
+        "INSERT INTO execution_scheduler_outbox \
+         (event_id, kind, queue_id, task_id, lease_id, payload, created_at) \
+         VALUES (?, 'lease_granted', ?, ?, ?, '{}', ?)",
+    )
+    .bind(SchedulerEventId::new().as_str())
+    .bind(&queue_id)
+    .bind(&task_id)
+    .bind(grant.lease_id.as_str())
+    .bind(request.observed_at)
+    .execute(&mut *connection)
+    .await
+    .map_err(storage_error)?;
+
+    Ok(Some(grant))
 }

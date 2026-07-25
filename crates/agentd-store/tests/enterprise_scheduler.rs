@@ -1,4 +1,6 @@
-use agentd_core::ports::{DurableSchedulerError, DurableSchedulerPort, SchedulerEnqueueRequest};
+use agentd_core::ports::{
+    DurableSchedulerError, DurableSchedulerPort, SchedulerAcquireRequest, SchedulerEnqueueRequest,
+};
 use agentd_core::types::{NodeId, RunId, SchedulerQueueStatus, TaskRunId, WorkerIncarnationId};
 use agentd_store::durable_scheduler::SqliteDurableScheduler;
 use agentd_store::worker_repo::{self, WorkerCreate, WorkerRegistration};
@@ -9,9 +11,6 @@ struct Fixture {
     store: SqliteStore,
     _dir: tempfile::TempDir,
     task_id: TaskRunId,
-    // Bound for fixture parity with enterprise_task_leases.rs; not read by
-    // this file's queue-only tests (no lease dispatch here).
-    #[allow(dead_code)]
     incarnation_id: WorkerIncarnationId,
 }
 
@@ -60,17 +59,29 @@ async fn fixture() -> Fixture {
     }
 }
 
+fn enqueue_request(
+    fixture: &Fixture,
+    request_id: &str,
+    available_at: i64,
+) -> SchedulerEnqueueRequest {
+    SchedulerEnqueueRequest {
+        request_id: request_id.to_string(),
+        execution_task_id: fixture.task_id.clone(),
+        max_attempts: 3,
+        available_at,
+        enqueued_at: available_at,
+    }
+}
+
+fn scheduler_for(fixture: &Fixture) -> SqliteDurableScheduler {
+    SqliteDurableScheduler::new(fixture.store.pool().clone())
+}
+
 #[tokio::test]
 async fn enqueue_creates_a_queued_row_and_replays_identically() {
     let fixture = fixture().await;
-    let scheduler = SqliteDurableScheduler::new(fixture.store.pool().clone());
-    let request = SchedulerEnqueueRequest {
-        request_id: "rq-1".to_string(),
-        execution_task_id: fixture.task_id.clone(),
-        max_attempts: 3,
-        available_at: 10,
-        enqueued_at: 10,
-    };
+    let scheduler = scheduler_for(&fixture);
+    let request = enqueue_request(&fixture, "rq-1", 10);
 
     let first = scheduler.enqueue(&request).await.expect("enqueue");
     assert_eq!(first.status, SchedulerQueueStatus::Queued);
@@ -84,14 +95,8 @@ async fn enqueue_creates_a_queued_row_and_replays_identically() {
 #[tokio::test]
 async fn enqueue_conflicts_on_same_request_with_different_payload() {
     let fixture = fixture().await;
-    let scheduler = SqliteDurableScheduler::new(fixture.store.pool().clone());
-    let request = SchedulerEnqueueRequest {
-        request_id: "rq-1".to_string(),
-        execution_task_id: fixture.task_id.clone(),
-        max_attempts: 3,
-        available_at: 10,
-        enqueued_at: 10,
-    };
+    let scheduler = scheduler_for(&fixture);
+    let request = enqueue_request(&fixture, "rq-1", 10);
     scheduler.enqueue(&request).await.expect("enqueue");
 
     let mut changed = request.clone();
@@ -106,25 +111,13 @@ async fn enqueue_conflicts_on_same_request_with_different_payload() {
 #[tokio::test]
 async fn enqueue_rejects_second_open_row_for_same_task() {
     let fixture = fixture().await;
-    let scheduler = SqliteDurableScheduler::new(fixture.store.pool().clone());
+    let scheduler = scheduler_for(&fixture);
     scheduler
-        .enqueue(&SchedulerEnqueueRequest {
-            request_id: "rq-1".to_string(),
-            execution_task_id: fixture.task_id.clone(),
-            max_attempts: 3,
-            available_at: 10,
-            enqueued_at: 10,
-        })
+        .enqueue(&enqueue_request(&fixture, "rq-1", 10))
         .await
         .expect("first enqueue");
     let error = scheduler
-        .enqueue(&SchedulerEnqueueRequest {
-            request_id: "rq-2".to_string(),
-            execution_task_id: fixture.task_id.clone(),
-            max_attempts: 3,
-            available_at: 11,
-            enqueued_at: 11,
-        })
+        .enqueue(&enqueue_request(&fixture, "rq-2", 11))
         .await
         .expect_err("second open row for the same task must conflict");
     assert!(matches!(error, DurableSchedulerError::Conflict(_)));
@@ -133,7 +126,7 @@ async fn enqueue_rejects_second_open_row_for_same_task() {
 #[tokio::test]
 async fn explain_reports_queue_row_and_absent_lease() {
     let fixture = fixture().await;
-    let scheduler = SqliteDurableScheduler::new(fixture.store.pool().clone());
+    let scheduler = scheduler_for(&fixture);
     assert!(
         scheduler
             .explain_task(&fixture.task_id)
@@ -142,13 +135,7 @@ async fn explain_reports_queue_row_and_absent_lease() {
             .is_none()
     );
     scheduler
-        .enqueue(&SchedulerEnqueueRequest {
-            request_id: "rq-1".to_string(),
-            execution_task_id: fixture.task_id.clone(),
-            max_attempts: 3,
-            available_at: 10,
-            enqueued_at: 10,
-        })
+        .enqueue(&enqueue_request(&fixture, "rq-1", 10))
         .await
         .expect("enqueue");
     let explanation = scheduler
@@ -158,4 +145,153 @@ async fn explain_reports_queue_row_and_absent_lease() {
         .expect("queued task explains");
     assert_eq!(explanation.queue.status, SchedulerQueueStatus::Queued);
     assert!(explanation.active_lease.is_none());
+}
+
+#[tokio::test]
+async fn acquire_grants_lease_transitions_queue_and_appends_outbox() {
+    let fixture = fixture().await;
+    let scheduler = SqliteDurableScheduler::new(fixture.store.pool().clone());
+    scheduler
+        .enqueue(&enqueue_request(&fixture, "rq-1", 10))
+        .await
+        .expect("enqueue");
+
+    let grant = scheduler
+        .acquire(&SchedulerAcquireRequest {
+            request_id: "acq-1".to_string(),
+            worker_incarnation_id: fixture.incarnation_id.clone(),
+            observed_at: 20,
+            expires_at: 80,
+        })
+        .await
+        .expect("acquire")
+        .expect("eligible work");
+    assert_eq!(grant.execution_task_id, fixture.task_id);
+
+    let explanation = scheduler
+        .explain_task(&fixture.task_id)
+        .await
+        .expect("explain")
+        .expect("row");
+    assert_eq!(explanation.queue.status, SchedulerQueueStatus::Leased);
+    assert_eq!(
+        explanation
+            .queue
+            .current_lease_id
+            .as_ref()
+            .map(|l| l.as_str().to_owned()),
+        Some(grant.lease_id.as_str().to_owned())
+    );
+    assert!(explanation.active_lease.is_some());
+
+    let (kind, task_id): (String, String) = sqlx::query_as(
+        "SELECT kind, task_id FROM execution_scheduler_outbox ORDER BY seq DESC LIMIT 1",
+    )
+    .fetch_one(fixture.store.pool())
+    .await
+    .expect("outbox row");
+    assert_eq!(kind, "lease_granted");
+    assert_eq!(task_id, fixture.task_id.as_str());
+}
+
+#[tokio::test]
+async fn acquire_replays_identical_grant_for_same_request_id() {
+    let fixture = fixture().await;
+    let scheduler = SqliteDurableScheduler::new(fixture.store.pool().clone());
+    scheduler
+        .enqueue(&enqueue_request(&fixture, "rq-1", 10))
+        .await
+        .expect("enqueue");
+    let request = SchedulerAcquireRequest {
+        request_id: "acq-1".to_string(),
+        worker_incarnation_id: fixture.incarnation_id.clone(),
+        observed_at: 20,
+        expires_at: 80,
+    };
+    let first = scheduler
+        .acquire(&request)
+        .await
+        .expect("acquire")
+        .expect("grant");
+    let replay = scheduler
+        .acquire(&request)
+        .await
+        .expect("replay")
+        .expect("grant");
+    assert_eq!(
+        first.lease_id, replay.lease_id,
+        "replay returns the same lease"
+    );
+    let outbox_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM execution_scheduler_outbox")
+        .fetch_one(fixture.store.pool())
+        .await
+        .expect("count");
+    assert_eq!(outbox_count, 1, "replay must not append a second event");
+}
+
+#[tokio::test]
+async fn acquire_returns_none_when_nothing_eligible() {
+    let fixture = fixture().await;
+    let scheduler = SqliteDurableScheduler::new(fixture.store.pool().clone());
+    // Nothing enqueued.
+    assert!(
+        scheduler
+            .acquire(&SchedulerAcquireRequest {
+                request_id: "acq-none".to_string(),
+                worker_incarnation_id: fixture.incarnation_id.clone(),
+                observed_at: 20,
+                expires_at: 80,
+            })
+            .await
+            .expect("acquire")
+            .is_none()
+    );
+    // Enqueued but not yet available.
+    scheduler
+        .enqueue(&enqueue_request(&fixture, "rq-1", 1_000))
+        .await
+        .expect("enqueue");
+    assert!(
+        scheduler
+            .acquire(&SchedulerAcquireRequest {
+                request_id: "acq-early".to_string(),
+                worker_incarnation_id: fixture.incarnation_id.clone(),
+                observed_at: 20,
+                expires_at: 80,
+            })
+            .await
+            .expect("acquire")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn concurrent_acquire_grants_exactly_one_winner() {
+    let fixture = fixture().await;
+    scheduler_for(&fixture)
+        .enqueue(&enqueue_request(&fixture, "rq-1", 10))
+        .await
+        .expect("enqueue");
+    let mut handles = Vec::new();
+    for index in 0..4 {
+        let pool = fixture.store.pool().clone();
+        let incarnation = fixture.incarnation_id.clone();
+        handles.push(tokio::spawn(async move {
+            SqliteDurableScheduler::new(pool)
+                .acquire(&SchedulerAcquireRequest {
+                    request_id: format!("acq-{index}"),
+                    worker_incarnation_id: incarnation,
+                    observed_at: 20,
+                    expires_at: 80,
+                })
+                .await
+        }));
+    }
+    let mut grants = 0;
+    for handle in handles {
+        if handle.await.expect("join").expect("acquire").is_some() {
+            grants += 1;
+        }
+    }
+    assert_eq!(grants, 1, "exactly one concurrent acquirer wins");
 }
