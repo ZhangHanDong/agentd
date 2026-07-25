@@ -57,6 +57,8 @@ pub async fn run_worker_once(
         host_name: hostname_or_default(),
         network_zone: None,
         capabilities: json!({"runtime": ["codex", "claude-code"]}),
+        capacity: 1,
+        protocol_version: agentd_core::ports::WORKER_PROTOCOL_VERSION,
     };
     fleet
         .register_with_retry(&registration, policy)

@@ -66,6 +66,7 @@ async fn fixture() -> Fixture {
             host_name: "host-a".to_string(),
             network_zone: Some("dev".to_string()),
             capabilities: json!({"runtime": ["codex"]}),
+            capacity: 1,
         },
     )
     .await
@@ -275,6 +276,7 @@ async fn runtime_session_rejects_terminal_or_stale_worker_attempt() {
             host_name: "host-b".to_string(),
             network_zone: Some("dev".to_string()),
             capabilities: json!({"runtime": ["codex"]}),
+            capacity: 1,
         },
     )
     .await

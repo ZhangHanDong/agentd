@@ -54,6 +54,7 @@ async fn fixture() -> Fixture {
             host_name: "host-a".to_string(),
             network_zone: Some("dev".to_string()),
             capabilities: json!({"runtime": ["codex"]}),
+            capacity: 1,
         },
     )
     .await
@@ -499,6 +500,7 @@ async fn worker_reincarnation_supersedes_old_lease_before_new_dispatch() {
             host_name: "host-b".to_string(),
             network_zone: Some("dev".to_string()),
             capabilities: json!({"runtime": ["codex"]}),
+            capacity: 1,
         },
     )
     .await

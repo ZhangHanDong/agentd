@@ -113,6 +113,7 @@ impl WorkerFleetPort for SqliteWorkerFleet {
                 host_name: request.host_name.clone(),
                 network_zone: request.network_zone.clone(),
                 capabilities: request.capabilities.clone(),
+                capacity: request.capacity,
             },
         )
         .await

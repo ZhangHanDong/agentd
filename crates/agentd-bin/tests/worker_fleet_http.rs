@@ -61,6 +61,8 @@ async fn worker_fleet_http_registers_with_auth_and_pulls_empty_queue() {
         host_name: "host".into(),
         network_zone: None,
         capabilities: json!({"runtime": ["native"]}),
+        capacity: 1,
+        protocol_version: agentd_core::ports::WORKER_PROTOCOL_VERSION,
     };
     let unauthorized_response = app
         .clone()
@@ -137,6 +139,8 @@ async fn worker_fleet_mtls_binds_certificate_identity_to_request() {
         host_name: "host".into(),
         network_zone: None,
         capabilities: json!({"runtime": ["native"]}),
+        capacity: 1,
+        protocol_version: agentd_core::ports::WORKER_PROTOCOL_VERSION,
     };
     let certificate = STANDARD.encode(b"certificate");
     let mut mismatched_request = request.clone();

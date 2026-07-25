@@ -102,6 +102,7 @@ async fn agentd_worker_binds_native_process_to_durable_runtime_state() {
             host_name: "test-host".into(),
             network_zone: None,
             capabilities: json!({"runtime": ["native"]}),
+            capacity: 1,
         },
     )
     .await
@@ -202,6 +203,7 @@ async fn agentd_worker_resume_reuses_persisted_native_session_reference() {
             host_name: "test-host".into(),
             network_zone: None,
             capabilities: json!({"runtime": ["native"]}),
+            capacity: 1,
         },
     )
     .await
@@ -358,6 +360,7 @@ fn fake_claim() -> agentd_core::types::TaskLeaseClaim {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn handle_lease_operations_use_the_injected_port() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = SqliteStore::connect(&dir.path().join("agentd.db"))
@@ -405,6 +408,7 @@ async fn handle_lease_operations_use_the_injected_port() {
             host_name: "test-host".into(),
             network_zone: None,
             capabilities: json!({"runtime": ["native"]}),
+            capacity: 1,
         },
     )
     .await

@@ -59,7 +59,8 @@ pub use task_lease::{
     TaskLeaseRejectionReason, TaskLeaseRenewRequest,
 };
 pub use worker_fleet::{
-    WorkerFleetDrainRequest, WorkerFleetError, WorkerFleetHeartbeat, WorkerFleetHeartbeatResult,
-    WorkerFleetPort, WorkerFleetPullRequest, WorkerFleetRegisterRequest, WorkerFleetRegistration,
+    MIN_WORKER_PROTOCOL_VERSION, WORKER_PROTOCOL_VERSION, WorkerFleetDrainRequest,
+    WorkerFleetError, WorkerFleetHeartbeat, WorkerFleetHeartbeatResult, WorkerFleetPort,
+    WorkerFleetPullRequest, WorkerFleetRegisterRequest, WorkerFleetRegistration,
 };
 pub use worktree_allocator::WorktreeAllocator;

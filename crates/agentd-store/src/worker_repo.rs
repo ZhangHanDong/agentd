@@ -33,6 +33,7 @@ pub struct WorkerRegistration {
     pub host_name: String,
     pub network_zone: Option<String>,
     pub capabilities: Value,
+    pub capacity: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +44,7 @@ pub struct WorkerIncarnationRecord {
     pub host_name: String,
     pub network_zone: Option<String>,
     pub capabilities: Value,
+    pub capacity: u32,
     pub is_current: bool,
     pub registered_at: i64,
     pub last_seen_at: i64,
@@ -147,8 +149,8 @@ pub async fn register_incarnation(
     sqlx::query(
         "INSERT INTO worker_incarnations \
          (id, worker_id, daemon_version, host_name, network_zone, capabilities_json, \
-          is_current, registered_at, last_seen_at, superseded_at) \
-         VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)",
+          capacity, is_current, registered_at, last_seen_at, superseded_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)",
     )
     .bind(registration.id.as_str())
     .bind(worker_id.as_str())
@@ -156,6 +158,7 @@ pub async fn register_incarnation(
     .bind(&registration.host_name)
     .bind(&registration.network_zone)
     .bind(capabilities_json)
+    .bind(i64::from(registration.capacity.max(1)))
     .bind(now)
     .bind(now)
     .execute(&mut *tx)
@@ -186,7 +189,7 @@ pub async fn get_incarnation(
 ) -> Result<Option<WorkerIncarnationRecord>, StoreError> {
     let row = sqlx::query(
         "SELECT id, worker_id, daemon_version, host_name, network_zone, capabilities_json, \
-         is_current, registered_at, last_seen_at, superseded_at \
+         capacity, is_current, registered_at, last_seen_at, superseded_at \
          FROM worker_incarnations WHERE id = ?",
     )
     .bind(id.as_str())
@@ -205,7 +208,7 @@ pub async fn current_incarnation(
 ) -> Result<Option<WorkerIncarnationRecord>, StoreError> {
     let row = sqlx::query(
         "SELECT id, worker_id, daemon_version, host_name, network_zone, capabilities_json, \
-         is_current, registered_at, last_seen_at, superseded_at \
+         capacity, is_current, registered_at, last_seen_at, superseded_at \
          FROM worker_incarnations WHERE worker_id = ? AND is_current = 1",
     )
     .bind(worker_id.as_str())
@@ -368,6 +371,9 @@ fn row_to_incarnation(
         host_name: row.get("host_name"),
         network_zone: row.get("network_zone"),
         capabilities: serde_json::from_str(&capabilities_json)?,
+        capacity: u32::try_from(row.get::<i64, _>("capacity"))
+            .unwrap_or(1)
+            .max(1),
         is_current: row.get::<i64, _>("is_current") != 0,
         registered_at: row.get("registered_at"),
         last_seen_at: row.get("last_seen_at"),
