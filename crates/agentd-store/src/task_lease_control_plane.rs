@@ -385,6 +385,15 @@ async fn get_grant(
         .ok_or_else(|| TaskLeaseError::NotFound(format!("lease {lease_id}")))
 }
 
+/// Read one lease grant by id outside any transaction (explain/reporting).
+pub(crate) async fn get_grant_by_id(
+    pool: &SqlitePool,
+    lease_id: &str,
+) -> Result<Option<TaskLeaseGrant>, TaskLeaseError> {
+    let mut connection = pool.acquire().await.map_err(storage_error)?;
+    get_optional_grant(&mut connection, lease_id).await
+}
+
 async fn get_optional_grant(
     connection: &mut SqliteConnection,
     lease_id: &str,
