@@ -826,7 +826,7 @@ async fn daemon_router_task_graph_scheduler_routes_and_releases_nodes() {
     assert_eq!(busy["agents"][0]["name"], "cod1");
     assert_eq!(busy["agents"][0]["busy"], true);
 
-    let (inbox_status, inbox_body) = get(app.clone(), "/api/inbox/cod1").await;
+    let (inbox_status, inbox_body) = get(app.clone(), "/api/inbox/cod1?drain=false").await;
     assert_eq!(inbox_status, StatusCode::OK, "body: {inbox_body}");
     let inbox: serde_json::Value = serde_json::from_str(&inbox_body).expect("inbox json");
     assert_eq!(inbox["dm"].as_array().expect("dm").len(), 1);
@@ -881,7 +881,7 @@ async fn daemon_router_task_graph_scheduler_routes_and_releases_nodes() {
         "cod1"
     );
 
-    let (inbox_status, inbox_body) = get(app, "/api/inbox/cod1").await;
+    let (inbox_status, inbox_body) = get(app, "/api/inbox/cod1?drain=false").await;
     assert_eq!(inbox_status, StatusCode::OK, "body: {inbox_body}");
     let inbox: serde_json::Value = serde_json::from_str(&inbox_body).expect("inbox json");
     assert_eq!(inbox["dm"].as_array().expect("dm").len(), 2);

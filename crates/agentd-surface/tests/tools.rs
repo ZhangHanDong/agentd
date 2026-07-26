@@ -85,6 +85,7 @@ fn send_input(from_agent: &str, priority: Option<&str>) -> SendMessageInput {
         priority: priority.map(str::to_string),
         reply_to: None,
         attachments: Vec::new(),
+        schema: None,
     }
 }
 
@@ -433,6 +434,7 @@ async fn check_inbox_returns_durable_direct_messages_and_drains() {
         CheckInboxInput {
             agent_id: "codex-worker".to_string(),
             drain: false,
+            kinds: Vec::new(),
         },
     )
     .await
@@ -453,6 +455,7 @@ async fn check_inbox_returns_durable_direct_messages_and_drains() {
         CheckInboxInput {
             agent_id: "codex-worker".to_string(),
             drain: true,
+            kinds: Vec::new(),
         },
     )
     .await
@@ -465,6 +468,7 @@ async fn check_inbox_returns_durable_direct_messages_and_drains() {
         CheckInboxInput {
             agent_id: "codex-worker".to_string(),
             drain: false,
+            kinds: Vec::new(),
         },
     )
     .await
@@ -496,6 +500,7 @@ async fn send_message_writes_direct_message_visible_through_check_inbox() {
         CheckInboxInput {
             agent_id: "codex-reviewer".to_string(),
             drain: false,
+            kinds: Vec::new(),
         },
     )
     .await
@@ -517,6 +522,7 @@ async fn send_message_rejects_invalid_input_before_writing() {
         CheckInboxInput {
             agent_id: "codex-reviewer".to_string(),
             drain: false,
+            kinds: Vec::new(),
         },
     )
     .await
@@ -532,6 +538,7 @@ async fn send_message_rejects_invalid_input_before_writing() {
         CheckInboxInput {
             agent_id: "codex-reviewer".to_string(),
             drain: false,
+            kinds: Vec::new(),
         },
     )
     .await
@@ -557,6 +564,7 @@ async fn send_and_post_accept_readable_local_attachment_metadata() {
         CheckInboxInput {
             agent_id: "codex-reviewer".to_string(),
             drain: false,
+            kinds: Vec::new(),
         },
     )
     .await
@@ -607,6 +615,7 @@ async fn send_and_post_reject_invalid_attachment_before_writing() {
         CheckInboxInput {
             agent_id: "codex-reviewer".to_string(),
             drain: false,
+            kinds: Vec::new(),
         },
     )
     .await
@@ -679,6 +688,7 @@ async fn dispatch_lists_and_routes_send_message_tool() {
         CheckInboxInput {
             agent_id: "codex-reviewer".to_string(),
             drain: false,
+            kinds: Vec::new(),
         },
     )
     .await
@@ -728,6 +738,7 @@ async fn post_group_message_mentions_member_and_warns_non_member() {
         CheckInboxInput {
             agent_id: "codex-b".to_string(),
             drain: false,
+            kinds: Vec::new(),
         },
     )
     .await
@@ -741,6 +752,7 @@ async fn post_group_message_mentions_member_and_warns_non_member() {
         CheckInboxInput {
             agent_id: "codex-c".to_string(),
             drain: false,
+            kinds: Vec::new(),
         },
     )
     .await
@@ -911,11 +923,117 @@ async fn check_inbox_returns_empty_v0() {
         CheckInboxInput {
             agent_id: "impl-a".to_string(),
             drain: false,
+            kinds: Vec::new(),
         },
     )
     .await
     .expect("check_inbox ok");
     assert!(out.messages.is_empty(), "v0 inbox is empty");
+}
+
+#[tokio::test]
+async fn send_message_preserves_the_structured_schema_object() {
+    let host = FakeRunHost::new();
+    let mut input = send_input("codex-worker", None);
+    input.schema = Some(json!({
+        "kind": "task_result",
+        "version": 1,
+        "payload": { "nodeId": "a", "ok": true }
+    }));
+
+    let sent = send_message(&host, input).await.expect("send_message ok");
+    assert_eq!(sent.message["schema"]["kind"], "task_result");
+    assert_eq!(sent.message["schema"]["payload"]["nodeId"], "a");
+
+    let inbox = check_inbox(
+        &host,
+        CheckInboxInput {
+            agent_id: "codex-reviewer".to_string(),
+            drain: false,
+            kinds: Vec::new(),
+        },
+    )
+    .await
+    .expect("check_inbox ok");
+    assert_eq!(
+        inbox.dm[0]["schema"]["kind"], "task_result",
+        "delivered DM keeps the schema the sender set: {:?}",
+        inbox.dm[0]
+    );
+}
+
+#[tokio::test]
+async fn check_inbox_advances_the_cursor_by_default_like_agent_chat() {
+    let host = FakeRunHost::new();
+    host.push_inbox_message(inbox_message("msg_default_drain"));
+
+    let deserialized: CheckInboxInput =
+        serde_json::from_value(serde_json::json!({ "agent_id": "codex-worker" }))
+            .expect("check_inbox args without drain");
+    assert!(
+        deserialized.drain,
+        "an unfiltered check_inbox consumes, matching agent-chat's GET /api/inbox/:agent"
+    );
+    assert!(deserialized.kinds.is_empty(), "no filter by default");
+
+    let first = check_inbox(&host, deserialized).await.expect("first read");
+    assert_eq!(first.dm.len(), 1);
+
+    let second = check_inbox(
+        &host,
+        serde_json::from_value(serde_json::json!({ "agent_id": "codex-worker" }))
+            .expect("check_inbox args"),
+    )
+    .await
+    .expect("second read");
+    assert!(
+        second.messages.is_empty(),
+        "the default read advanced the durable cursor: {:?}",
+        second.messages
+    );
+}
+
+#[tokio::test]
+async fn check_inbox_kinds_filter_is_a_non_advancing_preview() {
+    let host = FakeRunHost::new();
+    let mut matching = inbox_message("msg_kind_match");
+    matching.schema = Some(json!({ "kind": "task_result", "version": 1 }));
+    let mut other = inbox_message("msg_kind_other");
+    other.schema = Some(json!({ "kind": "status_report", "version": 1 }));
+    let unschemad = inbox_message("msg_kind_none");
+    host.push_inbox_message(matching);
+    host.push_inbox_message(other);
+    host.push_inbox_message(unschemad);
+
+    let filtered = check_inbox(
+        &host,
+        CheckInboxInput {
+            agent_id: "codex-worker".to_string(),
+            drain: true,
+            kinds: vec!["task_result".to_string()],
+        },
+    )
+    .await
+    .expect("filtered read");
+    assert_eq!(filtered.messages.len(), 1, "{:?}", filtered.messages);
+    assert_eq!(filtered.messages[0]["id"], "msg_kind_match");
+
+    let after = check_inbox(
+        &host,
+        CheckInboxInput {
+            agent_id: "codex-worker".to_string(),
+            drain: false,
+            kinds: Vec::new(),
+        },
+    )
+    .await
+    .expect("unfiltered preview");
+    assert_eq!(
+        after.messages.len(),
+        3,
+        "a filtered read never advances the cursor, even with drain=true: {:?}",
+        after.messages
+    );
 }
 
 #[tokio::test]

@@ -622,3 +622,42 @@ async fn stale_agents_are_swept_offline_without_losing_their_runtime_target() {
         .expect("second sweep");
     assert_eq!(swept_again, 0);
 }
+
+#[tokio::test]
+async fn concurrent_profile_merges_do_not_lose_keys() {
+    let (store, _dir) = open_temp().await;
+    agent_repo::register_agent(
+        store.pool(),
+        agent_repo::RegisterAgent {
+            name: text("codex-a"),
+            role: Some(text("agent")),
+            capability: None,
+            runtime: Some(text("codex")),
+            model: None,
+            tmux_target: None,
+            home_dir: None,
+            workdir: None,
+            state_dir: None,
+            server: None,
+            runtime_profile: json!({ "base": 1 }),
+        },
+    )
+    .await
+    .expect("register");
+
+    let left =
+        agent_repo::update_agent_profile(store.pool(), "codex-a", json!({ "left": "L" }), false);
+    let right =
+        agent_repo::update_agent_profile(store.pool(), "codex-a", json!({ "right": "R" }), false);
+    let (left, right) = tokio::join!(left, right);
+    left.expect("left update").expect("left agent");
+    right.expect("right update").expect("right agent");
+
+    let profile = agent_repo::get_agent_profile(store.pool(), "codex-a")
+        .await
+        .expect("read profile")
+        .expect("profile present");
+    assert_eq!(profile["base"], 1, "pre-existing key survives: {profile}");
+    assert_eq!(profile["left"], "L", "left merge survives: {profile}");
+    assert_eq!(profile["right"], "R", "right merge survives: {profile}");
+}

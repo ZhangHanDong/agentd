@@ -6,6 +6,7 @@ use std::sync::Arc;
 use agentd_core::ports::{ProjectBindingPort, ProjectRoomRepoBindingRequest};
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::{Path as AxumPath, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -57,11 +58,21 @@ async fn put_binding(
     State(state): State<ProjectBindingHttpState>,
     AxumPath(project_id): AxumPath<String>,
     headers: HeaderMap,
-    Json(body): Json<ProjectBindingBody>,
+    body: Bytes,
 ) -> Response {
     if let Some(response) = authenticate(&state.auth, &headers) {
         return response;
     }
+    let body: ProjectBindingBody = match serde_json::from_slice(&body) {
+        Ok(body) => body,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("invalid binding body: {error}") })),
+            )
+                .into_response();
+        }
+    };
     let request = ProjectRoomRepoBindingRequest {
         project_id,
         room_id: body.room_id,
@@ -108,25 +119,10 @@ fn respond<T: serde::Serialize, E: std::fmt::Display + ControlPlaneErrorStatus>(
 }
 
 /// Returns the rejection response when the bearer token is missing or wrong.
+/// Delegates to the shared operator check so this transport cannot drift from
+/// `/api/*` on scheme casing or token trimming.
 fn authenticate(auth: &AuthConfig, headers: &HeaderMap) -> Option<Response> {
-    let expected = auth
-        .api_token
-        .as_deref()
-        .filter(|token| !token.trim().is_empty())?;
-    let valid = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|token| token == expected);
-    if valid {
-        None
-    } else {
-        Some(
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "operator bearer token required"})),
-            )
-                .into_response(),
-        )
-    }
+    crate::http::require_operator_bearer(auth, headers)
+        .err()
+        .map(crate::http::AuthRejection::into_response)
 }

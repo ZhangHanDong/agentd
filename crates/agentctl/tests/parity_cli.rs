@@ -3577,3 +3577,45 @@ fn parity_audit_rejects_missing_agent_chat_path() {
         "stderr explains invalid path: {stderr}"
     );
 }
+
+#[test]
+fn parity_capability_map_records_m3_plan_b_messaging_progress() {
+    let rows = parity_rows();
+    let messaging = rows
+        .iter()
+        .find(|row| row.capability == "messaging_inbox")
+        .expect("messaging_inbox row");
+    let group = rows
+        .iter()
+        .find(|row| row.capability == "group_messaging")
+        .expect("group_messaging row");
+
+    assert_eq!(
+        messaging.status, "partial",
+        "Matrix/relay delivery, notification gates and dashboards remain open"
+    );
+    assert_eq!(group.status, "partial");
+
+    for expected in [
+        "M3 Plan B",
+        "advances the durable read cursor by default",
+        "kinds",
+        "non-advancing preview",
+        "structured `schema`",
+        "current members",
+        "/api/messages/:id/suppress",
+    ] {
+        assert!(
+            messaging.decision.contains(expected),
+            "messaging_inbox decision should mention {expected}: {}",
+            messaging.decision
+        );
+    }
+    for expected in ["M3 Plan B", "current members", "/api/messages/:id/suppress"] {
+        assert!(
+            group.decision.contains(expected),
+            "group_messaging decision should mention {expected}: {}",
+            group.decision
+        );
+    }
+}

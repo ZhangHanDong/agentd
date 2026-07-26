@@ -50,7 +50,7 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
         },
         ToolDescriptor {
             name: "check_inbox",
-            description: "Pull durable direct messages and group mentions for this agent.",
+            description: "Pull durable direct messages and group mentions for this agent. Reading advances your cursor unless a kinds filter is set.",
         },
         ToolDescriptor {
             name: "check_group",

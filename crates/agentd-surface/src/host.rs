@@ -883,6 +883,15 @@ pub struct GroupReadResult {
     pub advance: String,
 }
 
+/// What a per-recipient suppression request did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SuppressionOutcome {
+    Suppressed,
+    AlreadySuppressed,
+    NotDeliverable,
+    NotFound,
+}
+
 /// Operator/bridge input for accepting one durable direct message.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DirectMessageInput {
@@ -1390,6 +1399,17 @@ pub trait RunHost: Send + Sync {
         agent_id: &str,
         drain: bool,
     ) -> Result<Vec<InboxMessage>, CoreError>;
+
+    /// Drop one message from one recipient's unread inbox without moving that
+    /// agent's other read state.
+    ///
+    /// # Errors
+    /// [`CoreError`] on validation or store failure.
+    async fn suppress_message(
+        &self,
+        message_id: &str,
+        agent_id: &str,
+    ) -> Result<SuppressionOutcome, CoreError>;
 
     /// Read one group's message history for a member.
     ///

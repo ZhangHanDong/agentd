@@ -39,7 +39,7 @@ use crate::host::{
     DirectMessageInput, EventRecord, GroupCreateInput, GroupMemberUpdate, LiveEvent,
     MatrixBridgeRoomInput, MatrixInboundMessageInput, MatrixOutboxCursorInput,
     RelayServerHeartbeat, RelayStreamEventRecord, RunHost, RunSnapshot, SchedulerDispatchInput,
-    SchedulerPoolFilters, SchedulerReleaseInput,
+    SchedulerPoolFilters, SchedulerReleaseInput, SuppressionOutcome,
 };
 use crate::mcp_server::dispatch;
 use crate::tools::attachments::{
@@ -150,6 +150,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/matrix/outbox/cursor", get(matrix_outbox_cursor))
         .route("/api/matrix/outbox/ack", post(ack_matrix_outbox))
         .route("/api/messages", post(post_message))
+        .route("/api/messages/:id/suppress", post(suppress_message))
         .route("/api/delivery-events", post(post_delivery_event))
         .route("/api/inbox/:agent", get(get_inbox))
         .route("/api/tasks", post(create_task).get(list_tasks))
@@ -822,21 +823,107 @@ async fn post_message(
 }
 
 #[derive(Debug, Deserialize)]
+struct SuppressReq {
+    agent: String,
+}
+
+async fn suppress_message(
+    State(state): State<AppState>,
+    AxumPath(message_id): AxumPath<String>,
+    headers: HeaderMap,
+    Json(req): Json<SuppressReq>,
+) -> Response {
+    let Some(agent) = clean_required_text(&req.agent) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "agent required" })),
+        )
+            .into_response();
+    };
+    if let Err(err) = require_agent_token(&state.auth, &headers, &agent) {
+        return err.into_response();
+    }
+    match state.host.suppress_message(&message_id, &agent).await {
+        Ok(SuppressionOutcome::Suppressed) => (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "suppressed": true,
+                "message_id": message_id,
+                "agent": agent
+            })),
+        )
+            .into_response(),
+        Ok(SuppressionOutcome::AlreadySuppressed) => (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "suppressed": false,
+                "message_id": message_id,
+                "agent": agent
+            })),
+        )
+            .into_response(),
+        Ok(SuppressionOutcome::NotDeliverable) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("message {message_id} is not deliverable to {agent}")
+            })),
+        )
+            .into_response(),
+        Ok(SuppressionOutcome::NotFound) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("message not found: {message_id}") })),
+        )
+            .into_response(),
+        Err(e) => agent_error_response(e),
+    }
+}
+
+#[derive(Debug, Deserialize)]
 struct InboxQuery {
-    #[serde(default)]
+    /// Defaults to `true` so an unqualified `GET /api/inbox/:agent` consumes,
+    /// matching agent-chat. Pass `?drain=false` for a preview.
+    #[serde(default = "default_inbox_drain")]
     drain: bool,
+    /// Comma-separated `schema.kind` filter, as in agent-chat's `?kinds=`.
+    #[serde(default)]
+    kinds: Option<String>,
+}
+
+const fn default_inbox_drain() -> bool {
+    true
 }
 
 async fn get_inbox(
     State(state): State<AppState>,
     AxumPath(agent): AxumPath<String>,
+    headers: HeaderMap,
     Query(query): Query<InboxQuery>,
 ) -> Response {
+    let kinds = query
+        .kinds
+        .as_deref()
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|kind| !kind.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    // A consuming read (drain, no kinds filter) marks mail read — that is a
+    // destructive write, so it requires the agent's token. A non-advancing
+    // preview stays open like the pre-drain-default behavior.
+    if kinds.is_empty() && query.drain {
+        if let Err(err) = require_agent_token(&state.auth, &headers, &agent) {
+            return err.into_response();
+        }
+    }
     match check_inbox(
         state.host.as_ref(),
         CheckInboxInput {
             agent_id: agent,
             drain: query.drain,
+            kinds,
         },
     )
     .await
@@ -1625,14 +1712,14 @@ fn scheduler_error_response(e: CoreError) -> Response {
     task_error_response(e)
 }
 
-enum AuthRejection {
+pub(crate) enum AuthRejection {
     BearerRequired,
     LocalOnly,
     AgentTokenRequired,
 }
 
 impl AuthRejection {
-    fn into_response(self) -> Response {
+    pub(crate) fn into_response(self) -> Response {
         match self {
             Self::BearerRequired => (
                 StatusCode::UNAUTHORIZED,
@@ -1653,7 +1740,10 @@ impl AuthRejection {
     }
 }
 
-fn require_operator_bearer(auth: &AuthConfig, headers: &HeaderMap) -> Result<(), AuthRejection> {
+pub(crate) fn require_operator_bearer(
+    auth: &AuthConfig,
+    headers: &HeaderMap,
+) -> Result<(), AuthRejection> {
     let Some(expected) = auth.api_token.as_deref().filter(|v| !v.trim().is_empty()) else {
         return Ok(());
     };

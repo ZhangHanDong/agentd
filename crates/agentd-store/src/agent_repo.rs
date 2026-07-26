@@ -139,32 +139,69 @@ pub async fn update_agent_profile(
             "runtime profile must be a JSON object".to_string(),
         ));
     }
-    let Some(agent) = get_agent(pool, &name).await? else {
-        return Ok(None);
+    let now = now_unix();
+
+    let mut connection = pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *connection)
+        .await?;
+    let result = update_profile_in_transaction(&mut connection, &name, &patch, replace, now).await;
+    let found = match result {
+        Ok(found) => {
+            sqlx::query("COMMIT").execute(&mut *connection).await?;
+            found
+        }
+        Err(error) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            return Err(error);
+        }
     };
+    drop(connection);
+
+    if !found {
+        return Ok(None);
+    }
+    get_agent(pool, &name).await
+}
+
+async fn update_profile_in_transaction(
+    connection: &mut sqlx::SqliteConnection,
+    name: &str,
+    patch: &Value,
+    replace: bool,
+    now: i64,
+) -> Result<bool, StoreError> {
+    let existing: Option<String> =
+        sqlx::query_scalar("SELECT runtime_profile FROM agents WHERE name = ? OR id = ?")
+            .bind(name)
+            .bind(name)
+            .fetch_optional(&mut *connection)
+            .await?;
+    let Some(existing_profile_text) = existing else {
+        return Ok(false);
+    };
+
     let next = if replace {
-        patch
+        patch.clone()
     } else {
-        let existing_text = serde_json::to_string(&agent.runtime_profile)?;
-        merge_runtime_profile(&existing_text, &patch)
+        merge_runtime_profile(&existing_profile_text, patch)
     };
     let next_text = serde_json::to_string(&next)?;
-    let now = now_unix();
     let updated = sqlx::query(
         "UPDATE agents SET runtime_profile = ?, updated_at = ? WHERE name = ? OR id = ?",
     )
     .bind(next_text)
     .bind(now)
-    .bind(&name)
-    .bind(&name)
-    .execute(pool)
+    .bind(name)
+    .bind(name)
+    .execute(&mut *connection)
     .await?;
     if updated.rows_affected() != 1 {
         return Err(StoreError::Conflict(format!(
             "agent '{name}' changed concurrently"
         )));
     }
-    get_agent(pool, &name).await
+    Ok(true)
 }
 
 pub async fn register_agent(

@@ -132,3 +132,58 @@ async fn binding_api_requires_the_operator_bearer_token() {
         .expect("response");
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn binding_put_authenticates_before_reading_the_body() {
+    let (app, _dir) = app().await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::put("/api/projects/proj-1/binding")
+                .header("content-type", "application/json")
+                .body(Body::from("{not json"))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "an unauthenticated caller must never reach body parsing"
+    );
+
+    let response = app
+        .oneshot(
+            Request::put("/api/projects/proj-1/binding")
+                .header("authorization", "Bearer operator-secret")
+                .header("content-type", "application/json")
+                .body(Body::from("{not json"))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "an authenticated caller with a malformed body gets Invalid -> 400"
+    );
+}
+
+#[tokio::test]
+async fn binding_bearer_check_matches_the_shared_operator_helper() {
+    let (app, _dir) = app().await;
+    let response = app
+        .oneshot(
+            Request::get("/api/projects/proj-1/binding")
+                .header("authorization", "bearer operator-secret")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_ne!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "the shared helper treats the auth scheme case-insensitively"
+    );
+}

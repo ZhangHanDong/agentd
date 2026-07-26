@@ -1879,3 +1879,111 @@ async fn http_agent_profile_reads_and_patches_runtime_profile() {
     .await;
     assert_eq!(missing_patch.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn http_suppress_drops_one_message_for_one_recipient() {
+    let app = app(FakeRunHost::new());
+    for agent in ["codex-a", "codex-b"] {
+        register_agent(app.clone(), agent).await;
+    }
+
+    let mut ids = Vec::new();
+    for summary in ["keep", "drop"] {
+        let sent = post(
+            app.clone(),
+            "/api/messages",
+            &json!({
+                "from": "codex-a",
+                "to": "codex-b",
+                "summary": summary,
+                "full": summary
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(sent.status(), StatusCode::CREATED);
+        let sent: Value = serde_json::from_str(&body_string(sent).await).expect("json");
+        ids.push(
+            sent["message"]["id"]
+                .as_str()
+                .expect("message id")
+                .to_string(),
+        );
+    }
+
+    let suppressed = post(
+        app.clone(),
+        &format!("/api/messages/{}/suppress", ids[1]),
+        &json!({ "agent": "codex-b" }).to_string(),
+    )
+    .await;
+    assert_eq!(suppressed.status(), StatusCode::OK);
+    let suppressed: Value = serde_json::from_str(&body_string(suppressed).await).expect("json");
+    assert_eq!(suppressed["ok"], true);
+    assert_eq!(suppressed["suppressed"], true);
+
+    let replay = post(
+        app.clone(),
+        &format!("/api/messages/{}/suppress", ids[1]),
+        &json!({ "agent": "codex-b" }).to_string(),
+    )
+    .await;
+    assert_eq!(replay.status(), StatusCode::OK);
+    let replay: Value = serde_json::from_str(&body_string(replay).await).expect("json");
+    assert_eq!(replay["suppressed"], false, "replay is idempotent");
+
+    let missing = post(
+        app.clone(),
+        "/api/messages/msg_nope/suppress",
+        &json!({ "agent": "codex-b" }).to_string(),
+    )
+    .await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    let wrong = post(
+        app.clone(),
+        &format!("/api/messages/{}/suppress", ids[0]),
+        &json!({ "agent": "codex-a" }).to_string(),
+    )
+    .await;
+    assert_eq!(wrong.status(), StatusCode::BAD_REQUEST);
+
+    let inbox = get(app, "/api/inbox/codex-b?drain=false").await;
+    assert_eq!(inbox.status(), StatusCode::OK);
+    let inbox: Value = serde_json::from_str(&body_string(inbox).await).expect("json");
+    let dm = inbox["dm"].as_array().expect("dm");
+    assert_eq!(dm.len(), 1, "{dm:?}");
+    assert_eq!(dm[0]["summary"], "keep");
+}
+
+#[tokio::test]
+async fn http_inbox_consuming_read_requires_the_agent_token() {
+    let mut auth = AuthConfig::open();
+    auth.agent_token_mode = AgentTokenMode::Hard;
+    auth.agent_tokens
+        .insert("codex-b".to_string(), "agent-secret".to_string());
+    let app = app_with_auth(FakeRunHost::new(), auth);
+
+    // The default read consumes (marks mail read) — a destructive write, so
+    // it must not be reachable without the agent's token (e.g. a drive-by
+    // cross-origin GET against the loopback daemon).
+    let unauthenticated = get(app.clone(), "/api/inbox/codex-b").await;
+    assert_eq!(unauthenticated.status(), StatusCode::FORBIDDEN);
+
+    // A non-advancing preview stays open, like the pre-drain-default surface.
+    let preview = get(app.clone(), "/api/inbox/codex-b?drain=false").await;
+    assert_eq!(preview.status(), StatusCode::OK);
+
+    // The agent's own token unlocks the consuming read.
+    let authed = app
+        .clone()
+        .oneshot(
+            Request::get("/api/inbox/codex-b")
+                .header("x-agent-token", "agent-secret")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(authed.status(), StatusCode::OK);
+}
