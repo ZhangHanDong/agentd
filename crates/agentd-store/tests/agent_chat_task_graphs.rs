@@ -26,6 +26,7 @@ fn node(
             .map(std::string::ToString::to_string)
             .collect(),
         condition: None,
+        execution: None,
     }
 }
 
@@ -46,6 +47,7 @@ fn scheduled_node(
             .map(std::string::ToString::to_string)
             .collect(),
         condition: None,
+        execution: None,
     }
 }
 
@@ -831,4 +833,154 @@ async fn duplicate_graph_ids_are_rejected_as_conflicts() {
         }
     }
     assert_eq!(created, 1, "exactly one concurrent creator wins the id");
+}
+
+fn native_node(
+    provider: &str,
+    program: &str,
+    depends_on: &[&str],
+) -> agent_chat_task_graph_repo::AgentChatTaskGraphNodeInput {
+    agent_chat_task_graph_repo::AgentChatTaskGraphNodeInput {
+        id: None,
+        assignee: None,
+        role: None,
+        capability: None,
+        description: "Run the native step".to_string(),
+        depends_on: depends_on
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect(),
+        condition: None,
+        execution: Some(json!({
+            "version": 1,
+            "provider": provider,
+            "program": program,
+            "args": [],
+            "cwd": null,
+            "env": []
+        })),
+    }
+}
+
+#[tokio::test]
+async fn a_node_with_an_execution_spec_is_queued_for_a_native_worker() {
+    let (store, _dir) = open_store().await;
+    let mut nodes = BTreeMap::new();
+    nodes.insert(
+        "build".to_string(),
+        native_node("codex", "/usr/bin/codex", &[]),
+    );
+    agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_native".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Native graph".to_string(),
+            nodes,
+        },
+    )
+    .await
+    .expect("create graph");
+    // `create_graph` persists; `advance_graph` dispatches.
+    let graph = agent_chat_task_graph_repo::advance_graph(store.pool(), "graph_native")
+        .await
+        .expect("advance graph")
+        .expect("graph present");
+
+    let node = &graph.nodes["build"];
+    assert_eq!(node.status, "dispatched");
+    let execution_task_id = node
+        .execution_task_id
+        .clone()
+        .expect("dispatched native node records its execution task id");
+    assert_eq!(node.message_id, None, "native nodes are not messaged");
+    assert_eq!(
+        scalar_count(&store, "SELECT COUNT(*) FROM direct_messages").await,
+        0
+    );
+
+    let (queue_status, provider): (String, Option<String>) = sqlx::query_as(
+        "SELECT q.status, json_extract(t.execution_spec_json, '$.provider') \
+         FROM execution_task_queue q JOIN task_runs t ON t.id = q.execution_task_id \
+         WHERE q.execution_task_id = ?",
+    )
+    .bind(&execution_task_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("queue row");
+    assert_eq!(queue_status, "queued");
+    assert_eq!(provider.as_deref(), Some("codex"));
+
+    assert_eq!(
+        scalar_count(
+            &store,
+            "SELECT COUNT(*) FROM task_graph_node_executions \
+             WHERE graph_id = 'graph_native' AND node_id = 'build' AND settled = 0"
+        )
+        .await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn re_advancing_a_native_node_does_not_enqueue_it_twice() {
+    let (store, _dir) = open_store().await;
+    let mut nodes = BTreeMap::new();
+    nodes.insert(
+        "build".to_string(),
+        native_node("codex", "/usr/bin/codex", &[]),
+    );
+    agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_native_replay".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Native replay graph".to_string(),
+            nodes,
+        },
+    )
+    .await
+    .expect("create graph");
+
+    for _ in 0..3 {
+        agent_chat_task_graph_repo::advance_graph(store.pool(), "graph_native_replay")
+            .await
+            .expect("advance")
+            .expect("graph present");
+    }
+
+    assert_eq!(
+        scalar_count(&store, "SELECT COUNT(*) FROM execution_task_queue").await,
+        1
+    );
+    assert_eq!(
+        scalar_count(&store, "SELECT COUNT(*) FROM task_graph_node_executions").await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_node_cannot_be_both_scheduler_routed_and_natively_executed() {
+    let (store, _dir) = open_store().await;
+    let mut conflicting = native_node("codex", "/usr/bin/codex", &[]);
+    conflicting.role = Some("coding".to_string());
+    let mut nodes = BTreeMap::new();
+    nodes.insert("build".to_string(), conflicting);
+
+    let error = agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_native_conflict".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Conflicting graph".to_string(),
+            nodes,
+        },
+    )
+    .await
+    .expect_err("role and execution are mutually exclusive");
+    assert!(
+        matches!(&error, agentd_store::StoreError::Invariant(message)
+            if message.contains("role") && message.contains("execution")),
+        "expected an invariant naming both fields, got: {error}"
+    );
 }

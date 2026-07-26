@@ -1604,6 +1604,8 @@ impl RunHost for FakeRunHost {
                     result: None,
                     error: None,
                     condition: node_input.condition,
+                    execution: node_input.execution,
+                    execution_task_id: None,
                     message_id: None,
                     started_at: None,
                     dispatched_at: None,

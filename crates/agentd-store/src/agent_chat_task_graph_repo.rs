@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use agentd_core::types::{NativeExecutionSpec, NodeId, RunId};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{Row, SqlitePool};
@@ -104,6 +105,18 @@ pub struct AgentChatTaskGraphNode {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condition: Option<Value>,
+    /// A `NativeExecutionSpec`-shaped object. When present the node is executed
+    /// by a native worker through the M2 durable queue instead of being
+    /// messaged to an assignee.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<Value>,
+    #[serde(
+        default,
+        rename = "executionTaskId",
+        alias = "execution_task_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub execution_task_id: Option<String>,
     #[serde(
         default,
         rename = "message_id",
@@ -142,6 +155,8 @@ pub struct AgentChatTaskGraphNodeInput {
     pub depends_on: Vec<String>,
     #[serde(default)]
     pub condition: Option<Value>,
+    #[serde(default)]
+    pub execution: Option<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -216,6 +231,8 @@ pub async fn create_graph(
                 result: None,
                 error: None,
                 condition: input_node.condition,
+                execution: input_node.execution,
+                execution_task_id: None,
                 message_id: None,
                 started_at: None,
                 dispatched_at: None,
@@ -554,7 +571,15 @@ async fn advance_graph_record(
             ) {
                 continue;
             }
-            if snapshot.role.as_deref().and_then(clean_str).is_some() {
+            if snapshot.execution.is_some() {
+                let execution_task_id = dispatch_native_node(pool, &graph.id, &snapshot).await?;
+                let dispatched_at = now_text();
+                if let Some(node) = graph.nodes.get_mut(&node_id) {
+                    node.status = "dispatched".to_string();
+                    node.execution_task_id = Some(execution_task_id);
+                    node.dispatched_at.get_or_insert(dispatched_at);
+                }
+            } else if snapshot.role.as_deref().and_then(clean_str).is_some() {
                 match dispatch_scheduled_node(pool, &graph, &snapshot).await? {
                     ScheduledNodeDispatch::Routed {
                         message,
@@ -736,6 +761,102 @@ async fn dispatch_scheduled_node(
             "unsupported scheduler result status: {other}"
         ))),
     }
+}
+
+fn parse_execution_spec(
+    node_id: &str,
+    execution: &Value,
+) -> Result<NativeExecutionSpec, StoreError> {
+    let spec: NativeExecutionSpec = serde_json::from_value(execution.clone())
+        .map_err(|error| StoreError::Invariant(format!("node '{node_id}' execution: {error}")))?;
+    spec.validate().map_err(|message| {
+        StoreError::Invariant(format!("node '{node_id}' execution: {message}"))
+    })?;
+    Ok(spec)
+}
+
+/// Permanent idempotency key for a node's durable-queue enqueue. Deriving it
+/// from the graph and node ids (never from a fresh ULID) is what makes a
+/// replayed advance return the existing queue row instead of a second one.
+fn node_execution_request_id(graph_id: &str, node_id: &str) -> String {
+    format!("task-graph-{graph_id}-{node_id}")
+}
+
+async fn existing_node_execution(
+    pool: &SqlitePool,
+    graph_id: &str,
+    node_id: &str,
+) -> Result<Option<String>, StoreError> {
+    let existing: Option<String> = sqlx::query_scalar(
+        "SELECT execution_task_id FROM task_graph_node_executions \
+         WHERE graph_id = ? AND node_id = ?",
+    )
+    .bind(graph_id)
+    .bind(node_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(existing)
+}
+
+/// Create (or reuse) the node's execution task and enqueue it for a native
+/// worker. Ordering is deliberate: the link row is written before the enqueue
+/// so a crash can at worst leak an un-enqueued `task_runs` row, never a second
+/// queue entry for the same node.
+async fn dispatch_native_node(
+    pool: &SqlitePool,
+    graph_id: &str,
+    node: &AgentChatTaskGraphNode,
+) -> Result<String, StoreError> {
+    if let Some(execution_task_id) = existing_node_execution(pool, graph_id, &node.id).await? {
+        return Ok(execution_task_id);
+    }
+    let execution = node
+        .execution
+        .as_ref()
+        .ok_or_else(|| StoreError::Invariant(format!("node '{}' has no execution", node.id)))?;
+    let spec = parse_execution_spec(&node.id, execution)?;
+    let run_id = RunId::new();
+    crate::run_repo::insert_run(pool, &run_id, &format!("task-graph:{graph_id}")).await?;
+    let task_id = crate::task_repo::insert_task_run_with_spec(
+        pool,
+        &run_id,
+        &NodeId::parsed(node.id.clone()),
+        &spec,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO task_graph_node_executions \
+         (graph_id, node_id, execution_task_id, run_id, settled, created_at) \
+         VALUES (?, ?, ?, ?, 0, ?) ON CONFLICT(graph_id, node_id) DO NOTHING",
+    )
+    .bind(graph_id)
+    .bind(&node.id)
+    .bind(task_id.as_str())
+    .bind(run_id.as_str())
+    .bind(now_unix())
+    .execute(pool)
+    .await?;
+    // A concurrent advance may have won the insert; the winner's task id is
+    // the one that gets enqueued.
+    let execution_task_id = existing_node_execution(pool, graph_id, &node.id)
+        .await?
+        .unwrap_or_else(|| task_id.as_str().to_string());
+    let observed_at = now_unix();
+    agentd_core::ports::DurableSchedulerPort::enqueue(
+        &crate::durable_scheduler::SqliteDurableScheduler::new(pool.clone()),
+        &agentd_core::ports::SchedulerEnqueueRequest {
+            request_id: node_execution_request_id(graph_id, &node.id),
+            execution_task_id: agentd_core::types::TaskRunId::from_string(
+                execution_task_id.clone(),
+            ),
+            max_attempts: 3,
+            available_at: observed_at,
+            enqueued_at: observed_at,
+        },
+    )
+    .await
+    .map_err(|error| StoreError::Invariant(format!("enqueue node '{}': {error}", node.id)))?;
+    Ok(execution_task_id)
 }
 
 fn dispatch_message(
@@ -1094,12 +1215,21 @@ fn validate_graph_nodes(
                 node.id
             )));
         }
+        if node.role.is_some() && node.execution.is_some() {
+            return Err(StoreError::Invariant(format!(
+                "node '{id}' cannot set both role and execution"
+            )));
+        }
         if clean_text(Some(node.assignee.clone())).is_none()
             && node.role.as_deref().and_then(clean_str).is_none()
+            && node.execution.is_none()
         {
             return Err(StoreError::Invariant(format!(
-                "node '{id}' assignee or role required"
+                "node '{id}' assignee, role, or execution required"
             )));
+        }
+        if let Some(execution) = node.execution.as_ref() {
+            parse_execution_spec(id, execution)?;
         }
         required(node.description.clone(), "node description required")?;
         validate_member("node status", &node.status, NODE_STATUSES)?;

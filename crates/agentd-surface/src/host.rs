@@ -682,6 +682,15 @@ pub struct AgentChatTaskGraphNode {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condition: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<Value>,
+    #[serde(
+        default,
+        rename = "executionTaskId",
+        alias = "execution_task_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub execution_task_id: Option<String>,
     #[serde(
         default,
         rename = "message_id",
@@ -732,6 +741,8 @@ pub struct AgentChatTaskGraphNodeInput {
     pub depends_on: Vec<String>,
     #[serde(default)]
     pub condition: Option<Value>,
+    #[serde(default)]
+    pub execution: Option<Value>,
 }
 
 /// Agent patch input for `/api/task-graphs/:graph/nodes/:node`.
