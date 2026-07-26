@@ -181,9 +181,7 @@ pub async fn create_graph(
         .and_then(|value| clean_text(Some(value)))
         .unwrap_or_else(generate_graph_id);
     if get_graph(pool, &id).await?.is_some() {
-        return Err(StoreError::Conflict(format!(
-            "task graph already exists: {id}"
-        )));
+        return Err(graph_already_exists(&id));
     }
     let owner = required(input.owner, "owner required")?;
     let label = required(input.label, "label required")?;
@@ -354,7 +352,22 @@ async fn update_node_and_advance_once(
     graph.updated_at = now_text();
     let mut graph = advance_graph_record(pool, graph).await?;
     if let Some(agent) = release_agent {
-        release_and_drain_scheduler(pool, &agent).await?;
+        // The node patch is committed by this point, so the scheduler drain is
+        // a best-effort follow-on rather than part of this call's outcome. Its
+        // own version conflict must not escape into the caller's retry wrapper:
+        // a second attempt would re-read the node as already terminal, trip the
+        // settled-node guard, and turn a durable success into a spurious 409.
+        if let Err(error) = release_and_drain_scheduler(pool, &agent).await {
+            if !is_concurrent_write_conflict(&error) {
+                return Err(error);
+            }
+            tracing::error!(
+                graph_id,
+                agent = agent.as_str(),
+                error = %error,
+                "drained task-graph ticket lost every dispatch attempt; its node stays pending with a stale scheduler ticket"
+            );
+        }
         if let Some(updated) = get_graph(pool, graph_id).await? {
             graph = updated;
         }
@@ -844,14 +857,37 @@ async fn release_and_drain_scheduler(pool: &SqlitePool, agent: &str) -> Result<(
     )
     .await?;
     if release.status == "drained" {
-        dispatch_drained_task_graph_ticket(pool, release).await?;
+        dispatch_drained_task_graph_ticket(pool, &release).await?;
     }
     Ok(())
 }
 
+/// Marking the drained node dispatched is its own versioned write, made after
+/// whatever write triggered the release already committed. Absorb a version
+/// race here — against a fresh read of the graph — so the conflict never
+/// reaches a caller whose own work is already durable.
 async fn dispatch_drained_task_graph_ticket(
     pool: &SqlitePool,
-    release: agent_scheduler_repo::ReleaseResult,
+    release: &agent_scheduler_repo::ReleaseResult,
+) -> Result<(), StoreError> {
+    for _ in 0..MAX_GRAPH_WRITE_ATTEMPTS {
+        match dispatch_drained_task_graph_ticket_once(pool, release).await {
+            Err(error) if is_concurrent_write_conflict(&error) => {}
+            other => return other,
+        }
+    }
+    let graph_id = release
+        .task
+        .as_ref()
+        .and_then(|task| task.get("graphId"))
+        .and_then(Value::as_str)
+        .unwrap_or(release.agent.as_str());
+    Err(concurrent_write_conflict(graph_id))
+}
+
+async fn dispatch_drained_task_graph_ticket_once(
+    pool: &SqlitePool,
+    release: &agent_scheduler_repo::ReleaseResult,
 ) -> Result<(), StoreError> {
     let Some(task) = release.task.as_ref() else {
         return Ok(());
@@ -968,7 +1004,7 @@ async fn upsert_graph(
     let raw_json = serde_json::to_string(graph)?;
     let now = now_unix();
     if graph.record_version == 0 {
-        sqlx::query(
+        let inserted = sqlx::query(
             "INSERT INTO agent_chat_task_graphs \
              (id, owner, label, status, raw_json, record_version, imported_at) \
              VALUES (?, ?, ?, ?, ?, 1, ?)",
@@ -980,7 +1016,16 @@ async fn upsert_graph(
         .bind(raw_json)
         .bind(now)
         .execute(pool)
-        .await?;
+        .await;
+        if let Err(error) = inserted {
+            // `create_graph` pre-checks the id, but two creators can clear that
+            // check together and only collide here. A duplicate id is a caller
+            // conflict (409), not an internal failure.
+            if is_duplicate_graph_id(&error) {
+                return Err(graph_already_exists(&graph.id));
+            }
+            return Err(error.into());
+        }
         graph.record_version = 1;
         return Ok(());
     }
@@ -1175,6 +1220,16 @@ fn concurrent_write_conflict(graph_id: &str) -> StoreError {
 
 fn is_concurrent_write_conflict(error: &StoreError) -> bool {
     matches!(error, StoreError::Conflict(message) if message.ends_with(CONCURRENT_WRITE_SUFFIX))
+}
+
+fn graph_already_exists(graph_id: &str) -> StoreError {
+    StoreError::Conflict(format!("task graph already exists: {graph_id}"))
+}
+
+fn is_duplicate_graph_id(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .is_some_and(sqlx::error::DatabaseError::is_unique_violation)
 }
 
 fn validate_member(field: &str, value: &str, allowed: &[&str]) -> Result<(), StoreError> {

@@ -221,6 +221,33 @@ async fn agent_chat_task_import_execute_preserves_task_and_graph_snapshots() {
         graph.get::<String, _>("raw_json").contains("\"nodes\""),
         "raw task graph JSON is preserved"
     );
+    assert_eq!(graph_record_version(&store, "graph_keep").await, 1);
+
+    // Re-importing overwrites the live row, so it has to invalidate the version
+    // any in-flight compare-and-set writer is holding — otherwise that writer
+    // would still land on top of the import.
+    agent_chat_import::import_tasks_from_agent_chat(
+        store.pool(),
+        source.path(),
+        AgentChatTaskImportOptions {
+            mode: AgentChatImportMode::Execute,
+        },
+    )
+    .await
+    .expect("re-import succeeds");
+    assert_eq!(
+        graph_record_version(&store, "graph_keep").await,
+        2,
+        "re-import over an existing graph must bump record_version"
+    );
+}
+
+async fn graph_record_version(store: &SqliteStore, id: &str) -> i64 {
+    sqlx::query_scalar::<_, i64>("SELECT record_version FROM agent_chat_task_graphs WHERE id = ?")
+        .bind(id)
+        .fetch_one(store.pool())
+        .await
+        .expect("graph record_version")
 }
 
 #[tokio::test]

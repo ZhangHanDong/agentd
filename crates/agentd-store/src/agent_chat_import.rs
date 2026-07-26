@@ -686,6 +686,7 @@ async fn upsert_imported_task_graph(
           label = excluded.label, \
           status = excluded.status, \
           raw_json = excluded.raw_json, \
+          record_version = record_version + 1, \
           imported_at = excluded.imported_at",
     )
     .bind(&graph.id)

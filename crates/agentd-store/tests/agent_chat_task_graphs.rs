@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use agentd_store::{SqliteStore, agent_chat_task_graph_repo, agent_repo, message_repo};
+use agentd_store::{SqliteStore, StoreError, agent_chat_task_graph_repo, agent_repo, message_repo};
 use serde_json::json;
 
 async fn open_store() -> (SqliteStore, tempfile::TempDir) {
@@ -661,4 +661,174 @@ async fn every_graph_write_bumps_the_record_version() {
         updated_version > created_version,
         "record_version must advance on every write: {created_version} -> {updated_version}"
     );
+}
+
+#[tokio::test]
+async fn draining_a_queued_ticket_survives_a_concurrent_graph_write() {
+    let (store, _dir) = open_store().await;
+
+    // Each round needs exactly one idle coding agent: the node drained in the
+    // previous round still holds its agent's reservation, so a fresh agent
+    // joins per round to keep "a routes, b queues" reproducible.
+    for round in 0..4 {
+        register_online_coding_agent(&store, &format!("cod{round}")).await;
+        let graph_id = format!("graph_drain_{round}");
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(
+            "a".to_string(),
+            scheduled_node("coding", "medium", "Do scheduled A", &[]),
+        );
+        nodes.insert(
+            "b".to_string(),
+            scheduled_node("coding", "medium", "Do scheduled B", &[]),
+        );
+        agent_chat_task_graph_repo::create_graph(
+            store.pool(),
+            agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+                id: Some(graph_id.clone()),
+                owner: "orchestrator".to_string(),
+                label: "Drain race graph".to_string(),
+                nodes,
+            },
+        )
+        .await
+        .expect("create graph");
+
+        let advanced = agent_chat_task_graph_repo::advance_graph(store.pool(), &graph_id)
+            .await
+            .expect("advance graph")
+            .expect("graph exists");
+        assert_eq!(advanced.nodes["a"].status, "dispatched");
+        assert_eq!(advanced.nodes["b"].status, "pending");
+        assert_eq!(
+            advanced.nodes["b"].scheduler_status.as_deref(),
+            Some("queued")
+        );
+
+        // Completing "a" releases its agent and drains b's ticket in a second,
+        // separately versioned write that runs after a's patch has already
+        // committed. Marking the queue row drained is the last statement of
+        // that release, so watching for it puts this racer exactly in the
+        // drain's read-modify-write window: it then bumps the graph row's
+        // version from under the drain a few times — fewer than the drain's own
+        // attempt budget, so a drain that retries correctly still converges.
+        let racer = {
+            let pool = store.pool().clone();
+            let graph_id = graph_id.clone();
+            let ticket = advanced.nodes["b"]
+                .scheduler_ticket
+                .clone()
+                .expect("queued ticket");
+            tokio::spawn(async move {
+                for _ in 0..100_000 {
+                    let status: Option<String> = sqlx::query_scalar(
+                        "SELECT status FROM agent_scheduler_queue WHERE ticket = ?",
+                    )
+                    .bind(&ticket)
+                    .fetch_optional(&pool)
+                    .await
+                    .expect("queue row");
+                    if status.as_deref() == Some("drained") {
+                        break;
+                    }
+                }
+                for _ in 0..4 {
+                    sqlx::query(
+                        "UPDATE agent_chat_task_graphs \
+                         SET record_version = record_version + 1 WHERE id = ?",
+                    )
+                    .bind(&graph_id)
+                    .execute(&pool)
+                    .await
+                    .expect("bump graph version");
+                }
+            })
+        };
+
+        let completed = agent_chat_task_graph_repo::update_node_and_advance(
+            store.pool(),
+            &graph_id,
+            "a",
+            agent_chat_task_graph_repo::UpdateAgentChatTaskGraphNode {
+                status: Some("complete".to_string()),
+                result: Some(json!({"ok": true})),
+                error: None,
+            },
+        )
+        .await
+        .expect("completing a node whose drain lost a version race must still succeed")
+        .expect("graph and node");
+        assert_eq!(completed.1.status, "complete");
+        racer.await.expect("join racer");
+
+        let graph = agent_chat_task_graph_repo::get_graph(store.pool(), &graph_id)
+            .await
+            .expect("read graph")
+            .expect("graph present");
+        assert_eq!(
+            graph.nodes["b"].status, "dispatched",
+            "drained node must not be stranded pending"
+        );
+        assert_eq!(
+            graph.nodes["b"].scheduler_status.as_deref(),
+            Some("drained")
+        );
+        assert_eq!(graph.nodes["b"].assignee, format!("cod{round}"));
+    }
+}
+
+#[tokio::test]
+async fn duplicate_graph_ids_are_rejected_as_conflicts() {
+    let (store, _dir) = open_store().await;
+    create_live_graph(&store).await;
+
+    let error = agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_live".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Duplicate graph".to_string(),
+            nodes: chain_nodes(),
+        },
+    )
+    .await
+    .expect_err("duplicate graph id is rejected");
+    assert!(
+        matches!(&error, StoreError::Conflict(message) if message.contains("already exists")),
+        "duplicate id must be a conflict, got {error:?}"
+    );
+
+    // Concurrent creators can clear the pre-check together and only collide on
+    // the insert; the loser is still a conflict, never a raw database error.
+    let mut handles = Vec::new();
+    for index in 0..4 {
+        let pool = store.pool().clone();
+        handles.push(tokio::spawn(async move {
+            agent_chat_task_graph_repo::create_graph(
+                &pool,
+                agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+                    id: Some("graph_race".to_string()),
+                    owner: "orchestrator".to_string(),
+                    label: format!("Race graph {index}"),
+                    nodes: chain_nodes(),
+                },
+            )
+            .await
+        }));
+    }
+    let mut created = 0;
+    for handle in handles {
+        match handle.await.expect("join") {
+            Ok(_) => created += 1,
+            Err(StoreError::Conflict(message)) => {
+                assert!(
+                    message.contains("already exists"),
+                    "unexpected conflict: {message}"
+                );
+            }
+            Err(other) => panic!("duplicate create must not fail internally: {other:?}"),
+        }
+    }
+    assert_eq!(created, 1, "exactly one concurrent creator wins the id");
 }
