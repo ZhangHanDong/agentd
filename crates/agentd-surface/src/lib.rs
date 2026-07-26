@@ -8,6 +8,7 @@
 // Production-only lint opt-ins. Test files don't pick these up.
 #![warn(clippy::unwrap_used, clippy::panic)]
 
+pub mod control_plane_status;
 pub mod error;
 pub mod host;
 pub mod http;

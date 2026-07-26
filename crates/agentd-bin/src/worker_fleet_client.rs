@@ -96,10 +96,7 @@ impl WorkerFleetHttpClient {
         for attempt in 0..attempts {
             match self.pull(request).await {
                 Ok(grant) => return Ok(grant),
-                Err(error)
-                    if matches!(error, WorkerFleetError::Unavailable(_))
-                        && attempt + 1 < attempts =>
-                {
+                Err(error) if is_retryable(&error) && attempt + 1 < attempts => {
                     tokio::time::sleep(backoff).await;
                     backoff = backoff.saturating_mul(2).min(policy.max_backoff);
                 }
@@ -142,10 +139,7 @@ impl WorkerFleetHttpClient {
         for attempt in 0..attempts {
             match self.heartbeat(request).await {
                 Ok(result) => return Ok(result),
-                Err(error)
-                    if matches!(error, WorkerFleetError::Unavailable(_))
-                        && attempt + 1 < attempts =>
-                {
+                Err(error) if is_retryable(&error) && attempt + 1 < attempts => {
                     tokio::time::sleep(backoff).await;
                     backoff = backoff.saturating_mul(2).min(policy.max_backoff);
                 }
@@ -169,10 +163,7 @@ impl WorkerFleetHttpClient {
         for attempt in 0..attempts {
             match self.register(request).await {
                 Ok(result) => return Ok(result),
-                Err(error)
-                    if matches!(error, WorkerFleetError::Unavailable(_))
-                        && attempt + 1 < attempts =>
-                {
+                Err(error) if is_retryable(&error) && attempt + 1 < attempts => {
                     tokio::time::sleep(backoff).await;
                     backoff = backoff.saturating_mul(2).min(policy.max_backoff);
                 }
@@ -356,17 +347,25 @@ fn unix_now() -> i64 {
 fn classify_http_error(status: u16, body: &str) -> WorkerFleetError {
     let message = body.to_string();
     match status {
+        400 => WorkerFleetError::Invalid(message),
         404 => WorkerFleetError::NotFound(message),
         408 | 425 | 429 | 500..=599 => WorkerFleetError::Unavailable(message),
-        400..=499 => WorkerFleetError::Conflict(message),
+        401..=499 => WorkerFleetError::Conflict(message),
         _ => WorkerFleetError::Unavailable(message),
     }
+}
+
+/// The single retry decision for every worker-side control-plane call. Only
+/// `Unavailable` is transient; identity, validation, and lease conflicts are
+/// terminal and must surface to the supervisor instead of spinning.
+const fn is_retryable(error: &WorkerFleetError) -> bool {
+    matches!(error, WorkerFleetError::Unavailable(_))
 }
 
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
-    use super::classify_http_error;
+    use super::{classify_http_error, is_retryable};
     use agentd_core::ports::WorkerFleetError;
 
     #[test]
@@ -387,6 +386,22 @@ mod tests {
             classify_http_error(404, "missing"),
             WorkerFleetError::NotFound(_)
         ));
+        assert!(matches!(
+            classify_http_error(400, "bad input"),
+            WorkerFleetError::Invalid(_)
+        ));
+    }
+
+    #[test]
+    fn only_service_unavailable_is_retried() {
+        assert!(is_retryable(&classify_http_error(503, "down")));
+        assert!(is_retryable(&classify_http_error(429, "busy")));
+        for status in [400_u16, 404, 409, 422] {
+            assert!(
+                !is_retryable(&classify_http_error(status, "terminal")),
+                "status {status} must be terminal for the worker"
+            );
+        }
     }
 }
 

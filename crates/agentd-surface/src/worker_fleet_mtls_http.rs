@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::control_plane_status::ControlPlaneErrorStatus;
 use agentd_core::ports::{
     MtlsWorkloadVerifier, TaskLeaseCloseRequest, TaskLeaseRenewRequest, WorkerFleetDrainRequest,
     WorkerFleetHeartbeat, WorkerFleetPort, WorkerFleetPullRequest, WorkerFleetRegisterRequest,
@@ -180,11 +181,13 @@ fn unauthorized(message: &str) -> Response {
     (StatusCode::UNAUTHORIZED, Json(json!({ "error": message }))).into_response()
 }
 
-fn respond<T: serde::Serialize, E: std::fmt::Display>(result: Result<T, E>) -> Response {
+fn respond<T: serde::Serialize, E: std::fmt::Display + ControlPlaneErrorStatus>(
+    result: Result<T, E>,
+) -> Response {
     match result {
         Ok(value) => (StatusCode::OK, Json(value)).into_response(),
         Err(error) => (
-            StatusCode::BAD_REQUEST,
+            error.http_status(),
             Json(json!({ "error": error.to_string() })),
         )
             .into_response(),

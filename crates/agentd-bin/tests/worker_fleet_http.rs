@@ -172,3 +172,106 @@ async fn worker_fleet_mtls_binds_certificate_identity_to_request() {
         .expect("response");
     assert_eq!(response.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn worker_fleet_http_maps_error_variants_to_distinct_statuses() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteStore::connect(&dir.path().join("agentd.db"))
+        .await
+        .expect("store");
+    let fleet = Arc::new(SqliteWorkerFleet::new(store.pool().clone()).with_auth_proof("secret"));
+    let mut auth = AuthConfig::open();
+    auth.api_token = Some("operator-secret".into());
+    let app = worker_fleet_router(fleet, auth);
+
+    let send = |app: axum::Router, path: &'static str, body: serde_json::Value| async move {
+        app.oneshot(
+            Request::post(path)
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer operator-secret")
+                .body(Body::from(serde_json::to_vec(&body).expect("json")))
+                .expect("request"),
+        )
+        .await
+        .expect("response")
+    };
+
+    // Invalid -> 400: a worker below the protocol floor.
+    let worker_id = WorkerId::new();
+    let first_incarnation = WorkerIncarnationId::new();
+    let below_floor = json!({
+        "auth_proof": "secret",
+        "worker_id": worker_id,
+        "trust_domain": "local",
+        "labels": {},
+        "incarnation_id": first_incarnation,
+        "daemon_version": "test",
+        "host_name": "host",
+        "network_zone": serde_json::Value::Null,
+        "capabilities": {"runtime": ["native"]},
+        "capacity": 1,
+        "protocol_version": 0
+    });
+    let response = send(app.clone(), "/api/worker-fleet/register", below_floor).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // NotFound -> 404: pull for an incarnation that was never registered.
+    let unknown_pull = json!({
+        "auth_proof": "secret",
+        "worker_incarnation_id": WorkerIncarnationId::new(),
+        "observed_at": 10,
+        "expires_at": 20
+    });
+    let response = send(app.clone(), "/api/worker-fleet/pull", unknown_pull).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    // Conflict -> 409: pull on an incarnation superseded by a newer one.
+    let register = |incarnation: WorkerIncarnationId| {
+        json!({
+            "auth_proof": "secret",
+            "worker_id": worker_id,
+            "trust_domain": "local",
+            "labels": {},
+            "incarnation_id": incarnation,
+            "daemon_version": "test",
+            "host_name": "host",
+            "network_zone": serde_json::Value::Null,
+            "capabilities": {"runtime": ["native"]},
+            "capacity": 1,
+            "protocol_version": agentd_core::ports::WORKER_PROTOCOL_VERSION
+        })
+    };
+    let response = send(
+        app.clone(),
+        "/api/worker-fleet/register",
+        register(first_incarnation.clone()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = send(
+        app.clone(),
+        "/api/worker-fleet/register",
+        register(WorkerIncarnationId::new()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let stale_pull = json!({
+        "auth_proof": "secret",
+        "worker_incarnation_id": first_incarnation,
+        "observed_at": 10,
+        "expires_at": 20
+    });
+    let response = send(app.clone(), "/api/worker-fleet/pull", stale_pull).await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    // Unavailable -> 503: a wrong auth proof is transient (token rotation),
+    // so the worker must retry it rather than treat it as terminal.
+    let wrong_proof = json!({
+        "auth_proof": "wrong",
+        "worker_incarnation_id": WorkerIncarnationId::new(),
+        "observed_at": 10,
+        "expires_at": 20
+    });
+    let response = send(app, "/api/worker-fleet/pull", wrong_proof).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}

@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::control_plane_status::ControlPlaneErrorStatus;
 use crate::http::AuthConfig;
 use agentd_core::ports::{
     TaskLeaseCloseRequest, TaskLeaseRenewRequest, WorkerFleetDrainRequest, WorkerFleetHeartbeat,
@@ -127,11 +128,13 @@ async fn cancel(
     respond(state.fleet.cancel(&request).await)
 }
 
-fn respond<T: serde::Serialize, E: std::fmt::Display>(result: Result<T, E>) -> Response {
+fn respond<T: serde::Serialize, E: std::fmt::Display + ControlPlaneErrorStatus>(
+    result: Result<T, E>,
+) -> Response {
     match result {
         Ok(value) => (StatusCode::OK, Json(value)).into_response(),
         Err(error) => (
-            StatusCode::BAD_REQUEST,
+            error.http_status(),
             Json(json!({ "error": error.to_string() })),
         )
             .into_response(),
