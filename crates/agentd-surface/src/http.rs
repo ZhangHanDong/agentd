@@ -1625,14 +1625,14 @@ fn scheduler_error_response(e: CoreError) -> Response {
     task_error_response(e)
 }
 
-enum AuthRejection {
+pub(crate) enum AuthRejection {
     BearerRequired,
     LocalOnly,
     AgentTokenRequired,
 }
 
 impl AuthRejection {
-    fn into_response(self) -> Response {
+    pub(crate) fn into_response(self) -> Response {
         match self {
             Self::BearerRequired => (
                 StatusCode::UNAUTHORIZED,
@@ -1653,7 +1653,10 @@ impl AuthRejection {
     }
 }
 
-fn require_operator_bearer(auth: &AuthConfig, headers: &HeaderMap) -> Result<(), AuthRejection> {
+pub(crate) fn require_operator_bearer(
+    auth: &AuthConfig,
+    headers: &HeaderMap,
+) -> Result<(), AuthRejection> {
     let Some(expected) = auth.api_token.as_deref().filter(|v| !v.trim().is_empty()) else {
         return Ok(());
     };
