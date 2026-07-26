@@ -136,6 +136,17 @@ pub async fn worker_fleet_tick(
     let _ = fleet.recover_offline(observed_at - 30).await;
     let _ = fleet.expire_due(observed_at).await;
     let _ = scheduler.reconcile(observed_at).await;
+    // Reconcile maps terminal leases onto queue rows; settlement then maps
+    // terminal queue rows onto task-graph nodes. Order matters: a node must
+    // never settle from a queue row reconcile has not yet finalized.
+    if let Err(error) = agentd_store::agent_chat_task_graph_repo::settle_node_executions(
+        native_worker.store().pool(),
+        observed_at,
+    )
+    .await
+    {
+        tracing::warn!(%error, "settling task-graph node executions failed this tick");
+    }
     let _ = agent_registry_tick(native_worker.store().pool(), observed_at).await;
     let _ = recovery_registry.recover_one(native_worker).await;
 }

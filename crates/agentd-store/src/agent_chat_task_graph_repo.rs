@@ -425,6 +425,17 @@ async fn delete_graph_once(
             node.completed_at = Some(now.clone());
         }
     }
+    // The graph is cancelled, so its nodes must never be rewritten by a later
+    // settlement pass. The in-flight queue rows are left to finish and are
+    // discarded; M2 exposes no scheduler cancel primitive (see plan non-goals).
+    sqlx::query(
+        "UPDATE task_graph_node_executions SET settled = 1, settled_at = ? \
+         WHERE graph_id = ? AND settled = 0",
+    )
+    .bind(now_unix())
+    .bind(&graph.id)
+    .execute(pool)
+    .await?;
     upsert_graph(pool, &mut graph).await?;
     Ok(Some(graph))
 }
@@ -923,6 +934,87 @@ async fn dispatch_native_node(
         });
     enqueue_node_execution(pool, graph_id, &node.id, &link).await?;
     Ok(link.execution_task_id)
+}
+
+/// `(graph_id, node_id, execution_task_id, queue_status, last_reason)`
+type NodeSettlementRow = (String, String, String, String, Option<String>);
+
+/// Drive task-graph nodes from the durable scheduler's terminal queue statuses.
+/// Called every daemon maintenance tick, immediately after
+/// `SqliteDurableScheduler::reconcile` has mapped terminal leases onto queue
+/// rows. Returns the number of link rows settled.
+///
+/// # Errors
+/// [`StoreError`] if the link/queue query or a node update fails.
+pub async fn settle_node_executions(
+    pool: &SqlitePool,
+    observed_at: i64,
+) -> Result<u64, StoreError> {
+    let rows: Vec<NodeSettlementRow> = sqlx::query_as(
+        "SELECT e.graph_id, e.node_id, e.execution_task_id, q.status, q.last_reason \
+         FROM task_graph_node_executions e \
+         JOIN execution_task_queue q ON q.execution_task_id = e.execution_task_id \
+         WHERE e.settled = 0 AND q.status IN ('completed', 'dead_letter', 'cancelled')",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut settled = 0_u64;
+    for (graph_id, node_id, execution_task_id, queue_status, last_reason) in rows {
+        let patch = match queue_status.as_str() {
+            "completed" => UpdateAgentChatTaskGraphNode {
+                status: Some("complete".to_string()),
+                result: Some(json!({
+                    "executionTaskId": execution_task_id,
+                    "queueStatus": queue_status,
+                })),
+                error: None,
+            },
+            "cancelled" => UpdateAgentChatTaskGraphNode {
+                status: Some("cancelled".to_string()),
+                result: None,
+                error: None,
+            },
+            _ => UpdateAgentChatTaskGraphNode {
+                status: Some("failed".to_string()),
+                result: None,
+                error: Some(last_reason.unwrap_or_else(|| "execution dead-lettered".to_string())),
+            },
+        };
+        if let Err(error) = update_node_and_advance(pool, &graph_id, &node_id, patch).await {
+            // A conflict means the node or its graph settled by another route
+            // (an operator cancelled the graph, a late result message landed).
+            // The execution is finished either way, so close the link row.
+            if !matches!(error, StoreError::Conflict(_)) {
+                return Err(error);
+            }
+        }
+        mark_node_execution_settled(pool, &graph_id, &node_id, observed_at).await?;
+        settled += 1;
+    }
+    Ok(settled)
+}
+
+async fn mark_node_execution_settled(
+    pool: &SqlitePool,
+    graph_id: &str,
+    node_id: &str,
+    observed_at: i64,
+) -> Result<(), StoreError> {
+    let updated = sqlx::query(
+        "UPDATE task_graph_node_executions SET settled = 1, settled_at = ? \
+         WHERE graph_id = ? AND node_id = ? AND settled = 0",
+    )
+    .bind(observed_at)
+    .bind(graph_id)
+    .bind(node_id)
+    .execute(pool)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(StoreError::Conflict(format!(
+            "node execution '{graph_id}/{node_id}' was settled concurrently"
+        )));
+    }
+    Ok(())
 }
 
 fn dispatch_message(

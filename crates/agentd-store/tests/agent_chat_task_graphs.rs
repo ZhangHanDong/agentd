@@ -1097,3 +1097,130 @@ async fn a_node_cannot_be_both_assigned_to_an_agent_and_natively_executed() {
         "expected an invariant naming both fields, got: {error}"
     );
 }
+
+async fn native_pair_graph(store: &SqliteStore, graph_id: &str) -> String {
+    let mut nodes = BTreeMap::new();
+    nodes.insert(
+        "build".to_string(),
+        native_node("codex", "/usr/bin/codex", &[]),
+    );
+    nodes.insert("report".to_string(), node("codex-b", "Report", &["build"]));
+    agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some(graph_id.to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Native pair".to_string(),
+            nodes,
+        },
+    )
+    .await
+    .expect("create graph");
+    let graph = agent_chat_task_graph_repo::advance_graph(store.pool(), graph_id)
+        .await
+        .expect("advance graph")
+        .expect("graph present");
+    graph.nodes["build"]
+        .execution_task_id
+        .clone()
+        .expect("execution task id")
+}
+
+async fn force_queue_status(store: &SqliteStore, execution_task_id: &str, status: &str) {
+    sqlx::query(
+        "UPDATE execution_task_queue SET status = ?, current_lease_id = NULL, \
+         last_reason = 'test forced', updated_at = 0 WHERE execution_task_id = ?",
+    )
+    .bind(status)
+    .bind(execution_task_id)
+    .execute(store.pool())
+    .await
+    .expect("force queue status");
+}
+
+#[tokio::test]
+async fn a_completed_queue_row_completes_its_node_and_unlocks_downstream() {
+    let (store, _dir) = open_store().await;
+    let execution_task_id = native_pair_graph(&store, "graph_settle_ok").await;
+    force_queue_status(&store, &execution_task_id, "completed").await;
+
+    let settled = agent_chat_task_graph_repo::settle_node_executions(store.pool(), 500)
+        .await
+        .expect("settle");
+    assert_eq!(settled, 1);
+
+    let graph = agent_chat_task_graph_repo::get_graph(store.pool(), "graph_settle_ok")
+        .await
+        .expect("read graph")
+        .expect("graph present");
+    assert_eq!(graph.nodes["build"].status, "complete");
+    assert_eq!(
+        graph.nodes["build"]
+            .result
+            .as_ref()
+            .and_then(|result| result
+                .get("executionTaskId")
+                .and_then(serde_json::Value::as_str)),
+        Some(execution_task_id.as_str())
+    );
+    assert_eq!(
+        graph.nodes["report"].status, "dispatched",
+        "the downstream node must be unlocked by the native completion"
+    );
+
+    let again = agent_chat_task_graph_repo::settle_node_executions(store.pool(), 600)
+        .await
+        .expect("settle again");
+    assert_eq!(again, 0, "settlement is idempotent");
+}
+
+#[tokio::test]
+async fn a_dead_lettered_queue_row_fails_its_node_and_its_graph() {
+    let (store, _dir) = open_store().await;
+    let execution_task_id = native_pair_graph(&store, "graph_settle_fail").await;
+    force_queue_status(&store, &execution_task_id, "dead_letter").await;
+
+    let settled = agent_chat_task_graph_repo::settle_node_executions(store.pool(), 500)
+        .await
+        .expect("settle");
+    assert_eq!(settled, 1);
+
+    let graph = agent_chat_task_graph_repo::get_graph(store.pool(), "graph_settle_fail")
+        .await
+        .expect("read graph")
+        .expect("graph present");
+    assert_eq!(graph.nodes["build"].status, "failed");
+    assert!(
+        graph.nodes["build"]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("test forced")),
+        "the queue reason must reach the node: {:?}",
+        graph.nodes["build"].error
+    );
+    assert_eq!(graph.nodes["report"].status, "failed");
+    assert_eq!(graph.status, "failed");
+}
+
+#[tokio::test]
+async fn deleting_a_graph_settles_its_open_node_executions() {
+    let (store, _dir) = open_store().await;
+    let execution_task_id = native_pair_graph(&store, "graph_settle_deleted").await;
+
+    agent_chat_task_graph_repo::delete_graph(store.pool(), "graph_settle_deleted")
+        .await
+        .expect("delete graph")
+        .expect("graph present");
+    force_queue_status(&store, &execution_task_id, "completed").await;
+
+    let settled = agent_chat_task_graph_repo::settle_node_executions(store.pool(), 500)
+        .await
+        .expect("settle");
+    assert_eq!(settled, 0, "a deleted graph has no open node executions");
+
+    let graph = agent_chat_task_graph_repo::get_graph(store.pool(), "graph_settle_deleted")
+        .await
+        .expect("read graph")
+        .expect("graph present");
+    assert_eq!(graph.nodes["build"].status, "cancelled");
+}
