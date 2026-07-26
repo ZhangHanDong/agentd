@@ -1955,3 +1955,35 @@ async fn http_suppress_drops_one_message_for_one_recipient() {
     assert_eq!(dm.len(), 1, "{dm:?}");
     assert_eq!(dm[0]["summary"], "keep");
 }
+
+#[tokio::test]
+async fn http_inbox_consuming_read_requires_the_agent_token() {
+    let mut auth = AuthConfig::open();
+    auth.agent_token_mode = AgentTokenMode::Hard;
+    auth.agent_tokens
+        .insert("codex-b".to_string(), "agent-secret".to_string());
+    let app = app_with_auth(FakeRunHost::new(), auth);
+
+    // The default read consumes (marks mail read) — a destructive write, so
+    // it must not be reachable without the agent's token (e.g. a drive-by
+    // cross-origin GET against the loopback daemon).
+    let unauthenticated = get(app.clone(), "/api/inbox/codex-b").await;
+    assert_eq!(unauthenticated.status(), StatusCode::FORBIDDEN);
+
+    // A non-advancing preview stays open, like the pre-drain-default surface.
+    let preview = get(app.clone(), "/api/inbox/codex-b?drain=false").await;
+    assert_eq!(preview.status(), StatusCode::OK);
+
+    // The agent's own token unlocks the consuming read.
+    let authed = app
+        .clone()
+        .oneshot(
+            Request::get("/api/inbox/codex-b")
+                .header("x-agent-token", "agent-secret")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(authed.status(), StatusCode::OK);
+}

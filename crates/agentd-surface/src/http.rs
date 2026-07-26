@@ -898,6 +898,7 @@ const fn default_inbox_drain() -> bool {
 async fn get_inbox(
     State(state): State<AppState>,
     AxumPath(agent): AxumPath<String>,
+    headers: HeaderMap,
     Query(query): Query<InboxQuery>,
 ) -> Response {
     let kinds = query
@@ -909,6 +910,14 @@ async fn get_inbox(
         .filter(|kind| !kind.is_empty())
         .map(str::to_string)
         .collect::<Vec<_>>();
+    // A consuming read (drain, no kinds filter) marks mail read — that is a
+    // destructive write, so it requires the agent's token. A non-advancing
+    // preview stays open like the pre-drain-default behavior.
+    if kinds.is_empty() && query.drain {
+        if let Err(err) = require_agent_token(&state.auth, &headers, &agent) {
+            return err.into_response();
+        }
+    }
     match check_inbox(
         state.host.as_ref(),
         CheckInboxInput {
