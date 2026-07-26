@@ -110,6 +110,21 @@ pub fn build_router_with_worker_fleet_mtls(
         .merge(worker_fleet_mtls_router(fleet, verifier))
 }
 
+/// Seconds an agent may go without a heartbeat before the registry fences it.
+/// Longer than the worker fleet's 30s window: an agent's heartbeat is driven
+/// by interactive runtime activity, not a tight supervisor loop.
+pub const AGENT_HEARTBEAT_TIMEOUT_SECS: i64 = 300;
+
+/// Fence agents whose heartbeat is older than [`AGENT_HEARTBEAT_TIMEOUT_SECS`].
+/// Returns how many agents were transitioned; store failures are swallowed so
+/// one bad tick never stops the maintenance loop.
+pub async fn agent_registry_tick(pool: &sqlx::SqlitePool, observed_at: i64) -> u64 {
+    let cutoff = observed_at.saturating_sub(AGENT_HEARTBEAT_TIMEOUT_SECS);
+    agentd_store::agent_repo::mark_stale_agents_offline(pool, cutoff)
+        .await
+        .unwrap_or(0)
+}
+
 /// Run one durable worker-fleet maintenance tick.
 pub async fn worker_fleet_tick(
     fleet: &dyn WorkerFleetPort,
@@ -121,6 +136,7 @@ pub async fn worker_fleet_tick(
     let _ = fleet.recover_offline(observed_at - 30).await;
     let _ = fleet.expire_due(observed_at).await;
     let _ = scheduler.reconcile(observed_at).await;
+    let _ = agent_registry_tick(native_worker.store().pool(), observed_at).await;
     let _ = recovery_registry.recover_one(native_worker).await;
 }
 

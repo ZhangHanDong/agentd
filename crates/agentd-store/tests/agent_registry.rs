@@ -570,3 +570,55 @@ async fn agent_profile_reads_back_and_patches_by_merge_or_replace() {
             .contains("runtime profile must be a JSON object")
     );
 }
+
+#[tokio::test]
+async fn stale_agents_are_swept_offline_without_losing_their_runtime_target() {
+    let (store, _dir) = open_temp().await;
+
+    for name in ["fresh-agent", "stale-agent"] {
+        agent_repo::heartbeat_agent(
+            store.pool(),
+            name,
+            agent_repo::HeartbeatAgent {
+                server: Some(text("local")),
+                tmux_target: Some(format!("{name}:0.0")),
+                workspace_path: None,
+            },
+        )
+        .await
+        .expect("heartbeat");
+    }
+
+    // Backdate one agent's heartbeat past the cutoff.
+    sqlx::query("UPDATE agents SET last_seen_at = 100 WHERE name = ?")
+        .bind("stale-agent")
+        .execute(store.pool())
+        .await
+        .expect("backdate");
+
+    let swept = agent_repo::mark_stale_agents_offline(store.pool(), 500)
+        .await
+        .expect("sweep");
+    assert_eq!(swept, 1);
+
+    let stale = agent_repo::get_agent(store.pool(), "stale-agent")
+        .await
+        .expect("get stale")
+        .expect("agent exists");
+    assert_eq!(stale.status, "offline");
+    assert_eq!(stale.offline_reason.as_deref(), Some("heartbeat-timeout"));
+    // Preserved so `rebind` can still reattach a surviving pane.
+    assert_eq!(stale.tmux_target.as_deref(), Some("stale-agent:0.0"));
+
+    let fresh = agent_repo::get_agent(store.pool(), "fresh-agent")
+        .await
+        .expect("get fresh")
+        .expect("agent exists");
+    assert_eq!(fresh.status, "online");
+
+    // The sweep is idempotent: an already-offline agent is not re-counted.
+    let swept_again = agent_repo::mark_stale_agents_offline(store.pool(), 500)
+        .await
+        .expect("second sweep");
+    assert_eq!(swept_again, 0);
+}

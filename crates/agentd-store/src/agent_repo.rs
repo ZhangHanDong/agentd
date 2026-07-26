@@ -587,6 +587,74 @@ pub async fn mark_agent_offline(
     get_agent(pool, &name).await
 }
 
+/// Fence agents whose heartbeat is older than `cutoff`. Mirrors
+/// [`crate::worker_repo::mark_stale_workers_offline`] for the agent registry:
+/// without it a silently dead agent stays `online` forever and keeps being
+/// advertised to schedulers, operators, and Matrix commands.
+///
+/// `tmux_target` is deliberately preserved so p234's `rebind` can still
+/// reattach a pane that outlived the heartbeat, and the reason is
+/// `heartbeat-timeout` so a swept agent is distinguishable from one an
+/// operator took down.
+///
+/// # Errors
+/// [`StoreError::Conflict`] if a selected row changed concurrently,
+/// [`StoreError::Sqlx`] on a database failure.
+pub async fn mark_stale_agents_offline(pool: &SqlitePool, cutoff: i64) -> Result<u64, StoreError> {
+    let mut connection = pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *connection)
+        .await?;
+    let result = sweep_stale_agents(&mut connection, cutoff).await;
+    match result {
+        Ok(count) => {
+            sqlx::query("COMMIT").execute(&mut *connection).await?;
+            Ok(count)
+        }
+        Err(error) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            Err(error)
+        }
+    }
+}
+
+async fn sweep_stale_agents(
+    connection: &mut sqlx::SqliteConnection,
+    cutoff: i64,
+) -> Result<u64, StoreError> {
+    let names: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM agents \
+         WHERE name IS NOT NULL AND status = 'online' \
+         AND last_seen_at IS NOT NULL AND last_seen_at < ?",
+    )
+    .bind(cutoff)
+    .fetch_all(&mut *connection)
+    .await?;
+
+    let now = now_unix();
+    let mut swept = 0_u64;
+    for name in names {
+        // The status guard is defensive: BEGIN IMMEDIATE already serializes
+        // writers, but a per-row guard keeps the count honest if this ever
+        // runs outside the transaction.
+        let updated = sqlx::query(
+            "UPDATE agents SET status = 'offline', offline_reason = 'heartbeat-timeout', \
+             updated_at = ? WHERE name = ? AND status = 'online'",
+        )
+        .bind(now)
+        .bind(&name)
+        .execute(&mut *connection)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(StoreError::Conflict(format!(
+                "agent '{name}' changed during the stale sweep"
+            )));
+        }
+        swept += 1;
+    }
+    Ok(swept)
+}
+
 pub async fn mark_agent_started(
     pool: &SqlitePool,
     name: &str,
