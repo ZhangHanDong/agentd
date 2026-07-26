@@ -85,6 +85,7 @@ fn send_input(from_agent: &str, priority: Option<&str>) -> SendMessageInput {
         priority: priority.map(str::to_string),
         reply_to: None,
         attachments: Vec::new(),
+        schema: None,
     }
 }
 
@@ -916,6 +917,36 @@ async fn check_inbox_returns_empty_v0() {
     .await
     .expect("check_inbox ok");
     assert!(out.messages.is_empty(), "v0 inbox is empty");
+}
+
+#[tokio::test]
+async fn send_message_preserves_the_structured_schema_object() {
+    let host = FakeRunHost::new();
+    let mut input = send_input("codex-worker", None);
+    input.schema = Some(json!({
+        "kind": "task_result",
+        "version": 1,
+        "payload": { "nodeId": "a", "ok": true }
+    }));
+
+    let sent = send_message(&host, input).await.expect("send_message ok");
+    assert_eq!(sent.message["schema"]["kind"], "task_result");
+    assert_eq!(sent.message["schema"]["payload"]["nodeId"], "a");
+
+    let inbox = check_inbox(
+        &host,
+        CheckInboxInput {
+            agent_id: "codex-reviewer".to_string(),
+            drain: false,
+        },
+    )
+    .await
+    .expect("check_inbox ok");
+    assert_eq!(
+        inbox.dm[0]["schema"]["kind"], "task_result",
+        "delivered DM keeps the schema the sender set: {:?}",
+        inbox.dm[0]
+    );
 }
 
 #[tokio::test]

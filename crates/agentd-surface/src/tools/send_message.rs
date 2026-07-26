@@ -22,6 +22,8 @@ pub struct SendMessageInput {
     #[serde(default)]
     pub reply_to: Option<String>,
     #[serde(default)]
+    pub schema: Option<Value>,
+    #[serde(default)]
     pub attachments: Vec<Value>,
 }
 
@@ -80,7 +82,7 @@ pub async fn send_message(
             sender_mxid: None,
             trust_level: None,
             from_id: None,
-            schema: None,
+            schema: input.schema,
             attachments,
         })
         .await?;

@@ -1212,7 +1212,11 @@ fn send_message_schema(identity_bound: bool) -> Value {
                 "default": "normal"
             },
             "attachments": attachment_array_schema(),
-            "reply_to": { "type": "string" }
+            "reply_to": { "type": "string" },
+            "schema": {
+                "type": "object",
+                "description": "Optional structured message schema, e.g. { kind, version, payload }."
+            }
         }
     });
     schema["required"] = if identity_bound {
