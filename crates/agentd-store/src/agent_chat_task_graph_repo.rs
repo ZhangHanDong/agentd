@@ -985,21 +985,37 @@ pub async fn settle_node_executions(
             },
         };
         if let Err(error) = update_node_and_advance(pool, &graph_id, &node_id, patch).await {
-            // update_node_and_advance retries its own CAS loop internally and
-            // only surfaces a `StoreError::Conflict` once that loop gives up.
-            // Two different things hide under that variant:
-            //  - a "changed concurrently" conflict from update_node_and_advance's
-            //    own retry loop exhausting: the node patch was NEVER applied.
-            //    Propagate it so this row stays settled=0 and the next tick
-            //    retries the patch instead of losing it.
-            //  - any other conflict means the node or its graph settled by
-            //    another route (an operator cancelled the graph, a late result
-            //    message landed) before this patch could apply. The execution
-            //    is finished either way, so absorb it and close the link row.
+            // Marking the link settled discards this row forever: the
+            // `settled = 0` filter above never selects it again, and a native
+            // node carries no assignee token, so nothing else can drive it.
+            // So absorb only on proof, never on the error variant alone.
+            //
+            // The "changed concurrently" CAS-exhaustion conflict is a plain
+            // propagate: the patch was never applied.
             if is_concurrent_write_conflict(&error) {
                 return Err(error);
             }
             if !matches!(error, StoreError::Conflict(_)) {
+                return Err(error);
+            }
+            // Every other `Conflict` needs the graph re-read, because the
+            // variant does not say whether the patch landed. Two shapes reach
+            // here and they want opposite handling:
+            //  - the node or its graph settled by another route (an operator
+            //    cancelled the graph, a late result message landed) before
+            //    this patch could apply. The execution is finished either way,
+            //    so absorb and close the link row.
+            //  - `update_node_and_advance` applied the patch in memory, then
+            //    the advance it triggered failed downstream *before* the
+            //    graph was persisted, so nothing landed. `enqueue_failed`
+            //    reports a transient scheduler outage this way
+            //    ("enqueue node '…' unavailable, retry: …") when advancing
+            //    into a downstream native node hits a busy database. Absorbing
+            //    that would strand this node dispatched and the downstream one
+            //    pending with no alarm and no way back.
+            // The re-read tells them apart from state alone, so no caller has
+            // to keep an inventory of conflict messages in sync with this one.
+            if !node_settled_elsewhere(pool, &graph_id, &node_id).await? {
                 return Err(error);
             }
         }
@@ -1007,6 +1023,28 @@ pub async fn settle_node_executions(
         settled += 1;
     }
     Ok(settled)
+}
+
+/// Whether the persisted graph proves this node no longer needs the settle
+/// pass's patch: the graph is gone or no longer active, or the node is gone or
+/// already terminal. Read after a `Conflict` from `update_node_and_advance`,
+/// this is the evidence that separates "somebody else already settled it" from
+/// "the write never landed".
+async fn node_settled_elsewhere(
+    pool: &SqlitePool,
+    graph_id: &str,
+    node_id: &str,
+) -> Result<bool, StoreError> {
+    let Some(graph) = get_graph(pool, graph_id).await? else {
+        return Ok(true);
+    };
+    if graph.status != "active" {
+        return Ok(true);
+    }
+    let Some(node) = graph.nodes.get(node_id) else {
+        return Ok(true);
+    };
+    Ok(node_terminal(&node.status))
 }
 
 async fn mark_node_execution_settled(

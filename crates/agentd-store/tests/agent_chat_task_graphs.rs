@@ -1257,6 +1257,129 @@ async fn settle_absorbs_a_node_already_terminated_by_a_late_message_without_losi
     assert_eq!(again, 0, "the link row must not be revisited once settled");
 }
 
+/// A graph whose downstream node is itself native, so settling the upstream one
+/// makes the advance enqueue the downstream execution. Returns the upstream
+/// node's execution task id.
+async fn native_chain_graph(store: &SqliteStore, graph_id: &str) -> String {
+    let mut nodes = BTreeMap::new();
+    nodes.insert(
+        "build".to_string(),
+        native_node("codex", "/usr/bin/codex", &[]),
+    );
+    nodes.insert(
+        "report".to_string(),
+        native_node("codex", "/usr/bin/codex", &["build"]),
+    );
+    agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some(graph_id.to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Native chain".to_string(),
+            nodes,
+        },
+    )
+    .await
+    .expect("create graph");
+    let graph = agent_chat_task_graph_repo::advance_graph(store.pool(), graph_id)
+        .await
+        .expect("advance graph")
+        .expect("graph present");
+    graph.nodes["build"]
+        .execution_task_id
+        .clone()
+        .expect("execution task id")
+}
+
+#[tokio::test]
+async fn a_downstream_enqueue_outage_keeps_the_settling_node_retryable() {
+    let (store, _dir) = open_store().await;
+    let graph_id = "graph_settle_enqueue_outage";
+    let execution_task_id = native_chain_graph(&store, graph_id).await;
+    force_queue_status(&store, &execution_task_id, "completed").await;
+
+    // Make the downstream node's enqueue fail the way a busy database does:
+    // the queue INSERT aborts, sqlx surfaces it, and the scheduler port maps it
+    // to `Unavailable`, which the repo reports as a `Conflict`. The settle pass
+    // must not read that conflict as "somebody else finished this node".
+    let downstream_request_id = format!("task-graph-{}-{graph_id}-report", graph_id.len());
+    sqlx::query(&format!(
+        "CREATE TRIGGER simulate_enqueue_outage BEFORE INSERT ON execution_task_queue \
+         WHEN NEW.request_id = '{downstream_request_id}' \
+         BEGIN SELECT RAISE(ABORT, 'database is locked'); END"
+    ))
+    .execute(store.pool())
+    .await
+    .expect("install the outage trigger");
+
+    let error = agent_chat_task_graph_repo::settle_node_executions(store.pool(), 500)
+        .await
+        .expect_err("a transient downstream enqueue failure must not be absorbed");
+    assert!(
+        matches!(&error, StoreError::Conflict(message)
+            if message.contains("enqueue node 'report' unavailable")),
+        "the outage must surface as the enqueue conflict, got {error:?}"
+    );
+
+    assert_eq!(
+        scalar_count(
+            &store,
+            "SELECT COUNT(*) FROM task_graph_node_executions \
+             WHERE graph_id = 'graph_settle_enqueue_outage' AND node_id = 'build' AND settled = 0"
+        )
+        .await,
+        1,
+        "the link must stay unsettled so the next tick retries it"
+    );
+    let graph = agent_chat_task_graph_repo::get_graph(store.pool(), graph_id)
+        .await
+        .expect("read graph")
+        .expect("graph present");
+    assert_eq!(
+        graph.nodes["build"].status, "dispatched",
+        "the patch never reached the graph, so the node must be untouched"
+    );
+    assert_eq!(graph.nodes["report"].status, "pending");
+    assert_eq!(graph.status, "active");
+
+    // The outage clears; the very next settle pass heals both nodes.
+    sqlx::query("DROP TRIGGER simulate_enqueue_outage")
+        .execute(store.pool())
+        .await
+        .expect("clear the outage");
+
+    let settled = agent_chat_task_graph_repo::settle_node_executions(store.pool(), 600)
+        .await
+        .expect("settle after the outage clears");
+    assert_eq!(settled, 1);
+    let graph = agent_chat_task_graph_repo::get_graph(store.pool(), graph_id)
+        .await
+        .expect("read graph")
+        .expect("graph present");
+    assert_eq!(graph.nodes["build"].status, "complete");
+    assert_eq!(graph.nodes["report"].status, "dispatched");
+    assert_eq!(
+        scalar_count(
+            &store,
+            "SELECT COUNT(*) FROM execution_task_queue q \
+             JOIN task_graph_node_executions e ON e.execution_task_id = q.execution_task_id \
+             WHERE e.graph_id = 'graph_settle_enqueue_outage' AND e.node_id = 'report'"
+        )
+        .await,
+        1,
+        "the downstream execution must be enqueued on the retry"
+    );
+    assert_eq!(
+        scalar_count(
+            &store,
+            "SELECT COUNT(*) FROM task_graph_node_executions \
+             WHERE graph_id = 'graph_settle_enqueue_outage' AND node_id = 'build' AND settled = 1"
+        )
+        .await,
+        1
+    );
+}
+
 #[tokio::test]
 async fn deleting_a_graph_settles_its_open_node_executions() {
     let (store, _dir) = open_store().await;
