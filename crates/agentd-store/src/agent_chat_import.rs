@@ -8,7 +8,7 @@ use serde_json::{Map, Value, json};
 use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 
 use crate::StoreError;
-use crate::agent_repo::{self, OfflineAgent, RegisterAgent};
+use crate::agent_repo::{self, OfflineAgent};
 use crate::message_repo::{self, DirectMessageInput, GroupCreateInput, GroupMessageInput};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -390,7 +390,6 @@ struct ImportAgent {
     capability: Option<String>,
     runtime: Option<String>,
     model: Option<String>,
-    tmux_target: Option<String>,
     home_dir: Option<String>,
     workdir: Option<String>,
     state_dir: Option<String>,
@@ -701,15 +700,14 @@ async fn upsert_imported_task_graph(
 }
 
 async fn import_agent(pool: &SqlitePool, agent: &ImportAgent) -> Result<(), StoreError> {
-    agent_repo::register_agent(
+    agent_repo::import_agent_profile(
         pool,
-        RegisterAgent {
+        agent_repo::AgentImport {
             name: agent.name.clone(),
             role: agent.role.clone(),
             capability: agent.capability.clone(),
             runtime: agent.runtime.clone(),
             model: agent.model.clone(),
-            tmux_target: agent.tmux_target.clone(),
             home_dir: agent.home_dir.clone(),
             workdir: agent.workdir.clone(),
             state_dir: agent.state_dir.clone(),
@@ -1201,7 +1199,6 @@ fn parse_agent(key: &str, value: &Value) -> Option<ImportAgent> {
         capability: string_field(object, "capability"),
         runtime: string_field(object, "type").or_else(|| string_field(object, "runtime")),
         model: string_field(object, "agentModelVersion").or_else(|| string_field(object, "model")),
-        tmux_target: string_field(object, "tmux"),
         home_dir: string_field(object, "homeDir"),
         workdir: string_field(object, "workdir"),
         state_dir: string_field(object, "stateDir"),

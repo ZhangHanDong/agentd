@@ -107,6 +107,16 @@ pub struct AgentIdentityPatch {
     pub identity: String,
 }
 
+/// Operator-managed runtime-profile update input for
+/// `PATCH /api/agents/:name/profile`. `replace` swaps the whole document;
+/// the default merges the patch over the stored one at the top level.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentProfilePatch {
+    pub profile: Value,
+    #[serde(default)]
+    pub replace: bool,
+}
+
 /// Agent heartbeat input for `POST /api/agents/:name/heartbeat`.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct AgentHeartbeat {
@@ -1014,6 +1024,24 @@ pub trait RunHost: Send + Sync {
         &self,
         name: &str,
         identity: &str,
+    ) -> Result<Option<AgentRecord>, CoreError>;
+
+    /// Read one local agent's runtime profile document. `None` means unknown
+    /// agent.
+    ///
+    /// # Errors
+    /// [`CoreError`] on validation or store failure.
+    async fn get_agent_profile(&self, name: &str) -> Result<Option<Value>, CoreError>;
+
+    /// Patch one local agent's runtime profile. `None` means unknown agent.
+    ///
+    /// # Errors
+    /// [`CoreError`] on validation or store failure.
+    async fn update_agent_profile(
+        &self,
+        name: &str,
+        patch: Value,
+        replace: bool,
     ) -> Result<Option<AgentRecord>, CoreError>;
 
     /// Mark a local agent online and update heartbeat metadata; returns

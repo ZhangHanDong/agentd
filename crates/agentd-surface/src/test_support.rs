@@ -435,6 +435,48 @@ impl RunHost for FakeRunHost {
         Ok(Some(record.clone()))
     }
 
+    async fn get_agent_profile(&self, name: &str) -> Result<Option<serde_json::Value>, CoreError> {
+        let name = normalize_agent_name(name)?;
+        let agents = self.agents.lock().expect("agents lock");
+        Ok(agents
+            .get(&name)
+            .map(|record| record.runtime_profile.clone()))
+    }
+
+    async fn update_agent_profile(
+        &self,
+        name: &str,
+        patch: serde_json::Value,
+        replace: bool,
+    ) -> Result<Option<AgentRecord>, CoreError> {
+        let name = normalize_agent_name(name)?;
+        if !patch.is_object() {
+            return Err(CoreError::Invariant(
+                "runtime profile must be a JSON object".to_string(),
+            ));
+        }
+        let mut agents = self.agents.lock().expect("agents lock");
+        let Some(record) = agents.get_mut(&name) else {
+            return Ok(None);
+        };
+        if replace {
+            record.runtime_profile = patch;
+        } else {
+            if !record.runtime_profile.is_object() {
+                record.runtime_profile = serde_json::json!({});
+            }
+            let target = record
+                .runtime_profile
+                .as_object_mut()
+                .expect("runtime_profile normalized to object");
+            for (key, value) in patch.as_object().expect("patch is an object") {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+        record.updated_at = 5;
+        Ok(Some(record.clone()))
+    }
+
     async fn heartbeat_agent(
         &self,
         name: &str,

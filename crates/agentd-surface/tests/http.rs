@@ -1805,3 +1805,77 @@ async fn dashboard_route_rejects_post() {
     assert_ne!(resp.status(), StatusCode::OK);
     assert_ne!(resp.status(), StatusCode::CREATED);
 }
+
+#[tokio::test]
+async fn http_agent_profile_reads_and_patches_runtime_profile() {
+    let app = app(FakeRunHost::new());
+    let register = post(
+        app.clone(),
+        "/api/agents",
+        &json!({
+            "name": "codex-worker",
+            "runtime": "codex",
+            "runtime_profile": { "primary": { "framework": "codex" } }
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(register.status(), StatusCode::OK);
+
+    let read = get(app.clone(), "/api/agents/codex-worker/profile").await;
+    assert_eq!(read.status(), StatusCode::OK);
+    let read: Value = serde_json::from_str(&body_string(read).await).expect("profile json");
+    assert_eq!(read["agent"], "codex-worker");
+    assert_eq!(read["runtimeProfile"]["primary"]["framework"], "codex");
+
+    let patched = patch(
+        app.clone(),
+        "/api/agents/codex-worker/profile",
+        &json!({ "profile": { "extraArgs": ["--json"] } }).to_string(),
+    )
+    .await;
+    assert_eq!(patched.status(), StatusCode::OK);
+    let patched: Value = serde_json::from_str(&body_string(patched).await).expect("patch json");
+    assert_eq!(patched["ok"], true);
+    assert_eq!(
+        patched["agent"]["runtime_profile"]["extraArgs"][0],
+        "--json"
+    );
+    assert_eq!(
+        patched["agent"]["runtime_profile"]["primary"]["framework"],
+        "codex"
+    );
+
+    let replaced = patch(
+        app.clone(),
+        "/api/agents/codex-worker/profile",
+        &json!({ "profile": { "primary": { "framework": "claude" } }, "replace": true })
+            .to_string(),
+    )
+    .await;
+    assert_eq!(replaced.status(), StatusCode::OK);
+    let replaced: Value = serde_json::from_str(&body_string(replaced).await).expect("replace json");
+    assert_eq!(
+        replaced["agent"]["runtime_profile"]["primary"]["framework"],
+        "claude"
+    );
+    assert_eq!(replaced["agent"]["runtime_profile"].get("extraArgs"), None);
+
+    let bad = patch(
+        app.clone(),
+        "/api/agents/codex-worker/profile",
+        &json!({ "profile": ["not an object"] }).to_string(),
+    )
+    .await;
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+
+    let missing_read = get(app.clone(), "/api/agents/ghost/profile").await;
+    assert_eq!(missing_read.status(), StatusCode::NOT_FOUND);
+    let missing_patch = patch(
+        app,
+        "/api/agents/ghost/profile",
+        &json!({ "profile": { "a": 1 } }).to_string(),
+    )
+    .await;
+    assert_eq!(missing_patch.status(), StatusCode::NOT_FOUND);
+}

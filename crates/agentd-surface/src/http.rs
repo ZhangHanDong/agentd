@@ -35,11 +35,11 @@ use crate::host::{
     AgentChatTaskCommentInput, AgentChatTaskCreateInput, AgentChatTaskExecutionInput,
     AgentChatTaskGraphCreateInput, AgentChatTaskGraphNodePatchInput, AgentChatTaskListFilters,
     AgentChatTaskPatchInput, AgentChatTaskTransitionInput, AgentHeartbeat, AgentIdentityPatch,
-    AgentOffline, AgentRegistration, AgentRuntimeUpdate, DeliveryEventInput, DirectMessageInput,
-    EventRecord, GroupCreateInput, GroupMemberUpdate, LiveEvent, MatrixBridgeRoomInput,
-    MatrixInboundMessageInput, MatrixOutboxCursorInput, RelayServerHeartbeat,
-    RelayStreamEventRecord, RunHost, RunSnapshot, SchedulerDispatchInput, SchedulerPoolFilters,
-    SchedulerReleaseInput,
+    AgentOffline, AgentProfilePatch, AgentRegistration, AgentRuntimeUpdate, DeliveryEventInput,
+    DirectMessageInput, EventRecord, GroupCreateInput, GroupMemberUpdate, LiveEvent,
+    MatrixBridgeRoomInput, MatrixInboundMessageInput, MatrixOutboxCursorInput,
+    RelayServerHeartbeat, RelayStreamEventRecord, RunHost, RunSnapshot, SchedulerDispatchInput,
+    SchedulerPoolFilters, SchedulerReleaseInput,
 };
 use crate::mcp_server::dispatch;
 use crate::tools::attachments::{
@@ -187,6 +187,10 @@ pub fn router(state: AppState) -> Router {
             get(get_agent_detail).patch(update_agent_identity),
         )
         .route("/api/agents/:name/launch-env", get(agent_launch_env))
+        .route(
+            "/api/agents/:name/profile",
+            get(get_agent_profile).patch(patch_agent_profile),
+        )
         .route("/api/agents/:name/start", post(agent_start))
         .route("/api/agents/:name/down", post(agent_down))
         .route("/api/agents/:name/rebind", post(agent_rebind))
@@ -1304,6 +1308,51 @@ async fn update_agent_identity(
             .into_response();
     }
     match state.host.update_agent_identity(&name, identity).await {
+        Ok(Some(agent)) => Json(json!({ "ok": true, "agent": agent })).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "agent_not_found" })),
+        )
+            .into_response(),
+        Err(e) => agent_error_response(e),
+    }
+}
+
+async fn get_agent_profile(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(err) = require_operator_bearer(&state.auth, &headers) {
+        return err.into_response();
+    }
+    match state.host.get_agent_profile(&name).await {
+        Ok(Some(profile)) => {
+            Json(json!({ "agent": name, "runtimeProfile": profile })).into_response()
+        }
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "agent_not_found" })),
+        )
+            .into_response(),
+        Err(e) => agent_error_response(e),
+    }
+}
+
+async fn patch_agent_profile(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+    headers: HeaderMap,
+    Json(req): Json<AgentProfilePatch>,
+) -> Response {
+    if let Err(err) = require_local_operator(&state.auth, &headers) {
+        return err.into_response();
+    }
+    match state
+        .host
+        .update_agent_profile(&name, req.profile, req.replace)
+        .await
+    {
         Ok(Some(agent)) => Json(json!({ "ok": true, "agent": agent })).into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,

@@ -390,3 +390,235 @@ async fn agent_registry_rejects_empty_agent_name() {
     let listed = agent_repo::list_agents(store.pool()).await.expect("list");
     assert!(listed.is_empty(), "no row inserted for invalid name");
 }
+
+#[tokio::test]
+async fn agent_import_creates_then_updates_without_disturbing_liveness() {
+    let (store, _dir) = open_temp().await;
+
+    let (created, outcome) = agent_repo::import_agent_profile(
+        store.pool(),
+        agent_repo::AgentImport {
+            name: "codex-dev".to_string(),
+            role: Some(text("implementer")),
+            capability: Some(text("strong")),
+            runtime: Some(text("codex")),
+            model: Some(text("gpt-5")),
+            home_dir: Some(text("/tmp/homes/codex-dev")),
+            workdir: Some(text("/tmp/homes/codex-dev/workdir")),
+            state_dir: Some(text("/tmp/homes/codex-dev/state")),
+            server: Some(text("local")),
+            runtime_profile: json!({ "primary": { "framework": "codex" } }),
+        },
+    )
+    .await
+    .expect("import create");
+
+    assert_eq!(outcome, agent_repo::AgentImportOutcome::Created);
+    assert_eq!(created.name, "codex-dev");
+    // An import never claims liveness it did not observe.
+    assert_eq!(created.status, "offline");
+    assert_eq!(created.offline_reason.as_deref(), Some("imported"));
+    assert_eq!(created.tmux_target, None);
+    assert_eq!(created.last_seen_at, None);
+
+    // The agent comes online and the operator sets an identity.
+    agent_repo::mark_agent_started(
+        store.pool(),
+        "codex-dev",
+        agent_repo::StartedAgent {
+            tmux_target: "codex-dev:0.0".to_string(),
+        },
+    )
+    .await
+    .expect("start")
+    .expect("agent exists");
+    agent_repo::update_agent_identity(store.pool(), "codex-dev", "Be concise")
+        .await
+        .expect("identity")
+        .expect("agent exists");
+
+    // Re-importing the roster with a changed model must update the roster
+    // fields and merge the profile, without knocking the agent offline or
+    // discarding the operator's identity key.
+    let (updated, outcome) = agent_repo::import_agent_profile(
+        store.pool(),
+        agent_repo::AgentImport {
+            name: "codex-dev".to_string(),
+            role: Some(text("reviewer")),
+            capability: None,
+            runtime: Some(text("codex")),
+            model: Some(text("gpt-5.1")),
+            home_dir: None,
+            workdir: None,
+            state_dir: None,
+            server: None,
+            runtime_profile: json!({ "primary": { "framework": "codex" }, "extraArgs": ["-q"] }),
+        },
+    )
+    .await
+    .expect("import update");
+
+    assert_eq!(outcome, agent_repo::AgentImportOutcome::Updated);
+    assert_eq!(updated.role.as_deref(), Some("reviewer"));
+    assert_eq!(updated.model.as_deref(), Some("gpt-5.1"));
+    // Omitted roster fields are preserved, not nulled.
+    assert_eq!(updated.capability.as_deref(), Some("strong"));
+    assert_eq!(updated.server.as_deref(), Some("local"));
+    // Liveness is untouched.
+    assert_eq!(updated.status, "online");
+    assert_eq!(updated.tmux_target.as_deref(), Some("codex-dev:0.0"));
+    // Profile merge: imported keys win, operator-owned keys survive.
+    assert_eq!(updated.runtime_profile["identity"], "Be concise");
+    assert_eq!(updated.runtime_profile["extraArgs"][0], "-q");
+    assert_eq!(updated.runtime_profile["primary"]["framework"], "codex");
+}
+
+#[tokio::test]
+async fn agent_import_rejects_a_blank_name() {
+    let (store, _dir) = open_temp().await;
+    let error = agent_repo::import_agent_profile(
+        store.pool(),
+        agent_repo::AgentImport {
+            name: "   ".to_string(),
+            role: None,
+            capability: None,
+            runtime: None,
+            model: None,
+            home_dir: None,
+            workdir: None,
+            state_dir: None,
+            server: None,
+            runtime_profile: json!({}),
+        },
+    )
+    .await
+    .expect_err("blank name must be rejected");
+    assert!(error.to_string().contains("agent name required"));
+}
+
+#[tokio::test]
+async fn agent_profile_reads_back_and_patches_by_merge_or_replace() {
+    let (store, _dir) = open_temp().await;
+    agent_repo::register_agent(
+        store.pool(),
+        agent_repo::RegisterAgent {
+            name: "codex-prof".to_string(),
+            role: None,
+            capability: None,
+            runtime: Some(text("codex")),
+            model: None,
+            tmux_target: None,
+            home_dir: None,
+            workdir: None,
+            state_dir: None,
+            server: None,
+            runtime_profile: json!({ "primary": { "framework": "codex" }, "identity": "Terse" }),
+        },
+    )
+    .await
+    .expect("register");
+
+    let profile = agent_repo::get_agent_profile(store.pool(), "codex-prof")
+        .await
+        .expect("read")
+        .expect("agent exists");
+    assert_eq!(profile["primary"]["framework"], "codex");
+    assert_eq!(profile["identity"], "Terse");
+
+    let merged = agent_repo::update_agent_profile(
+        store.pool(),
+        "codex-prof",
+        json!({ "extraArgs": ["--json"] }),
+        false,
+    )
+    .await
+    .expect("merge patch")
+    .expect("agent exists");
+    assert_eq!(merged.runtime_profile["identity"], "Terse");
+    assert_eq!(merged.runtime_profile["extraArgs"][0], "--json");
+
+    let replaced = agent_repo::update_agent_profile(
+        store.pool(),
+        "codex-prof",
+        json!({ "primary": { "framework": "claude" } }),
+        true,
+    )
+    .await
+    .expect("replace patch")
+    .expect("agent exists");
+    assert_eq!(replaced.runtime_profile["primary"]["framework"], "claude");
+    assert_eq!(replaced.runtime_profile.get("identity"), None);
+
+    assert!(
+        agent_repo::get_agent_profile(store.pool(), "ghost")
+            .await
+            .expect("read missing")
+            .is_none()
+    );
+
+    let error = agent_repo::update_agent_profile(
+        store.pool(),
+        "codex-prof",
+        json!(["not an object"]),
+        false,
+    )
+    .await
+    .expect_err("non-object profile must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("runtime profile must be a JSON object")
+    );
+}
+
+#[tokio::test]
+async fn stale_agents_are_swept_offline_without_losing_their_runtime_target() {
+    let (store, _dir) = open_temp().await;
+
+    for name in ["fresh-agent", "stale-agent"] {
+        agent_repo::heartbeat_agent(
+            store.pool(),
+            name,
+            agent_repo::HeartbeatAgent {
+                server: Some(text("local")),
+                tmux_target: Some(format!("{name}:0.0")),
+                workspace_path: None,
+            },
+        )
+        .await
+        .expect("heartbeat");
+    }
+
+    // Backdate one agent's heartbeat past the cutoff.
+    sqlx::query("UPDATE agents SET last_seen_at = 100 WHERE name = ?")
+        .bind("stale-agent")
+        .execute(store.pool())
+        .await
+        .expect("backdate");
+
+    let swept = agent_repo::mark_stale_agents_offline(store.pool(), 500)
+        .await
+        .expect("sweep");
+    assert_eq!(swept, 1);
+
+    let stale = agent_repo::get_agent(store.pool(), "stale-agent")
+        .await
+        .expect("get stale")
+        .expect("agent exists");
+    assert_eq!(stale.status, "offline");
+    assert_eq!(stale.offline_reason.as_deref(), Some("heartbeat-timeout"));
+    // Preserved so `rebind` can still reattach a surviving pane.
+    assert_eq!(stale.tmux_target.as_deref(), Some("stale-agent:0.0"));
+
+    let fresh = agent_repo::get_agent(store.pool(), "fresh-agent")
+        .await
+        .expect("get fresh")
+        .expect("agent exists");
+    assert_eq!(fresh.status, "online");
+
+    // The sweep is idempotent: an already-offline agent is not re-counted.
+    let swept_again = agent_repo::mark_stale_agents_offline(store.pool(), 500)
+        .await
+        .expect("second sweep");
+    assert_eq!(swept_again, 0);
+}
