@@ -569,10 +569,15 @@ async fn read_group_mentions(
     let rows = sqlx::query(
         group_message_select_sql(
             "WHERE id NOT IN (SELECT message_id FROM group_mention_reads WHERE agent_name = ?) \
+             AND group_name IN ( \
+                 SELECT group_name FROM group_members \
+                 WHERE agent_name = ? COLLATE NOCASE \
+             ) \
              ORDER BY ts, rowid",
         )
         .as_str(),
     )
+    .bind(agent_id)
     .bind(agent_id)
     .fetch_all(&mut *tx)
     .await?;

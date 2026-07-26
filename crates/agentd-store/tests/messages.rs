@@ -458,3 +458,90 @@ async fn group_messages_preview_and_read_all_advances() {
     assert_eq!(after.unread_total, 0);
     assert_eq!(after.read.len(), 3);
 }
+
+#[tokio::test]
+async fn group_mentions_are_scoped_to_current_group_membership() {
+    let (store, _dir) = open_temp().await;
+    message_repo::create_group(
+        store.pool(),
+        message_repo::GroupCreateInput {
+            name: text("factory"),
+            members: vec![text("codex-a"), text("codex-b")],
+        },
+    )
+    .await
+    .expect("create group");
+
+    message_repo::insert_group_message(store.pool(), group_message("mention b", &["codex-b"]))
+        .await
+        .expect("insert mention");
+
+    let before = message_repo::read_agent_inbox(
+        store.pool(),
+        "codex-b",
+        message_repo::InboxReadOptions { drain: false },
+    )
+    .await
+    .expect("read while a member");
+    assert_eq!(before.group.len(), 1, "a member sees the mention");
+
+    message_repo::update_group_members(store.pool(), "factory", &[], &[text("codex-b")])
+        .await
+        .expect("remove member");
+
+    let after = message_repo::read_agent_inbox(
+        store.pool(),
+        "codex-b",
+        message_repo::InboxReadOptions { drain: false },
+    )
+    .await
+    .expect("read after removal");
+    assert!(
+        after.group.is_empty(),
+        "a removed member stops receiving that group's mentions: {:?}",
+        after.group
+    );
+
+    let still_member = message_repo::read_agent_inbox(
+        store.pool(),
+        "codex-a",
+        message_repo::InboxReadOptions { drain: false },
+    )
+    .await
+    .expect("read as remaining member");
+    assert!(
+        still_member.group.is_empty(),
+        "codex-a was never mentioned: {:?}",
+        still_member.group
+    );
+}
+
+#[tokio::test]
+async fn group_mentions_for_an_unknown_group_are_not_delivered() {
+    let (store, _dir) = open_temp().await;
+    message_repo::create_group(
+        store.pool(),
+        message_repo::GroupCreateInput {
+            name: text("factory"),
+            members: vec![text("codex-a")],
+        },
+    )
+    .await
+    .expect("create group");
+    message_repo::insert_group_message(store.pool(), group_message("mention b", &["codex-b"]))
+        .await
+        .expect("insert mention of a non-member");
+
+    let inbox = message_repo::read_agent_inbox(
+        store.pool(),
+        "codex-b",
+        message_repo::InboxReadOptions { drain: false },
+    )
+    .await
+    .expect("read");
+    assert!(
+        inbox.group.is_empty(),
+        "an imported mention of a non-member is not delivered: {:?}",
+        inbox.group
+    );
+}
