@@ -189,6 +189,218 @@ pub async fn register_agent(
         .ok_or_else(|| StoreError::Invariant(format!("registered agent '{name}' is missing")))
 }
 
+/// Roster-shaped import input. Unlike [`RegisterAgent`], this never carries
+/// liveness state: an import re-applies who an agent *is*, not whether it is
+/// currently running.
+#[derive(Debug, Clone)]
+pub struct AgentImport {
+    pub name: String,
+    pub role: Option<String>,
+    pub capability: Option<String>,
+    pub runtime: Option<String>,
+    pub model: Option<String>,
+    pub home_dir: Option<String>,
+    pub workdir: Option<String>,
+    pub state_dir: Option<String>,
+    pub server: Option<String>,
+    pub runtime_profile: Value,
+}
+
+/// Whether an import created a new registry row or updated an existing one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentImportOutcome {
+    Created,
+    Updated,
+}
+
+/// Idempotently import or update one agent and its runtime profile.
+///
+/// Roster fields are only overwritten when the import supplies them (`None`
+/// preserves the stored value). The runtime profile is merged key-by-key with
+/// the import winning, so operator-owned keys such as `identity` survive a
+/// re-import. Liveness columns (`status`, `offline_reason`, `tmux_target`,
+/// `backend_target`, `last_seen_at`, `registered_at`) are never written here —
+/// only heartbeat/start/offline own those.
+///
+/// # Errors
+/// [`StoreError::Invariant`] for a blank name, [`StoreError::Conflict`] if the
+/// row changed concurrently, [`StoreError::Sqlx`] on a database failure.
+pub async fn import_agent_profile(
+    pool: &SqlitePool,
+    input: AgentImport,
+) -> Result<(AgentRecord, AgentImportOutcome), StoreError> {
+    let name = normalize_name(&input.name)?;
+    let role = clean_opt(input.role);
+    let capability = clean_opt(input.capability);
+    let runtime = clean_opt(input.runtime);
+    let model = clean_opt(input.model);
+    let home_dir = clean_opt(input.home_dir);
+    let workdir = clean_opt(input.workdir);
+    let state_dir = clean_opt(input.state_dir);
+    let server = clean_opt(input.server);
+    let import_profile = normalize_runtime_profile(input.runtime_profile);
+    let now = now_unix();
+
+    let mut connection = pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *connection)
+        .await?;
+    let result = import_in_transaction(
+        &mut connection,
+        &name,
+        ImportColumns {
+            role: role.as_deref(),
+            capability: capability.as_deref(),
+            runtime: runtime.as_deref(),
+            model: model.as_deref(),
+            home_dir: home_dir.as_deref(),
+            workdir: workdir.as_deref(),
+            state_dir: state_dir.as_deref(),
+            server: server.as_deref(),
+        },
+        &import_profile,
+        now,
+    )
+    .await;
+    let outcome = match result {
+        Ok(outcome) => {
+            sqlx::query("COMMIT").execute(&mut *connection).await?;
+            outcome
+        }
+        Err(error) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            return Err(error);
+        }
+    };
+    drop(connection);
+
+    let record = get_agent(pool, &name)
+        .await?
+        .ok_or_else(|| StoreError::Invariant(format!("imported agent '{name}' is missing")))?;
+    Ok((record, outcome))
+}
+
+struct ImportColumns<'a> {
+    role: Option<&'a str>,
+    capability: Option<&'a str>,
+    runtime: Option<&'a str>,
+    model: Option<&'a str>,
+    home_dir: Option<&'a str>,
+    workdir: Option<&'a str>,
+    state_dir: Option<&'a str>,
+    server: Option<&'a str>,
+}
+
+async fn import_in_transaction(
+    connection: &mut sqlx::SqliteConnection,
+    name: &str,
+    columns: ImportColumns<'_>,
+    import_profile: &Value,
+    now: i64,
+) -> Result<AgentImportOutcome, StoreError> {
+    let existing: Option<String> =
+        sqlx::query_scalar("SELECT runtime_profile FROM agents WHERE name = ? OR id = ?")
+            .bind(name)
+            .bind(name)
+            .fetch_optional(&mut *connection)
+            .await?;
+
+    let Some(existing_profile_text) = existing else {
+        let profile_text = serde_json::to_string(import_profile)?;
+        let inserted = sqlx::query(
+            "INSERT INTO agents \
+             (id, mxid, role, backend, backend_target, prompt_profile, enabled, created_at, \
+              name, capability, runtime, model, tmux_target, home_dir, workdir, state_dir, \
+              server, status, offline_reason, last_seen_at, registered_at, updated_at, runtime_profile) \
+             VALUES (?, ?, ?, ?, NULL, NULL, 1, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, 'offline', \
+              'imported', NULL, ?, ?, ?)",
+        )
+        .bind(name)
+        .bind(local_mxid(name))
+        .bind(columns.role.unwrap_or("agent"))
+        .bind(columns.runtime.unwrap_or("agent"))
+        .bind(now)
+        .bind(name)
+        .bind(columns.capability)
+        .bind(columns.runtime)
+        .bind(columns.model)
+        .bind(columns.home_dir)
+        .bind(columns.workdir)
+        .bind(columns.state_dir)
+        .bind(columns.server)
+        .bind(now)
+        .bind(now)
+        .bind(profile_text)
+        .execute(&mut *connection)
+        .await?;
+        if inserted.rows_affected() != 1 {
+            return Err(StoreError::Conflict(format!(
+                "agent '{name}' was created concurrently"
+            )));
+        }
+        return Ok(AgentImportOutcome::Created);
+    };
+
+    let merged = merge_runtime_profile(&existing_profile_text, import_profile);
+    let merged_text = serde_json::to_string(&merged)?;
+    let updated = sqlx::query(
+        "UPDATE agents SET \
+          role = COALESCE(?, role), \
+          capability = COALESCE(?, capability), \
+          runtime = COALESCE(?, runtime), \
+          backend = COALESCE(?, backend), \
+          model = COALESCE(?, model), \
+          home_dir = COALESCE(?, home_dir), \
+          workdir = COALESCE(?, workdir), \
+          state_dir = COALESCE(?, state_dir), \
+          server = COALESCE(?, server), \
+          runtime_profile = ?, \
+          updated_at = ? \
+         WHERE name = ? OR id = ?",
+    )
+    .bind(columns.role)
+    .bind(columns.capability)
+    .bind(columns.runtime)
+    .bind(columns.runtime)
+    .bind(columns.model)
+    .bind(columns.home_dir)
+    .bind(columns.workdir)
+    .bind(columns.state_dir)
+    .bind(columns.server)
+    .bind(merged_text)
+    .bind(now)
+    .bind(name)
+    .bind(name)
+    .execute(&mut *connection)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(StoreError::Conflict(format!(
+            "agent '{name}' changed concurrently"
+        )));
+    }
+    Ok(AgentImportOutcome::Updated)
+}
+
+/// Merge an imported profile document over the stored one, key by key at the
+/// top level. Imported keys win; keys only the store has (an operator-set
+/// `identity`, for example) survive.
+fn merge_runtime_profile(existing_text: &str, import_profile: &Value) -> Value {
+    let mut merged = match serde_json::from_str::<Value>(existing_text) {
+        Ok(Value::Object(map)) => Value::Object(map),
+        _ => json!({}),
+    };
+    let Some(import_map) = import_profile.as_object() else {
+        return merged;
+    };
+    let target = merged
+        .as_object_mut()
+        .expect("merged runtime_profile is an object");
+    for (key, value) in import_map {
+        target.insert(key.clone(), value.clone());
+    }
+    merged
+}
+
 pub async fn list_agents(pool: &SqlitePool) -> Result<Vec<AgentRecord>, StoreError> {
     let rows = sqlx::query(agent_select_sql("WHERE name IS NOT NULL ORDER BY name").as_str())
         .fetch_all(pool)
