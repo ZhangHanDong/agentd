@@ -560,3 +560,105 @@ async fn late_duplicate_result_messages_are_ignored() {
     assert_eq!(graph.nodes["a"].status, "complete");
     assert_eq!(graph.nodes["a"].error, None);
 }
+
+#[tokio::test]
+async fn concurrent_sibling_node_completions_all_land() {
+    let (store, _dir) = open_store().await;
+    let mut nodes = BTreeMap::new();
+    for index in 0..8 {
+        nodes.insert(format!("n{index}"), node("codex-a", "Do work", &[]));
+    }
+    agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_concurrent".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Concurrent graph".to_string(),
+            nodes,
+        },
+    )
+    .await
+    .expect("create graph");
+
+    let mut handles = Vec::new();
+    for index in 0..8 {
+        let pool = store.pool().clone();
+        handles.push(tokio::spawn(async move {
+            agent_chat_task_graph_repo::update_node_and_advance(
+                &pool,
+                "graph_concurrent",
+                &format!("n{index}"),
+                agent_chat_task_graph_repo::UpdateAgentChatTaskGraphNode {
+                    status: Some("complete".to_string()),
+                    result: Some(json!({"node": index})),
+                    error: None,
+                },
+            )
+            .await
+        }));
+    }
+    for handle in handles {
+        handle
+            .await
+            .expect("join")
+            .expect("concurrent completion succeeds")
+            .expect("graph and node");
+    }
+
+    let graph = agent_chat_task_graph_repo::get_graph(store.pool(), "graph_concurrent")
+        .await
+        .expect("read graph")
+        .expect("graph present");
+    for index in 0..8 {
+        let node = &graph.nodes[&format!("n{index}")];
+        assert_eq!(node.status, "complete", "node n{index} lost its completion");
+        assert_eq!(node.result, Some(json!({"node": index})));
+    }
+    assert_eq!(graph.status, "complete");
+}
+
+#[tokio::test]
+async fn every_graph_write_bumps_the_record_version() {
+    let (store, _dir) = open_store().await;
+    agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_versioned".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Versioned graph".to_string(),
+            nodes: chain_nodes(),
+        },
+    )
+    .await
+    .expect("create graph");
+    let created_version = scalar_count(
+        &store,
+        "SELECT record_version FROM agent_chat_task_graphs WHERE id = 'graph_versioned'",
+    )
+    .await;
+    assert_eq!(created_version, 1);
+
+    agent_chat_task_graph_repo::update_node_and_advance(
+        store.pool(),
+        "graph_versioned",
+        "a",
+        agent_chat_task_graph_repo::UpdateAgentChatTaskGraphNode {
+            status: Some("complete".to_string()),
+            result: Some(json!({"ok": true})),
+            error: None,
+        },
+    )
+    .await
+    .expect("complete node a")
+    .expect("graph and node");
+
+    let updated_version = scalar_count(
+        &store,
+        "SELECT record_version FROM agent_chat_task_graphs WHERE id = 'graph_versioned'",
+    )
+    .await;
+    assert!(
+        updated_version > created_version,
+        "record_version must advance on every write: {created_version} -> {updated_version}"
+    );
+}

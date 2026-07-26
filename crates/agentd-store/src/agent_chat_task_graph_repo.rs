@@ -47,6 +47,11 @@ pub struct AgentChatTaskGraphRecord {
         skip_serializing_if = "Option::is_none"
     )]
     pub completed_at: Option<String>,
+    /// Column-backed optimistic-concurrency version. Never serialized into
+    /// `raw_json` (the column is the authority) and never deserialized from it;
+    /// `0` means "not yet inserted".
+    #[serde(default, skip_serializing)]
+    pub record_version: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -222,7 +227,7 @@ pub async fn create_graph(
     }
     validate_graph_nodes(&nodes)?;
     let now = now_text();
-    let graph = AgentChatTaskGraphRecord {
+    let mut graph = AgentChatTaskGraphRecord {
         id,
         owner,
         label,
@@ -231,8 +236,9 @@ pub async fn create_graph(
         created_at: now.clone(),
         updated_at: now,
         completed_at: None,
+        record_version: 0,
     };
-    upsert_graph(pool, &graph).await?;
+    upsert_graph(pool, &mut graph).await?;
     Ok(graph)
 }
 
@@ -276,13 +282,35 @@ pub async fn advance_graph(
     pool: &SqlitePool,
     id: &str,
 ) -> Result<Option<AgentChatTaskGraphRecord>, StoreError> {
-    let Some(graph) = get_graph(pool, id).await? else {
-        return Ok(None);
-    };
-    advance_graph_record(pool, graph).await.map(Some)
+    for _ in 0..MAX_GRAPH_WRITE_ATTEMPTS {
+        let Some(graph) = get_graph(pool, id).await? else {
+            return Ok(None);
+        };
+        match advance_graph_record(pool, graph).await {
+            Ok(graph) => return Ok(Some(graph)),
+            Err(error) if is_concurrent_write_conflict(&error) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(concurrent_write_conflict(id))
 }
 
 pub async fn update_node_and_advance(
+    pool: &SqlitePool,
+    graph_id: &str,
+    node_id: &str,
+    patch: UpdateAgentChatTaskGraphNode,
+) -> Result<Option<(AgentChatTaskGraphRecord, AgentChatTaskGraphNode)>, StoreError> {
+    for _ in 0..MAX_GRAPH_WRITE_ATTEMPTS {
+        match update_node_and_advance_once(pool, graph_id, node_id, patch.clone()).await {
+            Err(error) if is_concurrent_write_conflict(&error) => {}
+            other => return other,
+        }
+    }
+    Err(concurrent_write_conflict(graph_id))
+}
+
+async fn update_node_and_advance_once(
     pool: &SqlitePool,
     graph_id: &str,
     node_id: &str,
@@ -341,6 +369,19 @@ pub async fn delete_graph(
     pool: &SqlitePool,
     id: &str,
 ) -> Result<Option<AgentChatTaskGraphRecord>, StoreError> {
+    for _ in 0..MAX_GRAPH_WRITE_ATTEMPTS {
+        match delete_graph_once(pool, id).await {
+            Err(error) if is_concurrent_write_conflict(&error) => {}
+            other => return other,
+        }
+    }
+    Err(concurrent_write_conflict(id))
+}
+
+async fn delete_graph_once(
+    pool: &SqlitePool,
+    id: &str,
+) -> Result<Option<AgentChatTaskGraphRecord>, StoreError> {
     let Some(mut graph) = get_graph(pool, id).await? else {
         return Ok(None);
     };
@@ -354,7 +395,7 @@ pub async fn delete_graph(
             node.completed_at = Some(now.clone());
         }
     }
-    upsert_graph(pool, &graph).await?;
+    upsert_graph(pool, &mut graph).await?;
     Ok(Some(graph))
 }
 
@@ -445,7 +486,7 @@ async fn advance_graph_record(
     mut graph: AgentChatTaskGraphRecord,
 ) -> Result<AgentChatTaskGraphRecord, StoreError> {
     if graph.status != "active" {
-        upsert_graph(pool, &graph).await?;
+        upsert_graph(pool, &mut graph).await?;
         return Ok(graph);
     }
     let mut changed = false;
@@ -578,7 +619,7 @@ async fn advance_graph_record(
     if changed {
         graph.updated_at = now_text();
     }
-    upsert_graph(pool, &graph).await?;
+    upsert_graph(pool, &mut graph).await?;
     Ok(graph)
 }
 
@@ -877,7 +918,7 @@ async fn dispatch_drained_task_graph_ticket(
         node.dispatched_at.get_or_insert(dispatched_at);
     }
     graph.updated_at = now_text();
-    upsert_graph(pool, &graph).await?;
+    upsert_graph(pool, &mut graph).await?;
     message_repo::insert_direct_message(pool, message.input).await?;
     Ok(())
 }
@@ -920,34 +961,56 @@ fn apply_node_patch(
 
 async fn upsert_graph(
     pool: &SqlitePool,
-    graph: &AgentChatTaskGraphRecord,
+    graph: &mut AgentChatTaskGraphRecord,
 ) -> Result<(), StoreError> {
     validate_member("graph status", &graph.status, GRAPH_STATUSES)?;
     validate_graph_nodes(&graph.nodes)?;
     let raw_json = serde_json::to_string(graph)?;
-    sqlx::query(
-        "INSERT INTO agent_chat_task_graphs \
-         (id, owner, label, status, raw_json, imported_at) VALUES (?, ?, ?, ?, ?, ?) \
-         ON CONFLICT(id) DO UPDATE SET \
-          owner = excluded.owner, \
-          label = excluded.label, \
-          status = excluded.status, \
-          raw_json = excluded.raw_json, \
-          imported_at = excluded.imported_at",
+    let now = now_unix();
+    if graph.record_version == 0 {
+        sqlx::query(
+            "INSERT INTO agent_chat_task_graphs \
+             (id, owner, label, status, raw_json, record_version, imported_at) \
+             VALUES (?, ?, ?, ?, ?, 1, ?)",
+        )
+        .bind(&graph.id)
+        .bind(&graph.owner)
+        .bind(&graph.label)
+        .bind(&graph.status)
+        .bind(raw_json)
+        .bind(now)
+        .execute(pool)
+        .await?;
+        graph.record_version = 1;
+        return Ok(());
+    }
+    let next_version = graph.record_version.saturating_add(1);
+    let updated = sqlx::query(
+        "UPDATE agent_chat_task_graphs SET owner = ?, label = ?, status = ?, raw_json = ?, \
+         record_version = ?, imported_at = ? WHERE id = ? AND record_version = ?",
     )
-    .bind(&graph.id)
     .bind(&graph.owner)
     .bind(&graph.label)
     .bind(&graph.status)
     .bind(raw_json)
-    .bind(now_unix())
+    .bind(i64::try_from(next_version).unwrap_or(i64::MAX))
+    .bind(now)
+    .bind(&graph.id)
+    .bind(i64::try_from(graph.record_version).unwrap_or(i64::MAX))
     .execute(pool)
     .await?;
+    if updated.rows_affected() != 1 {
+        return Err(concurrent_write_conflict(&graph.id));
+    }
+    graph.record_version = next_version;
     Ok(())
 }
 
 fn graph_select_sql(tail: &str) -> String {
-    format!("SELECT id, owner, label, status, raw_json FROM agent_chat_task_graphs {tail}")
+    format!(
+        "SELECT id, owner, label, status, raw_json, record_version \
+         FROM agent_chat_task_graphs {tail}"
+    )
 }
 
 fn row_to_graph(row: &sqlx::sqlite::SqliteRow) -> Result<AgentChatTaskGraphRecord, StoreError> {
@@ -971,6 +1034,7 @@ fn row_to_graph(row: &sqlx::sqlite::SqliteRow) -> Result<AgentChatTaskGraphRecor
     {
         graph.status = status;
     }
+    graph.record_version = u64::try_from(row.get::<i64, _>("record_version")).unwrap_or(1);
     Ok(graph)
 }
 
@@ -1100,6 +1164,17 @@ fn condition_matches(
 
 fn node_terminal(status: &str) -> bool {
     matches!(status, "complete" | "failed" | "skipped" | "cancelled")
+}
+
+const MAX_GRAPH_WRITE_ATTEMPTS: usize = 8;
+const CONCURRENT_WRITE_SUFFIX: &str = "changed concurrently";
+
+fn concurrent_write_conflict(graph_id: &str) -> StoreError {
+    StoreError::Conflict(format!("task graph '{graph_id}' {CONCURRENT_WRITE_SUFFIX}"))
+}
+
+fn is_concurrent_write_conflict(error: &StoreError) -> bool {
+    matches!(error, StoreError::Conflict(message) if message.ends_with(CONCURRENT_WRITE_SUFFIX))
 }
 
 fn validate_member(field: &str, value: &str, allowed: &[&str]) -> Result<(), StoreError> {
