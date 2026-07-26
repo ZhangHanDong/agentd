@@ -1239,7 +1239,16 @@ fn check_inbox_schema(identity_bound: bool) -> Value {
                     "Agent id whose direct inbox should be read."
                 }
             },
-            "drain": { "type": "boolean" }
+            "drain": {
+                "type": "boolean",
+                "default": true,
+                "description": "Advance your read cursor. Defaults to true: messages returned by an unfiltered read will not appear again."
+            },
+            "kinds": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Optional schema.kind filter. When set, only matching unread messages are returned and the read cursor is not advanced."
+            }
         },
         "required": if identity_bound {
             json!([])

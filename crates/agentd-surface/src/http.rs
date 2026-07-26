@@ -823,8 +823,17 @@ async fn post_message(
 
 #[derive(Debug, Deserialize)]
 struct InboxQuery {
-    #[serde(default)]
+    /// Defaults to `true` so an unqualified `GET /api/inbox/:agent` consumes,
+    /// matching agent-chat. Pass `?drain=false` for a preview.
+    #[serde(default = "default_inbox_drain")]
     drain: bool,
+    /// Comma-separated `schema.kind` filter, as in agent-chat's `?kinds=`.
+    #[serde(default)]
+    kinds: Option<String>,
+}
+
+const fn default_inbox_drain() -> bool {
+    true
 }
 
 async fn get_inbox(
@@ -832,11 +841,21 @@ async fn get_inbox(
     AxumPath(agent): AxumPath<String>,
     Query(query): Query<InboxQuery>,
 ) -> Response {
+    let kinds = query
+        .kinds
+        .as_deref()
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|kind| !kind.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
     match check_inbox(
         state.host.as_ref(),
         CheckInboxInput {
             agent_id: agent,
             drain: query.drain,
+            kinds,
         },
     )
     .await
