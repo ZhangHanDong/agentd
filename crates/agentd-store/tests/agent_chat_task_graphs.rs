@@ -1203,6 +1203,61 @@ async fn a_dead_lettered_queue_row_fails_its_node_and_its_graph() {
 }
 
 #[tokio::test]
+async fn settle_absorbs_a_node_already_terminated_by_a_late_message_without_losing_the_link() {
+    let (store, _dir) = open_store().await;
+    let execution_task_id = native_pair_graph(&store, "graph_settle_race").await;
+
+    // Simulate a late message reaching the node and marking it terminal
+    // *before* the queue row itself reaches a terminal status. This is the
+    // legitimate-conflict case: update_node_and_advance's settled-node guard
+    // will reject the settle pass's own patch as a `StoreError::Conflict`
+    // that is not the "changed concurrently" CAS-exhaustion variant.
+    agent_chat_task_graph_repo::update_node_and_advance(
+        store.pool(),
+        "graph_settle_race",
+        "build",
+        agent_chat_task_graph_repo::UpdateAgentChatTaskGraphNode {
+            status: Some("failed".to_string()),
+            result: None,
+            error: Some("message-path failure".to_string()),
+        },
+    )
+    .await
+    .expect("update via message path")
+    .expect("node present");
+
+    // Only now does the queue row (independently) reach a terminal status.
+    force_queue_status(&store, &execution_task_id, "completed").await;
+
+    let settled = agent_chat_task_graph_repo::settle_node_executions(store.pool(), 500)
+        .await
+        .expect("settle absorbs the legitimate terminal-state conflict");
+    assert_eq!(
+        settled, 1,
+        "the link must still be marked settled even though the patch itself was rejected"
+    );
+
+    let graph = agent_chat_task_graph_repo::get_graph(store.pool(), "graph_settle_race")
+        .await
+        .expect("read graph")
+        .expect("graph present");
+    assert_eq!(
+        graph.nodes["build"].status, "failed",
+        "node status must be left exactly as the message path set it"
+    );
+    assert_eq!(
+        graph.nodes["build"].error.as_deref(),
+        Some("message-path failure"),
+        "the settle pass must not overwrite the message path's error with its own dead-letter reason"
+    );
+
+    let again = agent_chat_task_graph_repo::settle_node_executions(store.pool(), 600)
+        .await
+        .expect("settle again");
+    assert_eq!(again, 0, "the link row must not be revisited once settled");
+}
+
+#[tokio::test]
 async fn deleting_a_graph_settles_its_open_node_executions() {
     let (store, _dir) = open_store().await;
     let execution_task_id = native_pair_graph(&store, "graph_settle_deleted").await;

@@ -974,6 +974,10 @@ pub async fn settle_node_executions(
                 result: None,
                 error: None,
             },
+            // Only reachable via dead_letter today: the SQL IN list above and
+            // the execution_task_queue CHECK constraint together enumerate
+            // every queue_status this query can observe. Adding a new queue
+            // status to the SELECT's IN list requires a matching arm here.
             _ => UpdateAgentChatTaskGraphNode {
                 status: Some("failed".to_string()),
                 result: None,
@@ -981,9 +985,20 @@ pub async fn settle_node_executions(
             },
         };
         if let Err(error) = update_node_and_advance(pool, &graph_id, &node_id, patch).await {
-            // A conflict means the node or its graph settled by another route
-            // (an operator cancelled the graph, a late result message landed).
-            // The execution is finished either way, so close the link row.
+            // update_node_and_advance retries its own CAS loop internally and
+            // only surfaces a `StoreError::Conflict` once that loop gives up.
+            // Two different things hide under that variant:
+            //  - a "changed concurrently" conflict from update_node_and_advance's
+            //    own retry loop exhausting: the node patch was NEVER applied.
+            //    Propagate it so this row stays settled=0 and the next tick
+            //    retries the patch instead of losing it.
+            //  - any other conflict means the node or its graph settled by
+            //    another route (an operator cancelled the graph, a late result
+            //    message landed) before this patch could apply. The execution
+            //    is finished either way, so absorb it and close the link row.
+            if is_concurrent_write_conflict(&error) {
+                return Err(error);
+            }
             if !matches!(error, StoreError::Conflict(_)) {
                 return Err(error);
             }
