@@ -922,9 +922,7 @@ async fn a_node_with_an_execution_spec_is_queued_for_a_native_worker() {
     );
 }
 
-#[tokio::test]
-async fn re_advancing_a_native_node_does_not_enqueue_it_twice() {
-    let (store, _dir) = open_store().await;
+async fn create_single_native_graph(store: &SqliteStore, graph_id: &str) {
     let mut nodes = BTreeMap::new();
     nodes.insert(
         "build".to_string(),
@@ -933,7 +931,7 @@ async fn re_advancing_a_native_node_does_not_enqueue_it_twice() {
     agent_chat_task_graph_repo::create_graph(
         store.pool(),
         agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
-            id: Some("graph_native_replay".to_string()),
+            id: Some(graph_id.to_string()),
             owner: "orchestrator".to_string(),
             label: "Native replay graph".to_string(),
             nodes,
@@ -941,12 +939,50 @@ async fn re_advancing_a_native_node_does_not_enqueue_it_twice() {
     )
     .await
     .expect("create graph");
+}
 
-    for _ in 0..3 {
-        agent_chat_task_graph_repo::advance_graph(store.pool(), "graph_native_replay")
-            .await
-            .expect("advance")
-            .expect("graph present");
+/// Rewind a node to `pending` behind the repo's back. `advance_graph` only
+/// dispatches pending nodes, so without this a re-advance never reaches the
+/// dispatch path and an idempotency assertion proves nothing.
+async fn rewind_node_to_pending(store: &SqliteStore, graph_id: &str, node_id: &str) {
+    sqlx::query(
+        "UPDATE agent_chat_task_graphs \
+         SET raw_json = json_set(raw_json, '$.nodes.' || ? || '.status', 'pending') WHERE id = ?",
+    )
+    .bind(node_id)
+    .bind(graph_id)
+    .execute(store.pool())
+    .await
+    .expect("rewind node");
+}
+
+#[tokio::test]
+async fn re_advancing_a_native_node_does_not_enqueue_it_twice() {
+    let (store, _dir) = open_store().await;
+    create_single_native_graph(&store, "graph_native_replay").await;
+
+    let graph = agent_chat_task_graph_repo::advance_graph(store.pool(), "graph_native_replay")
+        .await
+        .expect("advance")
+        .expect("graph present");
+    let execution_task_id = graph.nodes["build"]
+        .execution_task_id
+        .clone()
+        .expect("first advance links an execution task");
+
+    // Replay the dispatch twice with the queue row still in place.
+    for _ in 0..2 {
+        rewind_node_to_pending(&store, "graph_native_replay", "build").await;
+        let replayed =
+            agent_chat_task_graph_repo::advance_graph(store.pool(), "graph_native_replay")
+                .await
+                .expect("advance")
+                .expect("graph present");
+        assert_eq!(
+            replayed.nodes["build"].execution_task_id.as_deref(),
+            Some(execution_task_id.as_str()),
+            "a replayed dispatch reuses the linked execution task"
+        );
     }
 
     assert_eq!(
@@ -956,6 +992,57 @@ async fn re_advancing_a_native_node_does_not_enqueue_it_twice() {
     assert_eq!(
         scalar_count(&store, "SELECT COUNT(*) FROM task_graph_node_executions").await,
         1
+    );
+}
+
+#[tokio::test]
+async fn a_native_node_stranded_without_a_queue_row_is_healed_by_the_next_advance() {
+    let (store, _dir) = open_store().await;
+    create_single_native_graph(&store, "graph_native_strand").await;
+
+    let graph = agent_chat_task_graph_repo::advance_graph(store.pool(), "graph_native_strand")
+        .await
+        .expect("advance")
+        .expect("graph present");
+    let execution_task_id = graph.nodes["build"]
+        .execution_task_id
+        .clone()
+        .expect("first advance links an execution task");
+
+    // The link row commits before the enqueue, so a crash or a transient
+    // storage failure in between leaves exactly this shape: a linked node with
+    // no queue row and nothing to settle it.
+    sqlx::query("DELETE FROM execution_task_queue")
+        .execute(store.pool())
+        .await
+        .expect("strand the node");
+    rewind_node_to_pending(&store, "graph_native_strand", "build").await;
+
+    let healed = agent_chat_task_graph_repo::advance_graph(store.pool(), "graph_native_strand")
+        .await
+        .expect("advance")
+        .expect("graph present");
+    assert_eq!(
+        healed.nodes["build"].execution_task_id.as_deref(),
+        Some(execution_task_id.as_str()),
+        "healing re-enqueues the linked task rather than creating a new one"
+    );
+
+    let (queued_task, status): (String, String) =
+        sqlx::query_as("SELECT execution_task_id, status FROM execution_task_queue")
+            .fetch_one(store.pool())
+            .await
+            .expect("exactly one queue row after healing");
+    assert_eq!(queued_task, execution_task_id);
+    assert_eq!(status, "queued");
+    assert_eq!(
+        scalar_count(&store, "SELECT COUNT(*) FROM task_graph_node_executions").await,
+        1
+    );
+    assert_eq!(
+        scalar_count(&store, "SELECT COUNT(*) FROM task_runs").await,
+        1,
+        "healing does not mint a second execution task"
     );
 }
 
@@ -981,6 +1068,32 @@ async fn a_node_cannot_be_both_scheduler_routed_and_natively_executed() {
     assert!(
         matches!(&error, agentd_store::StoreError::Invariant(message)
             if message.contains("role") && message.contains("execution")),
+        "expected an invariant naming both fields, got: {error}"
+    );
+}
+
+#[tokio::test]
+async fn a_node_cannot_be_both_assigned_to_an_agent_and_natively_executed() {
+    let (store, _dir) = open_store().await;
+    let mut conflicting = native_node("codex", "/usr/bin/codex", &[]);
+    conflicting.assignee = Some("alice".to_string());
+    let mut nodes = BTreeMap::new();
+    nodes.insert("build".to_string(), conflicting);
+
+    let error = agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_native_assignee_conflict".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Conflicting graph".to_string(),
+            nodes,
+        },
+    )
+    .await
+    .expect_err("assignee and execution are mutually exclusive");
+    assert!(
+        matches!(&error, agentd_store::StoreError::Invariant(message)
+            if message.contains("assignee") && message.contains("execution")),
         "expected an invariant naming both fields, got: {error}"
     );
 }

@@ -778,37 +778,113 @@ fn parse_execution_spec(
 /// Permanent idempotency key for a node's durable-queue enqueue. Deriving it
 /// from the graph and node ids (never from a fresh ULID) is what makes a
 /// replayed advance return the existing queue row instead of a second one.
+/// The graph id is length-prefixed to keep the key injective: a plain
+/// `{graph_id}-{node_id}` join collides for graph "a-b" + node "c" against
+/// graph "a" + node "b-c", and a request-id collision is a permanent denial
+/// (the losing node's enqueue fails the payload-equality check forever).
 fn node_execution_request_id(graph_id: &str, node_id: &str) -> String {
-    format!("task-graph-{graph_id}-{node_id}")
+    format!("task-graph-{}-{graph_id}-{node_id}", graph_id.len())
+}
+
+/// The committed link between a graph node and its execution task. `created_at`
+/// is load-bearing: it is the enqueue's timestamp, so a replayed enqueue is an
+/// exact replay rather than a payload-mismatch `Conflict`.
+struct NodeExecutionLink {
+    execution_task_id: String,
+    created_at: i64,
 }
 
 async fn existing_node_execution(
     pool: &SqlitePool,
     graph_id: &str,
     node_id: &str,
-) -> Result<Option<String>, StoreError> {
-    let existing: Option<String> = sqlx::query_scalar(
-        "SELECT execution_task_id FROM task_graph_node_executions \
+) -> Result<Option<NodeExecutionLink>, StoreError> {
+    let existing: Option<(String, i64)> = sqlx::query_as(
+        "SELECT execution_task_id, created_at FROM task_graph_node_executions \
          WHERE graph_id = ? AND node_id = ?",
     )
     .bind(graph_id)
     .bind(node_id)
     .fetch_optional(pool)
     .await?;
-    Ok(existing)
+    Ok(
+        existing.map(|(execution_task_id, created_at)| NodeExecutionLink {
+            execution_task_id,
+            created_at,
+        }),
+    )
+}
+
+/// Whether the task already has a queue row in any state. Terminal queue rows
+/// are retained, so absence is unambiguous: the enqueue never landed.
+async fn node_execution_queued(
+    pool: &SqlitePool,
+    execution_task_id: &str,
+) -> Result<bool, StoreError> {
+    let found: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM execution_task_queue WHERE execution_task_id = ?")
+            .bind(execution_task_id)
+            .fetch_optional(pool)
+            .await?;
+    Ok(found.is_some())
+}
+
+/// Enqueue the node's execution task, keyed on the permanent request id and
+/// timestamped from the link row so every replay is byte-identical and the
+/// scheduler hands back the existing row instead of a `Conflict`.
+async fn enqueue_node_execution(
+    pool: &SqlitePool,
+    graph_id: &str,
+    node_id: &str,
+    link: &NodeExecutionLink,
+) -> Result<(), StoreError> {
+    agentd_core::ports::DurableSchedulerPort::enqueue(
+        &crate::durable_scheduler::SqliteDurableScheduler::new(pool.clone()),
+        &agentd_core::ports::SchedulerEnqueueRequest {
+            request_id: node_execution_request_id(graph_id, node_id),
+            execution_task_id: agentd_core::types::TaskRunId::from_string(
+                link.execution_task_id.clone(),
+            ),
+            max_attempts: 3,
+            available_at: link.created_at,
+            enqueued_at: link.created_at,
+        },
+    )
+    .await
+    .map_err(|error| enqueue_failed(node_id, &error))?;
+    Ok(())
+}
+
+/// A transient scheduler failure is reported as a `Conflict` so callers can
+/// retry the advance; anything else is a genuine invariant break. Neither
+/// message ends in `CONCURRENT_WRITE_SUFFIX`, so the graph write-retry wrapper
+/// does not swallow either one.
+fn enqueue_failed(node_id: &str, error: &agentd_core::ports::DurableSchedulerError) -> StoreError {
+    match error {
+        agentd_core::ports::DurableSchedulerError::Unavailable(_) => StoreError::Conflict(format!(
+            "enqueue node '{node_id}' unavailable, retry: {error}"
+        )),
+        _ => StoreError::Invariant(format!("enqueue node '{node_id}': {error}")),
+    }
 }
 
 /// Create (or reuse) the node's execution task and enqueue it for a native
 /// worker. Ordering is deliberate: the link row is written before the enqueue
 /// so a crash can at worst leak an un-enqueued `task_runs` row, never a second
-/// queue entry for the same node.
+/// queue entry for the same node. That leak is then healed here — a link row
+/// with no queue row means the enqueue never landed, and the replay below is
+/// exact, so it either creates the missing row or returns the one that raced
+/// in.
 async fn dispatch_native_node(
     pool: &SqlitePool,
     graph_id: &str,
     node: &AgentChatTaskGraphNode,
 ) -> Result<String, StoreError> {
-    if let Some(execution_task_id) = existing_node_execution(pool, graph_id, &node.id).await? {
-        return Ok(execution_task_id);
+    if let Some(link) = existing_node_execution(pool, graph_id, &node.id).await? {
+        if !node_execution_queued(pool, &link.execution_task_id).await? {
+            enqueue_node_execution(pool, graph_id, &node.id, &link).await?;
+        }
+        return Ok(link.execution_task_id);
     }
     let execution = node
         .execution
@@ -824,6 +900,7 @@ async fn dispatch_native_node(
         &spec,
     )
     .await?;
+    let created_at = now_unix();
     sqlx::query(
         "INSERT INTO task_graph_node_executions \
          (graph_id, node_id, execution_task_id, run_id, settled, created_at) \
@@ -833,30 +910,19 @@ async fn dispatch_native_node(
     .bind(&node.id)
     .bind(task_id.as_str())
     .bind(run_id.as_str())
-    .bind(now_unix())
+    .bind(created_at)
     .execute(pool)
     .await?;
-    // A concurrent advance may have won the insert; the winner's task id is
-    // the one that gets enqueued.
-    let execution_task_id = existing_node_execution(pool, graph_id, &node.id)
+    // A concurrent advance may have won the insert; the winner's row is the one
+    // that gets enqueued, timestamps included.
+    let link = existing_node_execution(pool, graph_id, &node.id)
         .await?
-        .unwrap_or_else(|| task_id.as_str().to_string());
-    let observed_at = now_unix();
-    agentd_core::ports::DurableSchedulerPort::enqueue(
-        &crate::durable_scheduler::SqliteDurableScheduler::new(pool.clone()),
-        &agentd_core::ports::SchedulerEnqueueRequest {
-            request_id: node_execution_request_id(graph_id, &node.id),
-            execution_task_id: agentd_core::types::TaskRunId::from_string(
-                execution_task_id.clone(),
-            ),
-            max_attempts: 3,
-            available_at: observed_at,
-            enqueued_at: observed_at,
-        },
-    )
-    .await
-    .map_err(|error| StoreError::Invariant(format!("enqueue node '{}': {error}", node.id)))?;
-    Ok(execution_task_id)
+        .unwrap_or(NodeExecutionLink {
+            execution_task_id: task_id.as_str().to_string(),
+            created_at,
+        });
+    enqueue_node_execution(pool, graph_id, &node.id, &link).await?;
+    Ok(link.execution_task_id)
 }
 
 fn dispatch_message(
@@ -1215,9 +1281,16 @@ fn validate_graph_nodes(
                 node.id
             )));
         }
+        // Native execution wins over both routing inputs, so accepting either
+        // alongside it would silently drop what the caller asked for.
         if node.role.is_some() && node.execution.is_some() {
             return Err(StoreError::Invariant(format!(
                 "node '{id}' cannot set both role and execution"
+            )));
+        }
+        if clean_text(Some(node.assignee.clone())).is_some() && node.execution.is_some() {
+            return Err(StoreError::Invariant(format!(
+                "node '{id}' cannot set both assignee and execution"
             )));
         }
         if clean_text(Some(node.assignee.clone())).is_none()
@@ -1229,6 +1302,8 @@ fn validate_graph_nodes(
             )));
         }
         if let Some(execution) = node.execution.as_ref() {
+            // Re-validated on every write, so specs already stored are subject
+            // to any future tightening of `NativeExecutionSpec::validate`.
             parse_execution_spec(id, execution)?;
         }
         required(node.description.clone(), "node description required")?;
