@@ -1488,6 +1488,23 @@ impl RunHost for ProductionRunHost {
         )
     }
 
+    async fn get_agent_profile(&self, name: &str) -> Result<Option<serde_json::Value>, CoreError> {
+        Ok(agent_repo::get_agent_profile(self.store.pool(), name).await?)
+    }
+
+    async fn update_agent_profile(
+        &self,
+        name: &str,
+        patch: serde_json::Value,
+        replace: bool,
+    ) -> Result<Option<SurfaceAgentRecord>, CoreError> {
+        Ok(
+            agent_repo::update_agent_profile(self.store.pool(), name, patch, replace)
+                .await?
+                .map(surface_agent_record),
+        )
+    }
+
     async fn heartbeat_agent(
         &self,
         name: &str,

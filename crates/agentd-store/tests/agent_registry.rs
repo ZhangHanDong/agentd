@@ -495,3 +495,78 @@ async fn agent_import_rejects_a_blank_name() {
     .expect_err("blank name must be rejected");
     assert!(error.to_string().contains("agent name required"));
 }
+
+#[tokio::test]
+async fn agent_profile_reads_back_and_patches_by_merge_or_replace() {
+    let (store, _dir) = open_temp().await;
+    agent_repo::register_agent(
+        store.pool(),
+        agent_repo::RegisterAgent {
+            name: "codex-prof".to_string(),
+            role: None,
+            capability: None,
+            runtime: Some(text("codex")),
+            model: None,
+            tmux_target: None,
+            home_dir: None,
+            workdir: None,
+            state_dir: None,
+            server: None,
+            runtime_profile: json!({ "primary": { "framework": "codex" }, "identity": "Terse" }),
+        },
+    )
+    .await
+    .expect("register");
+
+    let profile = agent_repo::get_agent_profile(store.pool(), "codex-prof")
+        .await
+        .expect("read")
+        .expect("agent exists");
+    assert_eq!(profile["primary"]["framework"], "codex");
+    assert_eq!(profile["identity"], "Terse");
+
+    let merged = agent_repo::update_agent_profile(
+        store.pool(),
+        "codex-prof",
+        json!({ "extraArgs": ["--json"] }),
+        false,
+    )
+    .await
+    .expect("merge patch")
+    .expect("agent exists");
+    assert_eq!(merged.runtime_profile["identity"], "Terse");
+    assert_eq!(merged.runtime_profile["extraArgs"][0], "--json");
+
+    let replaced = agent_repo::update_agent_profile(
+        store.pool(),
+        "codex-prof",
+        json!({ "primary": { "framework": "claude" } }),
+        true,
+    )
+    .await
+    .expect("replace patch")
+    .expect("agent exists");
+    assert_eq!(replaced.runtime_profile["primary"]["framework"], "claude");
+    assert_eq!(replaced.runtime_profile.get("identity"), None);
+
+    assert!(
+        agent_repo::get_agent_profile(store.pool(), "ghost")
+            .await
+            .expect("read missing")
+            .is_none()
+    );
+
+    let error = agent_repo::update_agent_profile(
+        store.pool(),
+        "codex-prof",
+        json!(["not an object"]),
+        false,
+    )
+    .await
+    .expect_err("non-object profile must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("runtime profile must be a JSON object")
+    );
+}

@@ -108,6 +108,65 @@ pub async fn update_agent_identity(
     get_agent(pool, &name).await
 }
 
+/// Read one agent's runtime profile document. `None` means unknown agent.
+///
+/// # Errors
+/// [`StoreError::Invariant`] for a blank name, [`StoreError::Sqlx`] on a
+/// database failure.
+pub async fn get_agent_profile(pool: &SqlitePool, name: &str) -> Result<Option<Value>, StoreError> {
+    Ok(get_agent(pool, name)
+        .await?
+        .map(|agent| agent.runtime_profile))
+}
+
+/// Patch one agent's runtime profile. `replace = false` merges the patch over
+/// the stored document at the top level; `replace = true` swaps the document
+/// wholesale. `None` means unknown agent.
+///
+/// # Errors
+/// [`StoreError::Invariant`] for a blank name or a non-object patch,
+/// [`StoreError::Conflict`] if the row changed concurrently,
+/// [`StoreError::Sqlx`] on a database failure.
+pub async fn update_agent_profile(
+    pool: &SqlitePool,
+    name: &str,
+    patch: Value,
+    replace: bool,
+) -> Result<Option<AgentRecord>, StoreError> {
+    let name = normalize_name(name)?;
+    if !patch.is_object() {
+        return Err(StoreError::Invariant(
+            "runtime profile must be a JSON object".to_string(),
+        ));
+    }
+    let Some(agent) = get_agent(pool, &name).await? else {
+        return Ok(None);
+    };
+    let next = if replace {
+        patch
+    } else {
+        let existing_text = serde_json::to_string(&agent.runtime_profile)?;
+        merge_runtime_profile(&existing_text, &patch)
+    };
+    let next_text = serde_json::to_string(&next)?;
+    let now = now_unix();
+    let updated = sqlx::query(
+        "UPDATE agents SET runtime_profile = ?, updated_at = ? WHERE name = ? OR id = ?",
+    )
+    .bind(next_text)
+    .bind(now)
+    .bind(&name)
+    .bind(&name)
+    .execute(pool)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(StoreError::Conflict(format!(
+            "agent '{name}' changed concurrently"
+        )));
+    }
+    get_agent(pool, &name).await
+}
+
 pub async fn register_agent(
     pool: &SqlitePool,
     input: RegisterAgent,
