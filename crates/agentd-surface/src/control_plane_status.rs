@@ -4,7 +4,7 @@
 //! status is terminal. Collapsing variants onto one status is what made
 //! transient database contention look like a permanent worker failure.
 
-use agentd_core::ports::{TaskLeaseError, WorkerFleetError};
+use agentd_core::ports::{ProjectBindingError, TaskLeaseError, WorkerFleetError};
 use axum::http::StatusCode;
 
 /// The HTTP status a control-plane port error maps to. Implemented in this
@@ -37,10 +37,23 @@ impl ControlPlaneErrorStatus for TaskLeaseError {
     }
 }
 
+impl ControlPlaneErrorStatus for ProjectBindingError {
+    fn http_status(&self) -> StatusCode {
+        match self {
+            Self::Invalid(_) => StatusCode::BAD_REQUEST,
+            Self::NotFound(_) => StatusCode::NOT_FOUND,
+            Self::Conflict(_) => StatusCode::CONFLICT,
+            Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::ControlPlaneErrorStatus;
-    use agentd_core::ports::{TaskLeaseError, TaskLeaseRejectionReason, WorkerFleetError};
+    use agentd_core::ports::{
+        ProjectBindingError, TaskLeaseError, TaskLeaseRejectionReason, WorkerFleetError,
+    };
     use axum::http::StatusCode;
 
     #[test]
@@ -87,6 +100,26 @@ mod tests {
         );
         assert_eq!(
             TaskLeaseError::Unavailable("busy".into()).http_status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[test]
+    fn project_binding_error_variants_map_to_distinct_statuses() {
+        assert_eq!(
+            ProjectBindingError::Invalid("bad".into()).http_status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            ProjectBindingError::NotFound("gone".into()).http_status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            ProjectBindingError::Conflict("taken".into()).http_status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            ProjectBindingError::Unavailable("busy".into()).http_status(),
             StatusCode::SERVICE_UNAVAILABLE
         );
     }

@@ -203,6 +203,18 @@ pub fn daemon_native_runtime_router(store: &SqliteStore, token: Option<String>) 
     native_runtime_router(control, auth)
 }
 
+/// Mount the operator project-binding transport over the daemon's own pool.
+pub fn daemon_project_binding_router(store: &SqliteStore, token: Option<String>) -> Router {
+    let bindings = Arc::new(
+        agentd_store::project_binding_repo::SqliteProjectBindingStore::new(store.pool().clone()),
+    );
+    let auth = AuthConfig {
+        api_token: token,
+        ..AuthConfig::default()
+    };
+    agentd_surface::project_binding_http::project_binding_router(bindings, auth)
+}
+
 pub fn recovery_router(service: Arc<WorkerFleetService>, token: String) -> Router {
     Router::new()
         .route("/api/runtime/recover", post(register_codex_recovery))
@@ -1505,6 +1517,10 @@ pub async fn serve(config: DaemonConfig) -> Result<(), Box<dyn std::error::Error
         )
     };
     let app = app.merge(daemon_native_runtime_router(
+        &host_store,
+        auth.api_token.clone(),
+    ));
+    let app = app.merge(daemon_project_binding_router(
         &host_store,
         auth.api_token.clone(),
     ));
