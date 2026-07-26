@@ -1123,13 +1123,82 @@ fn parse_task_graph(key: &str, value: &Value) -> Result<Option<ImportTaskGraph>,
     if id.trim().is_empty() {
         return Ok(None);
     }
+    // Project into the live `AgentChatTaskGraphRecord` shape rather than
+    // storing agent-chat's JSON verbatim: every read of `raw_json` is a typed
+    // deserialization, so a graph that keeps agent-chat's optional-field
+    // conventions would be permanently unreadable after import.
+    let Some(normalized) = normalize_imported_task_graph(&id, value) else {
+        return Ok(None);
+    };
     Ok(Some(ImportTaskGraph {
         id,
         owner: string_field(object, "owner"),
         label: string_field(object, "label"),
         status: string_field(object, "status"),
-        raw_json: serde_json::to_string(value)?,
+        raw_json: serde_json::to_string(&normalized)?,
     }))
+}
+
+/// Fill the fields the live task-graph record requires but agent-chat treats as
+/// optional. Returns `None` when the graph cannot be made live (no usable
+/// nodes), in which case the caller counts it as skipped.
+pub fn normalize_imported_task_graph(id: &str, value: &Value) -> Option<Value> {
+    let object = value.as_object()?;
+    let text = |key: &str, fallback: &str| -> String {
+        object
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map_or_else(|| fallback.to_string(), str::to_string)
+    };
+    let created_at = text("createdAt", "0");
+    let updated_at = text("updatedAt", &created_at);
+    let mut nodes = serde_json::Map::new();
+    for (node_key, node_value) in object.get("nodes").and_then(Value::as_object)? {
+        let Some(node_object) = node_value.as_object() else {
+            continue;
+        };
+        let node_id = node_object
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(node_key.as_str())
+            .to_string();
+        let mut node = node_object.clone();
+        node.insert("id".to_string(), Value::String(node_id.clone()));
+        node.entry("assignee")
+            .or_insert_with(|| Value::String(String::new()));
+        node.entry("description")
+            .or_insert_with(|| Value::String(String::new()));
+        node.entry("status")
+            .or_insert_with(|| Value::String("pending".to_string()));
+        if let Some(depends_on) = node.remove("dependsOn") {
+            node.entry("depends_on").or_insert(depends_on);
+        }
+        node.entry("depends_on")
+            .or_insert_with(|| Value::Array(Vec::new()));
+        nodes.insert(node_id, Value::Object(node));
+    }
+    if nodes.is_empty() {
+        return None;
+    }
+    let mut graph = serde_json::Map::new();
+    graph.insert("id".to_string(), Value::String(id.to_string()));
+    graph.insert("owner".to_string(), Value::String(text("owner", "unknown")));
+    graph.insert("label".to_string(), Value::String(text("label", id)));
+    graph.insert(
+        "status".to_string(),
+        Value::String(text("status", "active")),
+    );
+    graph.insert("createdAt".to_string(), Value::String(created_at));
+    graph.insert("updatedAt".to_string(), Value::String(updated_at));
+    if let Some(completed_at) = object.get("completedAt").filter(|value| !value.is_null()) {
+        graph.insert("completedAt".to_string(), completed_at.clone());
+    }
+    graph.insert("nodes".to_string(), Value::Object(nodes));
+    Some(Value::Object(graph))
 }
 
 fn parse_cursors(value: &Value) -> Result<Vec<ImportCursor>, StoreError> {

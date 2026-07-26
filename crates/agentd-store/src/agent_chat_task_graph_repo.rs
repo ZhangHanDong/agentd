@@ -265,11 +265,11 @@ pub async fn list_graphs(
         .fetch_all(pool)
         .await?;
     let status = status.and_then(|value| clean_text(Some(value.to_string())));
+    // A legacy row that predates normalization must not take the whole listing
+    // down with it; `get_graph` still surfaces the parse error for that id.
     let graphs = rows
         .iter()
-        .map(row_to_graph)
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
+        .filter_map(|row| row_to_graph(row).ok())
         .filter(|graph| {
             status
                 .as_deref()

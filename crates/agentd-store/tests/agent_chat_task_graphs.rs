@@ -1279,3 +1279,33 @@ async fn deleting_a_graph_settles_its_open_node_executions() {
         .expect("graph present");
     assert_eq!(graph.nodes["build"].status, "cancelled");
 }
+
+#[tokio::test]
+async fn one_unreadable_legacy_row_does_not_break_the_listing() {
+    let (store, _dir) = open_store().await;
+    agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_good".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Good graph".to_string(),
+            nodes: chain_nodes(),
+        },
+    )
+    .await
+    .expect("create graph");
+    sqlx::query(
+        "INSERT INTO agent_chat_task_graphs \
+         (id, owner, label, status, raw_json, record_version, imported_at) \
+         VALUES ('graph_broken', 'alex', 'Broken', 'active', '{\"nodes\":', 1, 0)",
+    )
+    .execute(store.pool())
+    .await
+    .expect("insert unreadable row");
+
+    let listed = agent_chat_task_graph_repo::list_graphs(store.pool(), None)
+        .await
+        .expect("listing tolerates one unreadable row");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, "graph_good");
+}

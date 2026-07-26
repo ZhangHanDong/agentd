@@ -328,6 +328,61 @@ async fn agent_chat_task_import_rejects_malformed_tasks_without_partial_writes()
 }
 
 #[tokio::test]
+async fn imported_agent_chat_task_graphs_are_readable_and_advanceable() {
+    let source = tempfile::tempdir().expect("source dir");
+    write_file(&source.path().join("data/tasks.json"), "[]");
+    write_file(
+        &source.path().join("data/task_graphs.json"),
+        r#"{
+  "graph_legacy": {
+    "owner": "alex",
+    "label": "Legacy graph",
+    "status": "active",
+    "nodes": {
+      "n1": {"assignee": "codex-importer", "description": "First"},
+      "n2": {"assignee": "codex-importer", "description": "Second", "dependsOn": ["n1"]}
+    }
+  }
+}
+"#,
+    );
+    let (store, _target) = open_store().await;
+
+    let report = agent_chat_import::import_tasks_from_agent_chat(
+        store.pool(),
+        source.path(),
+        AgentChatTaskImportOptions {
+            mode: AgentChatImportMode::Execute,
+        },
+    )
+    .await
+    .expect("task import succeeds");
+    assert_eq!(report.task_graphs.imported, 1);
+
+    let graph = agentd_store::agent_chat_task_graph_repo::get_graph(store.pool(), "graph_legacy")
+        .await
+        .expect("read imported graph")
+        .expect("graph present");
+    assert_eq!(graph.owner, "alex");
+    assert_eq!(graph.nodes["n1"].status, "pending");
+    assert_eq!(graph.nodes["n2"].depends_on, vec!["n1".to_string()]);
+    assert!(!graph.created_at.is_empty());
+
+    let listed = agentd_store::agent_chat_task_graph_repo::list_graphs(store.pool(), None)
+        .await
+        .expect("list graphs");
+    assert_eq!(listed.len(), 1);
+
+    let advanced =
+        agentd_store::agent_chat_task_graph_repo::advance_graph(store.pool(), "graph_legacy")
+            .await
+            .expect("advance imported graph")
+            .expect("graph present");
+    assert_eq!(advanced.nodes["n1"].status, "dispatched");
+    assert_eq!(advanced.nodes["n2"].status, "pending");
+}
+
+#[tokio::test]
 async fn supported_state_migration_aggregates_agents_messages_tasks_and_cursors() {
     let source = valid_message_checkout();
     let (store, _target) = open_store().await;
