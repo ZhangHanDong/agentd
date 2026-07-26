@@ -1418,6 +1418,7 @@ fn parity_capability_map_records_p227_live_task_graph_progress() {
             "service cutover",
             "rollback",
             "token provisioning",
+            "M3 Plan C",
         ] {
             assert!(
                 row.decision.contains(expected),
@@ -1426,6 +1427,26 @@ fn parity_capability_map_records_p227_live_task_graph_progress() {
                 row.decision
             );
         }
+    }
+
+    for expected in [
+        "record_version",
+        "task_graph_node_executions",
+        "settle_node_executions",
+    ] {
+        assert!(
+            task_graph.decision.contains(expected),
+            "task_graph_coordination decision should mention {expected}: {}",
+            task_graph.decision
+        );
+    }
+
+    for expected in ["normaliz", "imported"] {
+        assert!(
+            migration.decision.contains(expected),
+            "migration_shadow_cutover decision should mention {expected}: {}",
+            migration.decision
+        );
     }
 
     for expected in [
