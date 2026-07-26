@@ -37,6 +37,7 @@ pub mod outcome_repo;
 pub mod paths;
 pub mod pool;
 pub mod project_authority_repo;
+pub mod project_binding_repo;
 pub mod project_repo;
 pub mod relay_repo;
 pub mod review_repo;

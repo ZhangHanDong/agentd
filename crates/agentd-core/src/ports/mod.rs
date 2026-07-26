@@ -12,6 +12,7 @@ pub mod execution_evidence;
 pub mod mempal;
 pub mod native_runtime;
 pub mod project_authority;
+pub mod project_binding;
 pub mod security;
 pub mod store;
 pub mod task_lease;
@@ -47,6 +48,9 @@ pub use native_runtime::{
 pub use project_authority::{
     ProjectAuthorityAvailability, ProjectAuthorityError, ProjectAuthorityHealth,
     ProjectAuthorityMode, ProjectAuthorityPort, ProjectSnapshotResolveRequest,
+};
+pub use project_binding::{
+    ProjectBindingError, ProjectBindingPort, ProjectRoomRepoBinding, ProjectRoomRepoBindingRequest,
 };
 pub use security::{
     AuthenticatedWorkload, CapabilityAdmission, ExecutionSecurityScope, MtlsWorkloadVerifier,
