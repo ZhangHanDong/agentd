@@ -66,6 +66,10 @@ pub enum ProtectedResource {
     Tool(String),
 }
 
+fn unspecified_binding() -> String {
+    "unspecified".to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionSecurityScope {
     pub authority_key: AuthorityKey,
@@ -77,6 +81,14 @@ pub struct ExecutionSecurityScope {
     pub lease_claim: TaskLeaseClaim,
     pub sandbox_profile: String,
     pub egress_profile: String,
+    // serde-defaulted for wire compatibility: an older daemon's scope object
+    // lacks these keys and must still deserialize on a newer worker. The
+    // default is the "unspecified" sentinel, not "" — evidence validation
+    // rejects empty binding fields.
+    #[serde(default = "unspecified_binding")]
+    pub target_repository_id: String,
+    #[serde(default = "unspecified_binding")]
+    pub target_base_commit: String,
     pub policy_revocation_epoch: u64,
     pub valid_from: i64,
     pub valid_until: i64,

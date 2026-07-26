@@ -225,6 +225,7 @@ pub fn recovery_router(service: Arc<WorkerFleetService>, token: String) -> Route
             "/api/scheduler/tasks/:task_id/explain",
             get(explain_scheduler_task),
         )
+        .route("/api/fleet/workers", get(fleet_inventory))
         .with_state(RecoveryApiState { service, token })
 }
 
@@ -327,6 +328,47 @@ async fn explain_scheduler_task(
         )
             .into_response(),
     }
+}
+
+/// Operator-facing fleet inventory: every current worker incarnation with
+/// its zone, declared capacity, and current active-lease count.
+async fn fleet_inventory(State(state): State<RecoveryApiState>, headers: HeaderMap) -> Response {
+    if let Some(response) = recovery_unauthorized(&state, &headers) {
+        return response;
+    }
+    let pool = state.service.store_pool();
+    let incarnations = match agentd_store::worker_repo::list_current_incarnations(&pool).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": error.to_string() })),
+            )
+                .into_response();
+        }
+    };
+    let mut workers = Vec::with_capacity(incarnations.len());
+    for incarnation in incarnations {
+        let open_leases: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM execution_task_leases \
+             WHERE worker_incarnation_id = ? AND status = 'active'",
+        )
+        .bind(incarnation.id.as_str())
+        .fetch_one(&pool)
+        .await
+        .unwrap_or(0);
+        workers.push(json!({
+            "worker_id": incarnation.worker_id.as_str(),
+            "incarnation_id": incarnation.id.as_str(),
+            "network_zone": incarnation.network_zone,
+            "capabilities": incarnation.capabilities,
+            "capacity": incarnation.capacity,
+            "open_leases": open_leases,
+            "daemon_version": incarnation.daemon_version,
+            "host_name": incarnation.host_name,
+        }));
+    }
+    (StatusCode::OK, Json(json!({ "workers": workers }))).into_response()
 }
 
 async fn cutover_inventory(State(state): State<RecoveryApiState>, headers: HeaderMap) -> Response {
@@ -1004,6 +1046,9 @@ impl WorkerFleetService {
         )
         .await?
         .map(|attempt| attempt.id);
+        let (target_repository_id, target_base_commit) =
+            resolve_target_repository_binding(self.native_worker.store().pool(), &session.snapshot)
+                .await;
         let links = ExecutionEvidenceLinks {
             execution_run_id: run_id,
             execution_task_id: Some(grant.execution_task_id.clone()),
@@ -1017,8 +1062,8 @@ impl WorkerFleetService {
                 resource_version: session.snapshot.resource_version,
                 content_sha256: session.snapshot.content_sha256,
             },
-            target_repository_id: "unspecified".into(),
-            target_base_commit: "unspecified".into(),
+            target_repository_id,
+            target_base_commit,
         };
         // The attempt is the durable execution boundary. Deriving the artifact
         // id from it makes a reconnect/retry idempotent instead of publishing a
@@ -1099,6 +1144,34 @@ impl WorkerFleetService {
                 .await;
             }
         })
+    }
+}
+
+/// Resolve the target repository binding for a runtime session's
+/// project-authority snapshot, falling back to the "unspecified" sentinel
+/// when the snapshot cannot be found or declares no target repository.
+async fn resolve_target_repository_binding(
+    pool: &sqlx::SqlitePool,
+    snapshot: &agentd_store::runtime_session_repo::ExecutionSnapshotRef,
+) -> (String, String) {
+    let snapshot_ref = format!(
+        "{}:{}:{}:{}",
+        snapshot.authority_key,
+        snapshot.resource_kind,
+        snapshot.resource_id,
+        snapshot.resource_version
+    );
+    match agentd_store::project_authority_repo::get_snapshot(pool, &snapshot_ref).await {
+        Ok(snapshot) => snapshot.target_repository().map_or_else(
+            |_| ("unspecified".to_string(), "unspecified".to_string()),
+            |binding| {
+                (
+                    binding.repository_ref.resource_id().to_string(),
+                    binding.base_commit.clone(),
+                )
+            },
+        ),
+        Err(_) => ("unspecified".to_string(), "unspecified".to_string()),
     }
 }
 
@@ -1225,6 +1298,55 @@ pub async fn build_production_host(config: &DaemonConfig) -> Result<ProductionRu
     .with_tool_cwd(config.repo_dir.clone())
     .with_accept_workflow_change(config.accept_workflow_change)
     .with_worktree_allocator(Some(Box::new(worktree_pool))))
+}
+
+/// Which launch path production workflow dispatch uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchRoute {
+    /// Compose tmux (the default, legacy production launch path).
+    Tmux,
+    /// Enqueue into the durable scheduler queue for native workers to pull.
+    NativeQueue,
+}
+
+/// Select the production dispatch route from configuration. `NativeQueue` only
+/// when the operator opts in; otherwise tmux remains the launch path.
+#[must_use]
+pub fn production_dispatch_route(config: &DaemonConfig) -> DispatchRoute {
+    if config.native_dispatch {
+        DispatchRoute::NativeQueue
+    } else {
+        DispatchRoute::Tmux
+    }
+}
+
+/// Native launch primitive: attach the versioned execution spec to the task and
+/// enqueue it into the durable scheduler queue so an online native worker pulls
+/// and executes it — no tmux. This is the `NativeQueue` route's dispatch action.
+///
+/// # Errors
+/// [`CoreError`] if the spec cannot be persisted or the enqueue fails.
+pub async fn dispatch_task_to_fleet(
+    store: &SqliteStore,
+    task_id: &agentd_core::types::TaskRunId,
+    spec: &agentd_core::types::NativeExecutionSpec,
+    observed_at: i64,
+) -> Result<(), CoreError> {
+    use agentd_core::ports::{DurableSchedulerPort as _, Store as _};
+    store.set_task_execution_spec(task_id, spec).await?;
+    let scheduler =
+        agentd_store::durable_scheduler::SqliteDurableScheduler::new(store.pool().clone());
+    scheduler
+        .enqueue(&agentd_core::ports::SchedulerEnqueueRequest {
+            request_id: format!("dispatch-{}", task_id.as_str()),
+            execution_task_id: task_id.clone(),
+            max_attempts: 3,
+            available_at: observed_at,
+            enqueued_at: observed_at,
+        })
+        .await
+        .map_err(|error| CoreError::Backend(error.to_string()))?;
+    Ok(())
 }
 
 /// Run daemon boot-GC over the worktree pool while preserving worktrees that

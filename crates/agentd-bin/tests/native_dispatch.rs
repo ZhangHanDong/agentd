@@ -1,17 +1,13 @@
-//! M1 Task 5: the `agentd worker` remote execution loop end-to-end, exercised
-//! entirely over the authenticated daemon HTTP control plane (worker-fleet +
-//! native runtime + artifact upload/acknowledge).
-
-use std::os::unix::fs::PermissionsExt as _;
-
-use agentd_core::ports::Store as _;
+use agentd_bin::cli::DaemonConfig;
+use agentd_bin::daemon::{DispatchRoute, dispatch_task_to_fleet, production_dispatch_route};
+use agentd_core::ports::DurableSchedulerPort as _;
 use agentd_core::types::{
     AgentProfileId, AuthorityKey, CertificationPolicyVersionRef, FrozenSpecVersionRef,
-    MatrixRoomRef, NodeId, OfflineRecoveryPolicy, OrganizationRef, ProductWorkflowRef,
-    ProjectExecutionSnapshot, ProjectExecutionSnapshotRef, ProjectRef, ProjectRoomBindingRef,
-    QuotaPolicyVersionRef, RbacPolicyVersionRef, RepositoryBinding, RepositoryRef, RepositoryRole,
-    RequirementRef, RoomBinding, RoomBindingRole, RunId, RuntimeSessionId, TaskRunId, TeamRef,
-    WorkerId, WorkerIncarnationId,
+    MatrixRoomRef, NativeExecutionSpec, NodeId, OfflineRecoveryPolicy, OrganizationRef,
+    ProductWorkflowRef, ProjectExecutionSnapshot, ProjectExecutionSnapshotRef, ProjectRef,
+    ProjectRoomBindingRef, QuotaPolicyVersionRef, RbacPolicyVersionRef, RepositoryBinding,
+    RepositoryRef, RepositoryRole, RequirementRef, RoomBinding, RoomBindingRole, RunId,
+    RuntimeSessionId, TaskRunId, TeamRef, WorkerId, WorkerIncarnationId,
 };
 use agentd_store::agent_profile_repo::{self, AgentProfileCreate};
 use agentd_store::runtime_session_repo::{self, ExecutionSnapshotRef, RuntimeSessionCreate};
@@ -19,8 +15,70 @@ use agentd_store::worker_repo::{self, WorkerCreate, WorkerRegistration};
 use agentd_store::{SqliteStore, run_repo, task_repo};
 use serde_json::json;
 
+fn config_with_native_dispatch(native: bool) -> DaemonConfig {
+    let mut config = DaemonConfig::for_test();
+    config.native_dispatch = native;
+    config
+}
+
+#[tokio::test]
+async fn default_route_is_tmux_and_switch_selects_native_queue() {
+    assert_eq!(
+        production_dispatch_route(&config_with_native_dispatch(false)),
+        DispatchRoute::Tmux
+    );
+    assert_eq!(
+        production_dispatch_route(&config_with_native_dispatch(true)),
+        DispatchRoute::NativeQueue
+    );
+}
+
+#[tokio::test]
+async fn dispatch_task_to_fleet_enqueues_a_queued_row_with_spec() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteStore::connect(&dir.path().join("agentd.db"))
+        .await
+        .expect("connect");
+    let run_id = RunId::new();
+    run_repo::insert_run(store.pool(), &run_id, "workflow-sha")
+        .await
+        .expect("run");
+    let task_id = task_repo::insert_task_run(store.pool(), &run_id, &NodeId::parsed("impl"))
+        .await
+        .expect("task");
+    let spec = NativeExecutionSpec {
+        version: 1,
+        provider: "codex".into(),
+        program: "/usr/bin/codex".into(),
+        args: vec![],
+        cwd: None,
+        env: vec![],
+    };
+
+    dispatch_task_to_fleet(&store, &task_id, &spec, 100)
+        .await
+        .expect("dispatch");
+
+    let (status, provider): (String, Option<String>) = sqlx::query_as(
+        "SELECT q.status, json_extract(t.execution_spec_json, '$.provider') \
+         FROM execution_task_queue q JOIN task_runs t ON t.id = q.execution_task_id \
+         WHERE q.execution_task_id = ?",
+    )
+    .bind(task_id.as_str())
+    .fetch_one(store.pool())
+    .await
+    .expect("queue row");
+    assert_eq!(status, "queued");
+    assert_eq!(provider.as_deref(), Some("codex"));
+}
+
+/// M2 Plan B Task 6 exit-gate fixture: seeds a run + task + agent profile +
+/// worker + runtime session so a native worker can pull and execute a task
+/// that was queued via the production `dispatch_task_to_fleet` primitive
+/// (not a hand-written `enqueue`). Mirrors
+/// `crates/agentd-bin/tests/worker_main.rs::fixture()`.
 #[allow(dead_code)]
-struct Fixture {
+struct DispatchFixture {
     store: SqliteStore,
     _dir: tempfile::TempDir,
     run_id: RunId,
@@ -29,7 +87,7 @@ struct Fixture {
     incarnation_id: WorkerIncarnationId,
 }
 
-async fn fixture() -> Fixture {
+async fn dispatch_fixture() -> DispatchFixture {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = SqliteStore::connect(&dir.path().join("agentd.db"))
         .await
@@ -72,10 +130,10 @@ async fn fixture() -> Fixture {
         &worker_id,
         WorkerRegistration {
             id: incarnation_id.clone(),
-            daemon_version: "0.0.0-m1-t5".to_string(),
+            daemon_version: "0.0.0-m2-plan-b-t6".to_string(),
             host_name: "host-a".to_string(),
             network_zone: Some("dev".to_string()),
-            capabilities: json!({"runtime": ["codex"]}),
+            capabilities: json!({"runtime": ["codex", "claude-code"]}),
             capacity: 1,
         },
     )
@@ -99,7 +157,7 @@ async fn fixture() -> Fixture {
     )
     .await
     .expect("session");
-    Fixture {
+    DispatchFixture {
         store,
         _dir: dir,
         run_id,
@@ -109,13 +167,13 @@ async fn fixture() -> Fixture {
     }
 }
 
-async fn serve_daemon(store: SqliteStore, token: &str) -> String {
+async fn serve_dispatch_daemon(store: SqliteStore, token: &str) -> String {
     let fleet = std::sync::Arc::new(agentd_store::worker_fleet::SqliteWorkerFleet::new(
         store.pool().clone(),
     ));
     let artifacts = std::sync::Arc::new(
         agentd_store::content_store::LocalContentStore::new(
-            std::env::temp_dir().join(format!("agentd-m1-t5-artifacts-{}", std::process::id())),
+            std::env::temp_dir().join(format!("agentd-m2b-t6-artifacts-{}", std::process::id())),
         )
         .expect("content store"),
     );
@@ -154,8 +212,9 @@ async fn serve_daemon(store: SqliteStore, token: &str) -> String {
 /// Build a minimal, internally-consistent project execution snapshot whose
 /// `snapshot_ref` matches the fixture session's `specify:execution_snapshot:
 /// spec-1:v1` authority reference, so `SqliteWorkerFleet::pull` can resolve a
-/// security scope for the native grant.
-fn authority_snapshot() -> ProjectExecutionSnapshot {
+/// security scope for the native grant. Mirrors
+/// `crates/agentd-bin/tests/worker_main.rs::authority_snapshot()`.
+fn dispatch_authority_snapshot() -> ProjectExecutionSnapshot {
     let authority_key = AuthorityKey::new("specify").expect("authority key");
     let project_ref =
         ProjectRef::new(authority_key.clone(), "project-1", "7").expect("project ref");
@@ -224,16 +283,27 @@ fn authority_snapshot() -> ProjectExecutionSnapshot {
 }
 
 #[tokio::test]
-async fn worker_once_executes_a_dispatched_task_end_to_end() {
-    let fixture = fixture().await;
+async fn production_native_dispatch_is_executed_by_a_worker_without_tmux() {
+    use std::os::unix::fs::PermissionsExt;
 
-    // A "codex" provider shim that exits immediately; the execution spec's
-    // program must satisfy `provider_matches_program` (basename == provider).
+    let fixture = dispatch_fixture().await;
+    let store = fixture.store.clone();
+    let task_id = fixture.task_id.clone();
+    let session_id = fixture.session_id.clone();
+
+    agentd_store::project_authority_repo::record_snapshot(
+        store.pool(),
+        &dispatch_authority_snapshot(),
+    )
+    .await
+    .expect("record project authority snapshot");
+
+    // A codex shim that exits immediately (basename must equal the provider).
     let shim_dir = tempfile::tempdir().expect("shim dir");
     let shim = shim_dir.path().join("codex");
     std::fs::write(&shim, "#!/bin/sh\nexit 0\n").expect("write shim");
     std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    let spec = agentd_core::types::NativeExecutionSpec {
+    let spec = NativeExecutionSpec {
         version: 1,
         provider: "codex".into(),
         program: shim.to_string_lossy().into_owned(),
@@ -241,24 +311,20 @@ async fn worker_once_executes_a_dispatched_task_end_to_end() {
         cwd: Some(shim_dir.path().to_string_lossy().into_owned()),
         env: vec![],
     };
-    fixture
-        .store
-        .set_task_execution_spec(&fixture.task_id, &spec)
+
+    // Production dispatch decision: the switch routes to the native queue, and
+    // the native launch primitive enqueues the task. No tmux is involved.
+    assert_eq!(
+        production_dispatch_route(&config_with_native_dispatch(true)),
+        DispatchRoute::NativeQueue
+    );
+    dispatch_task_to_fleet(&store, &task_id, &spec, 100)
         .await
-        .expect("attach spec");
+        .expect("native dispatch");
 
-    // A native grant carries a security scope only once the daemon can
-    // resolve a project-authority snapshot for the session's snapshot ref.
-    agentd_store::project_authority_repo::record_snapshot(
-        fixture.store.pool(),
-        &authority_snapshot(),
-    )
-    .await
-    .expect("record project authority snapshot");
-
-    let base_url = serve_daemon(fixture.store.clone(), "worker-secret").await;
+    // A real native worker pulls the dispatched task over HTTP and executes it.
+    let base_url = serve_dispatch_daemon(store.clone(), "worker-secret").await;
     let worker_state = tempfile::tempdir().expect("worker state");
-
     let report = agentd_bin::worker_main::run_worker_once(
         &base_url,
         "worker-secret",
@@ -268,12 +334,26 @@ async fn worker_once_executes_a_dispatched_task_end_to_end() {
     )
     .await
     .expect("worker run");
-
     assert_eq!(report.executed, 1);
     assert_eq!(report.released, 1);
 
-    // The daemon-side session completed and an artifact was acknowledged.
-    let session = runtime_session_repo::get_session(fixture.store.pool(), &fixture.session_id)
+    // The worker's release marks the lease `released`; the durable scheduler's
+    // reconcile pass (normally run on the daemon's maintenance tick, see
+    // `worker_fleet_tick`) is what threads that into the queue row's terminal
+    // status. Run one pass here rather than waiting on the interval.
+    let scheduler =
+        agentd_store::durable_scheduler::SqliteDurableScheduler::new(store.pool().clone());
+    scheduler.reconcile(200).await.expect("reconcile");
+
+    // Daemon-side: the queue row completed and the session is Completed.
+    let (status,): (String,) =
+        sqlx::query_as("SELECT status FROM execution_task_queue WHERE execution_task_id = ?")
+            .bind(task_id.as_str())
+            .fetch_one(store.pool())
+            .await
+            .expect("queue row");
+    assert_eq!(status, "completed");
+    let session = runtime_session_repo::get_session(store.pool(), &session_id)
         .await
         .expect("session lookup")
         .expect("session");
@@ -281,76 +361,4 @@ async fn worker_once_executes_a_dispatched_task_end_to_end() {
         session.status,
         agentd_core::types::RuntimeSessionStatus::Completed
     );
-    let worker = agentd_bin::native_worker::AgentdWorker::new(fixture.store.clone());
-    let artifacts = worker
-        .list_artifacts_for_run(fixture.run_id.as_str())
-        .await
-        .expect("artifact listing");
-    assert!(
-        !artifacts.records.is_empty(),
-        "worker must acknowledge at least the transcript artifact"
-    );
-    // The security scope now carries the target repository binding, so the
-    // worker reports the real repository id and base commit from the
-    // project-authority snapshot instead of the "unspecified" sentinel.
-    for record in &artifacts.records {
-        assert_eq!(record.publish.links.target_repository_id, "repo-1");
-        assert_eq!(
-            record.publish.links.target_base_commit,
-            "0123456789abcdef0123456789abcdef01234567"
-        );
-    }
-}
-
-/// Opt-in real smoke (M1 exit gate): requires a real provider CLI.
-/// Run with: `AGENTD_REAL_WORKER_SMOKE=1` cargo test -p agentd-bin \
-///   --test `worker_main` `real_remote_worker_smoke` -- --ignored --nocapture
-#[tokio::test]
-#[ignore = "requires AGENTD_REAL_WORKER_SMOKE=1 and a real codex CLI"]
-async fn real_remote_worker_smoke() {
-    if std::env::var("AGENTD_REAL_WORKER_SMOKE").as_deref() != Ok("1") {
-        eprintln!("skipping: AGENTD_REAL_WORKER_SMOKE!=1");
-        return;
-    }
-    let codex = which_codex().expect("codex CLI on PATH");
-    let fixture = fixture().await;
-    let workdir = tempfile::tempdir().expect("workdir");
-    let spec = agentd_core::types::NativeExecutionSpec {
-        version: 1,
-        provider: "codex".into(),
-        program: codex,
-        args: vec![
-            "exec".into(),
-            "--json".into(),
-            "reply with the word done".into(),
-        ],
-        cwd: Some(workdir.path().to_string_lossy().into_owned()),
-        env: vec![],
-    };
-    fixture
-        .store
-        .set_task_execution_spec(&fixture.task_id, &spec)
-        .await
-        .expect("attach spec");
-    let base_url = serve_daemon(fixture.store.clone(), "worker-secret").await;
-    let state = tempfile::tempdir().expect("state");
-
-    let report = agentd_bin::worker_main::run_worker_once(
-        &base_url,
-        "worker-secret",
-        state.path(),
-        std::time::Duration::from_millis(200),
-        std::time::Duration::from_secs(600),
-    )
-    .await
-    .expect("real worker run");
-    assert_eq!(report.executed, 1);
-}
-
-fn which_codex() -> Option<String> {
-    let path = std::env::var("PATH").ok()?;
-    path.split(':')
-        .map(|dir| std::path::Path::new(dir).join("codex"))
-        .find(|candidate| candidate.is_file())
-        .map(|p| p.to_string_lossy().into_owned())
 }

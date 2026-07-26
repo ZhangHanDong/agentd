@@ -296,6 +296,13 @@ pub struct DaemonConfig {
     #[arg(long, global = true)]
     pub accept_workflow_change: bool,
 
+    /// Route production workflow dispatch to native workers through the durable
+    /// queue instead of composing tmux. Off by default; tmux stays the fallback.
+    /// Also settable via `AGENTD_NATIVE_DISPATCH` (applied in `main` after parsing,
+    /// since the workspace `clap` build does not enable the `env` feature).
+    #[arg(long, global = true)]
+    pub native_dispatch: bool,
+
     /// Tracing log level (`error`/`warn`/`info`/`debug`/`trace`).
     #[arg(long, default_value = "info", global = true)]
     pub log_level: String,
@@ -314,6 +321,25 @@ pub struct DaemonConfig {
 }
 
 impl DaemonConfig {
+    /// A minimal `DaemonConfig` with harmless defaults, for tests that need to
+    /// construct one without going through `clap` CLI parsing.
+    #[must_use]
+    pub fn for_test() -> Self {
+        Self {
+            db_path: PathBuf::from("agentd.db"),
+            port: 8787,
+            workflows_dir: PathBuf::from("workflows"),
+            repo_dir: PathBuf::from("."),
+            worktree_base: PathBuf::from(".agentd/worktrees"),
+            accept_workflow_change: false,
+            native_dispatch: false,
+            log_level: "info".to_string(),
+            api_token: None,
+            agent_tokens: Vec::new(),
+            agent_token_mode: "audit".to_string(),
+        }
+    }
+
     #[must_use]
     pub fn auth_config(&self) -> AuthConfig {
         let api_token = clean_token(self.api_token.as_deref()).or_else(|| {

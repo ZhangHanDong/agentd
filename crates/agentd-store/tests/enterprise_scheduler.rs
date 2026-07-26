@@ -1,6 +1,6 @@
 use agentd_core::ports::{
     DurableSchedulerError, DurableSchedulerPort, SchedulerAcquireRequest, SchedulerEnqueueRequest,
-    TaskLeaseCloseRequest, TaskLeasePort,
+    Store, TaskLeaseCloseRequest, TaskLeasePort,
 };
 use agentd_core::types::{NodeId, RunId, SchedulerQueueStatus, TaskRunId, WorkerIncarnationId};
 use agentd_store::durable_scheduler::SqliteDurableScheduler;
@@ -53,6 +53,7 @@ async fn fixture() -> Fixture {
             host_name: "host-a".to_string(),
             network_zone: Some("dev".to_string()),
             capabilities: json!({"runtime": ["codex"]}),
+            capacity: 1,
         },
     )
     .await
@@ -110,6 +111,54 @@ fn acquire_request(
         observed_at,
         expires_at,
     }
+}
+
+async fn attach_spec(fixture: &Fixture, provider: &str) {
+    let spec = agentd_core::types::NativeExecutionSpec {
+        version: 1,
+        provider: provider.to_string(),
+        program: format!("/usr/bin/{provider}"),
+        args: vec![],
+        cwd: None,
+        env: vec![],
+    };
+    fixture
+        .store
+        .set_task_execution_spec(&fixture.task_id, &spec)
+        .await
+        .expect("attach spec");
+}
+
+/// Register a second worker+incarnation with the given capabilities and
+/// capacity, returning its incarnation id. Mirrors the fixture's seeding.
+async fn register_worker(fixture: &Fixture, runtime: &str, capacity: u32) -> WorkerIncarnationId {
+    let worker_id = agentd_core::types::WorkerId::new();
+    worker_repo::create_worker(
+        fixture.store.pool(),
+        WorkerCreate {
+            id: worker_id.clone(),
+            trust_domain: "corp-coding".to_string(),
+            labels: json!({}),
+        },
+    )
+    .await
+    .expect("worker");
+    let incarnation_id = WorkerIncarnationId::new();
+    worker_repo::register_incarnation(
+        fixture.store.pool(),
+        &worker_id,
+        WorkerRegistration {
+            id: incarnation_id.clone(),
+            daemon_version: "0.0.0-test".to_string(),
+            host_name: "host-b".to_string(),
+            network_zone: Some("dev".to_string()),
+            capabilities: json!({ "runtime": [runtime] }),
+            capacity,
+        },
+    )
+    .await
+    .expect("incarnation");
+    incarnation_id
 }
 
 #[tokio::test]
@@ -498,4 +547,139 @@ async fn acquire_returns_none_when_only_closed_tasks_queued() {
         .expect("explain")
         .expect("row");
     assert_eq!(explanation.queue.status, SchedulerQueueStatus::Cancelled);
+}
+
+#[tokio::test]
+async fn acquire_skips_task_whose_runtime_the_worker_cannot_run() {
+    let fixture = fixture().await;
+    let scheduler = scheduler_for(&fixture);
+    attach_spec(&fixture, "codex").await;
+    scheduler
+        .enqueue(&enqueue_request(&fixture, "rq-1", 10))
+        .await
+        .expect("enqueue");
+    // A worker that only runs claude-code must not be granted the codex task.
+    let claude_only = register_worker(&fixture, "claude-code", 4).await;
+    let none = scheduler
+        .acquire(&SchedulerAcquireRequest {
+            request_id: "acq-claude".to_string(),
+            worker_incarnation_id: claude_only,
+            observed_at: 20,
+            expires_at: 80,
+        })
+        .await
+        .expect("acquire");
+    assert!(none.is_none(), "capability mismatch must not grant");
+    // The fixture's codex-capable incarnation still gets it.
+    let grant = scheduler
+        .acquire(&acquire_request(&fixture, "acq-codex", 20, 80))
+        .await
+        .expect("acquire")
+        .expect("codex worker eligible");
+    assert_eq!(grant.execution_task_id, fixture.task_id);
+}
+
+#[tokio::test]
+async fn acquire_grants_task_without_declared_runtime_to_any_worker() {
+    let fixture = fixture().await;
+    let scheduler = scheduler_for(&fixture);
+    // No execution spec attached -> provider NULL -> unconstrained.
+    scheduler
+        .enqueue(&enqueue_request(&fixture, "rq-1", 10))
+        .await
+        .expect("enqueue");
+    let any_worker = register_worker(&fixture, "claude-code", 4).await;
+    let grant = scheduler
+        .acquire(&SchedulerAcquireRequest {
+            request_id: "acq-1".to_string(),
+            worker_incarnation_id: any_worker,
+            observed_at: 20,
+            expires_at: 80,
+        })
+        .await
+        .expect("acquire")
+        .expect("unconstrained task grantable");
+    assert_eq!(grant.execution_task_id, fixture.task_id);
+}
+
+#[tokio::test]
+async fn acquire_refuses_to_exceed_worker_capacity() {
+    let fixture = fixture().await;
+    let scheduler = scheduler_for(&fixture);
+    // capacity 1 incarnation (fixture default). Enqueue two tasks. The
+    // fixture's second task run (task_b_id) stands in for a second unit of
+    // work; neither task declares a provider, so both stay unconstrained.
+    let second_task = fixture.task_b_id.clone();
+    scheduler
+        .enqueue(&enqueue_request(&fixture, "rq-1", 10))
+        .await
+        .expect("enqueue first");
+    scheduler
+        .enqueue(&SchedulerEnqueueRequest {
+            request_id: "rq-2".to_string(),
+            execution_task_id: second_task,
+            max_attempts: 3,
+            available_at: 10,
+            enqueued_at: 11,
+        })
+        .await
+        .expect("enqueue second");
+
+    let first = scheduler
+        .acquire(&acquire_request(&fixture, "acq-1", 20, 80))
+        .await
+        .expect("acquire")
+        .expect("first grant");
+    assert_eq!(first.execution_task_id, fixture.task_id);
+    // The same incarnation now holds 1 active lease == capacity 1: no more.
+    let second = scheduler
+        .acquire(&acquire_request(&fixture, "acq-2", 21, 80))
+        .await
+        .expect("acquire");
+    assert!(
+        second.is_none(),
+        "capacity 1 worker must not get a second lease"
+    );
+}
+
+#[tokio::test]
+async fn reconcile_threads_release_reason_into_last_reason() {
+    let fixture = fixture().await;
+    let scheduler = scheduler_for(&fixture);
+    scheduler
+        .enqueue(&enqueue_request(&fixture, "rq-1", 10))
+        .await
+        .expect("enqueue");
+    let grant = scheduler
+        .acquire(&acquire_request(&fixture, "acq-1", 20, 80))
+        .await
+        .expect("acquire")
+        .expect("grant");
+    let lease_plane = SqliteTaskLeaseControlPlane::new(fixture.store.pool().clone());
+    lease_plane
+        .release(&TaskLeaseCloseRequest {
+            claim: grant.claim(),
+            observed_at: 30,
+            reason: "worker execution failed: boom".to_string(),
+        })
+        .await
+        .expect("release");
+
+    scheduler.reconcile(31).await.expect("reconcile");
+    let explanation = scheduler
+        .explain_task(&fixture.task_id)
+        .await
+        .expect("explain")
+        .expect("row");
+    assert_eq!(explanation.queue.status, SchedulerQueueStatus::Completed);
+    assert!(
+        explanation
+            .queue
+            .last_reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("worker execution failed: boom"),
+        "explain must carry the worker's release reason, got {:?}",
+        explanation.queue.last_reason
+    );
 }

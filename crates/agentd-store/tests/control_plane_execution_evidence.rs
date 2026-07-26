@@ -79,6 +79,7 @@ async fn fixture() -> Fixture {
             host_name: "host-a".to_string(),
             network_zone: Some("dev".to_string()),
             capabilities: json!({"runtime": ["codex"]}),
+            capacity: 1,
         },
     )
     .await
@@ -709,6 +710,7 @@ async fn worker_usage_report_rejects_superseded_or_terminal_lease_and_audits() {
             host_name: "host-b".to_string(),
             network_zone: Some("dev".to_string()),
             capabilities: json!({"runtime": ["codex"]}),
+            capacity: 1,
         },
     )
     .await

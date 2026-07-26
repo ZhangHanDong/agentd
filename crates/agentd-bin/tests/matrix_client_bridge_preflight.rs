@@ -153,6 +153,7 @@ fn daemon_config(api_token: Option<&str>) -> DaemonConfig {
         agent_tokens: Vec::new(),
         agent_token_mode: "audit".to_owned(),
         accept_workflow_change: false,
+        native_dispatch: false,
     }
 }
 

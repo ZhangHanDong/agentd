@@ -80,6 +80,13 @@ impl WorkerFleetPort for SqliteWorkerFleet {
         request: &WorkerFleetRegisterRequest,
     ) -> Result<WorkerFleetRegistration, WorkerFleetError> {
         self.authorize(&request.auth_proof)?;
+        if request.protocol_version < agentd_core::ports::MIN_WORKER_PROTOCOL_VERSION {
+            return Err(WorkerFleetError::Invalid(format!(
+                "worker protocol version {} is below the minimum supported {}",
+                request.protocol_version,
+                agentd_core::ports::MIN_WORKER_PROTOCOL_VERSION
+            )));
+        }
         if request.trust_domain.trim().is_empty()
             || request.daemon_version.trim().is_empty()
             || request.host_name.trim().is_empty()
@@ -113,6 +120,7 @@ impl WorkerFleetPort for SqliteWorkerFleet {
                 host_name: request.host_name.clone(),
                 network_zone: request.network_zone.clone(),
                 capabilities: request.capabilities.clone(),
+                capacity: request.capacity,
             },
         )
         .await
@@ -245,12 +253,7 @@ impl WorkerFleetPort for SqliteWorkerFleet {
                 expires_at: request.expires_at,
             })
             .await
-            .map_err(|error| match error {
-                agentd_core::ports::DurableSchedulerError::Conflict(message) => {
-                    WorkerFleetError::Conflict(message)
-                }
-                other => WorkerFleetError::Unavailable(other.to_string()),
-            })?;
+            .map_err(scheduler_error_to_fleet_error)?;
         let Some(grant) = grant else {
             return Ok(None);
         };
@@ -344,4 +347,19 @@ impl TaskLeasePort for SqliteWorkerFleet {
 
 fn storage_error(error: &crate::StoreError) -> WorkerFleetError {
     WorkerFleetError::Unavailable(error.to_string())
+}
+
+/// Permanent scheduler errors must stay non-retryable on the pull path: a
+/// worker whose incarnation no longer exists should fail fast (404), not
+/// spin on 503 retries forever.
+fn scheduler_error_to_fleet_error(
+    error: agentd_core::ports::DurableSchedulerError,
+) -> WorkerFleetError {
+    use agentd_core::ports::DurableSchedulerError as E;
+    match error {
+        E::Conflict(message) => WorkerFleetError::Conflict(message),
+        E::NotFound(message) => WorkerFleetError::NotFound(message),
+        E::Invalid(message) => WorkerFleetError::Invalid(message),
+        E::Unavailable(message) => WorkerFleetError::Unavailable(message),
+    }
 }

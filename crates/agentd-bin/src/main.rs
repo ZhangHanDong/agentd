@@ -14,7 +14,13 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let cli = AgentdCli::parse();
+    let mut cli = AgentdCli::parse();
+    // AGENTD_NATIVE_DISPATCH (if set) opts into native-queue dispatch when the
+    // `--native-dispatch` flag was not passed explicitly.
+    if !cli.config.native_dispatch {
+        cli.config.native_dispatch = std::env::var("AGENTD_NATIVE_DISPATCH")
+            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+    }
     // RUST_LOG (if set) wins; otherwise `--log-level` is the effective default.
     let filter = EnvFilter::try_from_default_env()
         .or_else(|_| EnvFilter::try_new(&cli.config.log_level))

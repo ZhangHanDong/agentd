@@ -70,6 +70,7 @@ async fn fixture() -> Fixture {
             host_name: "host-a".to_string(),
             network_zone: Some("dev".to_string()),
             capabilities: json!({"runtime": ["codex"]}),
+            capacity: 1,
         },
     )
     .await

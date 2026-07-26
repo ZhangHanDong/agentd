@@ -26,6 +26,7 @@ fn registration(id: WorkerIncarnationId, host: &str) -> WorkerRegistration {
         host_name: host.to_string(),
         network_zone: Some("dev".to_string()),
         capabilities: json!({"runtime": ["codex"]}),
+        capacity: 1,
     }
 }
 

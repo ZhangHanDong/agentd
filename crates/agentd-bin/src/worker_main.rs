@@ -57,6 +57,8 @@ pub async fn run_worker_once(
         host_name: hostname_or_default(),
         network_zone: None,
         capabilities: json!({"runtime": ["codex", "claude-code"]}),
+        capacity: 1,
+        protocol_version: agentd_core::ports::WORKER_PROTOCOL_VERSION,
     };
     fleet
         .register_with_retry(&registration, policy)
@@ -179,15 +181,14 @@ async fn execute_grant(
                     runtime_attempt_id: Some(handle.attempt_id().clone()),
                     worker_incarnation_id: Some(claim.worker_incarnation_id.clone()),
                     snapshot: view.snapshot.clone(),
-                    // The repository binding is not yet transmitted to
-                    // remote workers; ExecutionSecurityScope carries no
-                    // repository reference for the worker to report
-                    // honestly. Threading it through the control plane is
-                    // tracked for M2 (same pattern as run_id/snapshot were
-                    // threaded in Tasks 4-5). Matches the daemon-local
-                    // convention at daemon.rs's acknowledge path.
-                    target_repository_id: "unspecified".into(),
-                    target_base_commit: "unspecified".into(),
+                    target_repository_id: grant.security_scope.as_ref().map_or_else(
+                        || "unspecified".to_string(),
+                        |scope| scope.target_repository_id.clone(),
+                    ),
+                    target_base_commit: grant.security_scope.as_ref().map_or_else(
+                        || "unspecified".to_string(),
+                        |scope| scope.target_base_commit.clone(),
+                    ),
                 },
             },
         };

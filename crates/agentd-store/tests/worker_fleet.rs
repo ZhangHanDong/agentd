@@ -1,11 +1,11 @@
 use agentd_core::ports::{
-    WorkerFleetDrainRequest, WorkerFleetHeartbeat, WorkerFleetHeartbeatResult, WorkerFleetPort,
-    WorkerFleetPullRequest, WorkerFleetRegisterRequest,
+    WorkerFleetDrainRequest, WorkerFleetError, WorkerFleetHeartbeat, WorkerFleetHeartbeatResult,
+    WorkerFleetPort, WorkerFleetPullRequest, WorkerFleetRegisterRequest,
 };
 use agentd_core::types::{NodeId, RunId, WorkerId, WorkerIncarnationId, WorkerStatus};
 use agentd_store::SqliteStore;
 use agentd_store::worker_fleet::SqliteWorkerFleet;
-use agentd_store::worker_repo;
+use agentd_store::worker_repo::{self, WorkerCreate, WorkerRegistration};
 use agentd_store::{run_repo, task_repo};
 use serde_json::json;
 
@@ -29,6 +29,8 @@ async fn worker_fleet_registers_and_rejects_stale_incarnation_heartbeats() {
             host_name: "host-a".into(),
             network_zone: Some("dev".into()),
             capabilities: json!({"runtime": ["native"]}),
+            capacity: 1,
+            protocol_version: agentd_core::ports::WORKER_PROTOCOL_VERSION,
         })
         .await
         .expect("register");
@@ -56,6 +58,8 @@ async fn worker_fleet_registers_and_rejects_stale_incarnation_heartbeats() {
             host_name: "host-b".into(),
             network_zone: None,
             capabilities: json!({"runtime": ["native"]}),
+            capacity: 1,
+            protocol_version: agentd_core::ports::WORKER_PROTOCOL_VERSION,
         })
         .await
         .expect("re-register");
@@ -92,6 +96,8 @@ async fn worker_fleet_can_drain_and_resume_current_incarnation() {
             host_name: "host".into(),
             network_zone: None,
             capabilities: json!({}),
+            capacity: 1,
+            protocol_version: agentd_core::ports::WORKER_PROTOCOL_VERSION,
         })
         .await
         .expect("register");
@@ -144,6 +150,8 @@ async fn worker_fleet_recovers_workers_missing_heartbeats_to_offline() {
             host_name: "host".into(),
             network_zone: None,
             capabilities: json!({}),
+            capacity: 1,
+            protocol_version: agentd_core::ports::WORKER_PROTOCOL_VERSION,
         })
         .await
         .expect("register");
@@ -190,6 +198,8 @@ async fn worker_fleet_pull_selects_oldest_unleased_open_task() {
             host_name: "host".into(),
             network_zone: None,
             capabilities: json!({}),
+            capacity: 1,
+            protocol_version: agentd_core::ports::WORKER_PROTOCOL_VERSION,
         })
         .await
         .expect("register");
@@ -225,6 +235,8 @@ async fn worker_fleet_rejects_invalid_auth_proof() {
             host_name: "host".into(),
             network_zone: None,
             capabilities: json!({}),
+            capacity: 1,
+            protocol_version: agentd_core::ports::WORKER_PROTOCOL_VERSION,
         })
         .await
         .expect_err("invalid proof");
@@ -249,6 +261,8 @@ async fn empty_rotation_proof_set_fails_closed() {
             host_name: "host".into(),
             network_zone: None,
             capabilities: json!({}),
+            capacity: 1,
+            protocol_version: agentd_core::ports::WORKER_PROTOCOL_VERSION,
         })
         .await
         .expect_err("empty configured proof set must reject");
@@ -293,6 +307,7 @@ async fn pull_routes_through_durable_queue_and_replays_by_request_id() {
             host_name: "host".into(),
             network_zone: None,
             capabilities: json!({}),
+            capacity: 1,
         },
     )
     .await
@@ -321,4 +336,110 @@ async fn pull_routes_through_durable_queue_and_replays_by_request_id() {
     // Same request_id replays the same grant instead of erroring.
     let replay = fleet.pull(&request).await.expect("replay").expect("grant");
     assert_eq!(replay.lease_id, first.lease_id);
+}
+
+#[tokio::test]
+async fn register_incarnation_persists_declared_capacity() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteStore::connect(&dir.path().join("agentd.db"))
+        .await
+        .expect("connect");
+    let worker_id = WorkerId::new();
+    worker_repo::create_worker(
+        store.pool(),
+        WorkerCreate {
+            id: worker_id.clone(),
+            trust_domain: "corp-coding".to_string(),
+            labels: serde_json::json!({}),
+        },
+    )
+    .await
+    .expect("worker");
+    let incarnation_id = WorkerIncarnationId::new();
+    worker_repo::register_incarnation(
+        store.pool(),
+        &worker_id,
+        WorkerRegistration {
+            id: incarnation_id.clone(),
+            daemon_version: "0.0.0-test".to_string(),
+            host_name: "host-a".to_string(),
+            network_zone: Some("dev".to_string()),
+            capabilities: serde_json::json!({"runtime": ["codex"]}),
+            capacity: 4,
+        },
+    )
+    .await
+    .expect("incarnation");
+    let record = worker_repo::get_incarnation(store.pool(), &incarnation_id)
+        .await
+        .expect("read")
+        .expect("incarnation exists");
+    assert_eq!(record.capacity, 4);
+    assert_eq!(record.network_zone.as_deref(), Some("dev"));
+}
+
+#[tokio::test]
+async fn register_rejects_worker_below_protocol_floor() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteStore::connect(&dir.path().join("agentd.db"))
+        .await
+        .expect("connect");
+    let fleet = SqliteWorkerFleet::new(store.pool().clone());
+    let request = WorkerFleetRegisterRequest {
+        auth_proof: String::new(),
+        worker_id: WorkerId::new(),
+        trust_domain: "corp-coding".to_string(),
+        labels: serde_json::json!({}),
+        incarnation_id: WorkerIncarnationId::new(),
+        daemon_version: "0.0.0-test".to_string(),
+        host_name: "host-a".to_string(),
+        network_zone: Some("dev".to_string()),
+        capabilities: serde_json::json!({"runtime": ["codex"]}),
+        capacity: 1,
+        protocol_version: 0, // below the floor of 1
+    };
+    let error = fleet
+        .register(&request)
+        .await
+        .expect_err("stale protocol must be rejected");
+    assert!(matches!(error, WorkerFleetError::Invalid(_)));
+}
+
+#[tokio::test]
+async fn list_current_incarnations_exposes_zone_and_capacity() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteStore::connect(&dir.path().join("agentd.db"))
+        .await
+        .expect("connect");
+    let worker_id = WorkerId::new();
+    worker_repo::create_worker(
+        store.pool(),
+        WorkerCreate {
+            id: worker_id.clone(),
+            trust_domain: "corp-coding".to_string(),
+            labels: serde_json::json!({}),
+        },
+    )
+    .await
+    .expect("worker");
+    worker_repo::register_incarnation(
+        store.pool(),
+        &worker_id,
+        WorkerRegistration {
+            id: WorkerIncarnationId::new(),
+            daemon_version: "0.0.0-test".to_string(),
+            host_name: "host-a".to_string(),
+            network_zone: Some("us-east".to_string()),
+            capabilities: serde_json::json!({"runtime": ["codex"]}),
+            capacity: 3,
+        },
+    )
+    .await
+    .expect("incarnation");
+    let listed = worker_repo::list_current_incarnations(store.pool())
+        .await
+        .expect("list");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].capacity, 3);
+    assert_eq!(listed[0].network_zone.as_deref(), Some("us-east"));
 }

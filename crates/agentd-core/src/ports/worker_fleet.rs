@@ -7,6 +7,18 @@ use thiserror::Error;
 use crate::ports::task_lease::TaskLeasePort;
 use crate::types::{TaskLeaseGrant, WorkerId, WorkerIncarnationId};
 
+/// Wire protocol version this daemon build speaks to the fleet. Bumped when a
+/// registration/pull/heartbeat contract changes in a way workers must match.
+pub const WORKER_PROTOCOL_VERSION: u32 = 1;
+
+/// Lowest protocol version the daemon will accept a registration from. A
+/// worker below this floor is rejected at registration (version negotiation).
+pub const MIN_WORKER_PROTOCOL_VERSION: u32 = 1;
+
+fn default_worker_capacity() -> u32 {
+    1
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerFleetRegisterRequest {
     pub auth_proof: String,
@@ -18,6 +30,13 @@ pub struct WorkerFleetRegisterRequest {
     pub host_name: String,
     pub network_zone: Option<String>,
     pub capabilities: Value,
+    /// Maximum concurrent leases the daemon may grant this incarnation.
+    #[serde(default = "default_worker_capacity")]
+    pub capacity: u32,
+    /// Worker's wire protocol version. An older peer that omits it deserializes
+    /// as 0 and is rejected against `MIN_WORKER_PROTOCOL_VERSION`.
+    #[serde(default)]
+    pub protocol_version: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
