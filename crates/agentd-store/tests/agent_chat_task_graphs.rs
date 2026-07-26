@@ -374,3 +374,189 @@ async fn agent_chat_task_graph_direct_assignee_nodes_do_not_create_scheduler_res
         0
     );
 }
+
+#[tokio::test]
+async fn node_updates_on_a_cancelled_graph_are_rejected() {
+    let (store, _dir) = open_store().await;
+    let graph = agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_cancelled".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Cancelled graph".to_string(),
+            nodes: chain_nodes(),
+        },
+    )
+    .await
+    .expect("create graph");
+    assert_eq!(graph.status, "active");
+
+    agent_chat_task_graph_repo::delete_graph(store.pool(), "graph_cancelled")
+        .await
+        .expect("delete graph")
+        .expect("graph present");
+
+    let error = agent_chat_task_graph_repo::update_node_and_advance(
+        store.pool(),
+        "graph_cancelled",
+        "a",
+        agent_chat_task_graph_repo::UpdateAgentChatTaskGraphNode {
+            status: Some("complete".to_string()),
+            result: Some(json!({"ok": true})),
+            error: None,
+        },
+    )
+    .await
+    .expect_err("cancelled graphs reject node updates");
+    assert!(
+        matches!(&error, agentd_store::StoreError::Conflict(message) if message.contains("cancelled")),
+        "expected a conflict naming the graph status, got: {error}"
+    );
+}
+
+#[tokio::test]
+async fn settled_nodes_reject_further_updates() {
+    let (store, _dir) = open_store().await;
+    agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_settled".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Settled graph".to_string(),
+            nodes: chain_nodes(),
+        },
+    )
+    .await
+    .expect("create graph");
+
+    agent_chat_task_graph_repo::update_node_and_advance(
+        store.pool(),
+        "graph_settled",
+        "a",
+        agent_chat_task_graph_repo::UpdateAgentChatTaskGraphNode {
+            status: Some("complete".to_string()),
+            result: Some(json!({"ok": true})),
+            error: None,
+        },
+    )
+    .await
+    .expect("first completion")
+    .expect("graph and node");
+
+    let error = agent_chat_task_graph_repo::update_node_and_advance(
+        store.pool(),
+        "graph_settled",
+        "a",
+        agent_chat_task_graph_repo::UpdateAgentChatTaskGraphNode {
+            status: Some("pending".to_string()),
+            result: None,
+            error: None,
+        },
+    )
+    .await
+    .expect_err("a settled node cannot be resurrected");
+    assert!(
+        matches!(&error, agentd_store::StoreError::Conflict(message) if message.contains("already complete")),
+        "expected a conflict naming the settled status, got: {error}"
+    );
+
+    let graph = agent_chat_task_graph_repo::get_graph(store.pool(), "graph_settled")
+        .await
+        .expect("read graph")
+        .expect("graph present");
+    assert_eq!(graph.nodes["a"].status, "complete");
+    assert_eq!(graph.nodes["a"].result, Some(json!({"ok": true})));
+}
+
+#[tokio::test]
+async fn empty_node_patches_are_rejected() {
+    let (store, _dir) = open_store().await;
+    agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_empty_patch".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Empty patch graph".to_string(),
+            nodes: chain_nodes(),
+        },
+    )
+    .await
+    .expect("create graph");
+
+    let error = agent_chat_task_graph_repo::update_node_and_advance(
+        store.pool(),
+        "graph_empty_patch",
+        "a",
+        agent_chat_task_graph_repo::UpdateAgentChatTaskGraphNode::default(),
+    )
+    .await
+    .expect_err("an empty patch is invalid");
+    assert!(
+        matches!(&error, agentd_store::StoreError::Invariant(message)
+            if message.contains("status, result, or error")),
+        "expected an invariant naming the required fields, got: {error}"
+    );
+}
+
+#[tokio::test]
+async fn late_duplicate_result_messages_are_ignored() {
+    let (store, _dir) = open_store().await;
+    agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_late".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Late result graph".to_string(),
+            nodes: chain_nodes(),
+        },
+    )
+    .await
+    .expect("create graph");
+    // `create_graph` only persists the graph; `advance_graph` is what
+    // dispatches the root node and assigns its message id.
+    let graph = agent_chat_task_graph_repo::advance_graph(store.pool(), "graph_late")
+        .await
+        .expect("advance graph")
+        .expect("graph present");
+    let reply_to = graph.nodes["a"]
+        .message_id
+        .clone()
+        .expect("dispatch message id");
+    let schema = json!({
+        "kind": "task_graph_result",
+        "version": 1,
+        "payload": {"graphId": "graph_late", "nodeId": "a", "result": {"attempt": 1}}
+    });
+
+    let first = agent_chat_task_graph_repo::handle_result_message(
+        store.pool(),
+        "codex-a",
+        Some(&reply_to),
+        Some(&schema),
+    )
+    .await
+    .expect("first result")
+    .expect("handled");
+    assert_eq!(first.status, "complete");
+
+    let second = agent_chat_task_graph_repo::handle_result_message(
+        store.pool(),
+        "codex-a",
+        Some(&reply_to),
+        Some(&json!({
+            "kind": "task_graph_failed",
+            "version": 1,
+            "payload": {"graphId": "graph_late", "nodeId": "a", "error": "too late"}
+        })),
+    )
+    .await
+    .expect("a late duplicate is not an error");
+    assert!(second.is_none(), "late duplicate results are ignored");
+
+    let graph = agent_chat_task_graph_repo::get_graph(store.pool(), "graph_late")
+        .await
+        .expect("read graph")
+        .expect("graph present");
+    assert_eq!(graph.nodes["a"].status, "complete");
+    assert_eq!(graph.nodes["a"].error, None);
+}

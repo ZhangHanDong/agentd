@@ -1553,7 +1553,7 @@ impl RunHost for FakeRunHost {
             .expect("agent_chat_task_graphs lock")
             .contains_key(&id)
         {
-            return Err(CoreError::Invariant(format!(
+            return Err(fake_task_graph_conflict(&format!(
                 "task graph already exists: {id}"
             )));
         }
@@ -1710,9 +1710,21 @@ impl RunHost for FakeRunHost {
         let Some(graph) = graphs.get_mut(graph_id) else {
             return Ok(None);
         };
+        if graph.status != "active" {
+            return Err(fake_task_graph_conflict(&format!(
+                "task graph '{graph_id}' is {} and no longer accepts node updates",
+                graph.status
+            )));
+        }
         let Some(node) = graph.nodes.get_mut(node_id) else {
             return Ok(None);
         };
+        if fake_task_graph_node_terminal(&node.status) {
+            return Err(fake_task_graph_conflict(&format!(
+                "task graph node '{node_id}' is already {}",
+                node.status
+            )));
+        }
         fake_apply_task_graph_node_patch(node, input)?;
         {
             let mut inbox = self.inbox.lock().expect("inbox lock");
@@ -2665,6 +2677,13 @@ fn fake_task_graph_condition_matches(
 
 fn fake_task_graph_node_terminal(status: &str) -> bool {
     matches!(status, "complete" | "failed" | "skipped" | "cancelled")
+}
+
+/// Mirror of `agentd_store::error`'s `StoreError::Conflict` → `CoreError`
+/// mapping so `FakeRunHost` produces the same wire classification as the
+/// production store.
+fn fake_task_graph_conflict(message: &str) -> CoreError {
+    CoreError::Store(format!("conflict: {message}"))
 }
 
 fn fake_task_graph_dispatch_id(graph_id: &str, node_id: &str) -> String {

@@ -291,9 +291,27 @@ pub async fn update_node_and_advance(
     let Some(mut graph) = get_graph(pool, graph_id).await? else {
         return Ok(None);
     };
+    // A graph that is no longer active is settled: `advance_graph_record`
+    // early-returns for it, so without this guard the patch would still be
+    // persisted onto a cancelled/complete graph by the trailing upsert.
+    if graph.status != "active" {
+        return Err(StoreError::Conflict(format!(
+            "task graph '{graph_id}' is {} and no longer accepts node updates",
+            graph.status
+        )));
+    }
     let Some(node) = graph.nodes.get_mut(node_id) else {
         return Ok(None);
     };
+    // Settled nodes are immutable: their result has already unlocked (or
+    // failed) downstream work, so rewriting one would desynchronize the graph
+    // from the decisions already taken on it.
+    if node_terminal(&node.status) {
+        return Err(StoreError::Conflict(format!(
+            "task graph node '{node_id}' is already {}",
+            node.status
+        )));
+    }
     let release_agent = patch
         .status
         .as_deref()
@@ -383,6 +401,12 @@ pub async fn handle_result_message(
         return Ok(None);
     };
     if node.assignee != from || node.message_id.as_deref() != Some(reply_to.as_str()) {
+        return Ok(None);
+    }
+    // A late or duplicated result for an already-settled node (or a graph that
+    // has since been cancelled) is dropped, not rejected: the message itself is
+    // legitimate and is still stored, it simply no longer moves the graph.
+    if graph.status != "active" || node_terminal(&node.status) {
         return Ok(None);
     }
 
@@ -862,6 +886,11 @@ fn apply_node_patch(
     node: &mut AgentChatTaskGraphNode,
     patch: UpdateAgentChatTaskGraphNode,
 ) -> Result<(), StoreError> {
+    if patch.status.is_none() && patch.result.is_none() && patch.error.is_none() {
+        return Err(StoreError::Invariant(
+            "node patch requires status, result, or error".to_string(),
+        ));
+    }
     let now = now_text();
     if let Some(status) = patch.status {
         let status = required(status, "status required")?;
