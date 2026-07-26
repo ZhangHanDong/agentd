@@ -39,7 +39,7 @@ use crate::host::{
     DirectMessageInput, EventRecord, GroupCreateInput, GroupMemberUpdate, LiveEvent,
     MatrixBridgeRoomInput, MatrixInboundMessageInput, MatrixOutboxCursorInput,
     RelayServerHeartbeat, RelayStreamEventRecord, RunHost, RunSnapshot, SchedulerDispatchInput,
-    SchedulerPoolFilters, SchedulerReleaseInput,
+    SchedulerPoolFilters, SchedulerReleaseInput, SuppressionOutcome,
 };
 use crate::mcp_server::dispatch;
 use crate::tools::attachments::{
@@ -150,6 +150,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/matrix/outbox/cursor", get(matrix_outbox_cursor))
         .route("/api/matrix/outbox/ack", post(ack_matrix_outbox))
         .route("/api/messages", post(post_message))
+        .route("/api/messages/:id/suppress", post(suppress_message))
         .route("/api/delivery-events", post(post_delivery_event))
         .route("/api/inbox/:agent", get(get_inbox))
         .route("/api/tasks", post(create_task).get(list_tasks))
@@ -818,6 +819,64 @@ async fn post_message(
                 Err(e) => surface_error_response(e),
             }
         }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SuppressReq {
+    agent: String,
+}
+
+async fn suppress_message(
+    State(state): State<AppState>,
+    AxumPath(message_id): AxumPath<String>,
+    headers: HeaderMap,
+    Json(req): Json<SuppressReq>,
+) -> Response {
+    let Some(agent) = clean_required_text(&req.agent) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "agent required" })),
+        )
+            .into_response();
+    };
+    if let Err(err) = require_agent_token(&state.auth, &headers, &agent) {
+        return err.into_response();
+    }
+    match state.host.suppress_message(&message_id, &agent).await {
+        Ok(SuppressionOutcome::Suppressed) => (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "suppressed": true,
+                "message_id": message_id,
+                "agent": agent
+            })),
+        )
+            .into_response(),
+        Ok(SuppressionOutcome::AlreadySuppressed) => (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "suppressed": false,
+                "message_id": message_id,
+                "agent": agent
+            })),
+        )
+            .into_response(),
+        Ok(SuppressionOutcome::NotDeliverable) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("message {message_id} is not deliverable to {agent}")
+            })),
+        )
+            .into_response(),
+        Ok(SuppressionOutcome::NotFound) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("message not found: {message_id}") })),
+        )
+            .into_response(),
+        Err(e) => agent_error_response(e),
     }
 }
 

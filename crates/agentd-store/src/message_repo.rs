@@ -759,3 +759,126 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let year = y + i64::from(month <= 2);
     (year, month, day)
 }
+
+/// What a per-recipient suppression request did. `NotDeliverable` means the
+/// message exists but was never addressed to this agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SuppressionOutcome {
+    Suppressed,
+    AlreadySuppressed,
+    NotDeliverable,
+    NotFound,
+}
+
+/// Drop one message from one recipient's unread inbox. agentd models read
+/// state as per-recipient markers, so suppression is expressed as marking this
+/// single message read for this single agent; no other unread state moves.
+///
+/// # Errors
+/// [`StoreError`] on validation or store failure.
+pub async fn suppress_message_for_agent(
+    pool: &SqlitePool,
+    message_id: &str,
+    agent_id: &str,
+) -> Result<SuppressionOutcome, StoreError> {
+    let message_id = required(message_id.to_string(), "message id required")?;
+    let agent_id = required(agent_id.to_string(), "agent id required")?;
+
+    let mut connection = pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *connection)
+        .await?;
+    let result = suppress_in_transaction(&mut connection, &message_id, &agent_id).await;
+    match result {
+        Ok(outcome) => {
+            sqlx::query("COMMIT").execute(&mut *connection).await?;
+            Ok(outcome)
+        }
+        Err(error) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            Err(error)
+        }
+    }
+}
+
+async fn suppress_in_transaction(
+    connection: &mut sqlx::SqliteConnection,
+    message_id: &str,
+    agent_id: &str,
+) -> Result<SuppressionOutcome, StoreError> {
+    let direct: Option<(String, Option<i64>)> =
+        sqlx::query_as("SELECT to_agent, read_at FROM direct_messages WHERE id = ?")
+            .bind(message_id)
+            .fetch_optional(&mut *connection)
+            .await?;
+    if let Some((to_agent, read_at)) = direct {
+        if !to_agent.eq_ignore_ascii_case(agent_id) {
+            return Ok(SuppressionOutcome::NotDeliverable);
+        }
+        if read_at.is_some() {
+            return Ok(SuppressionOutcome::AlreadySuppressed);
+        }
+        let updated =
+            sqlx::query("UPDATE direct_messages SET read_at = ? WHERE id = ? AND read_at IS NULL")
+                .bind(now_unix())
+                .bind(message_id)
+                .execute(&mut *connection)
+                .await?;
+        if updated.rows_affected() != 1 {
+            return Err(StoreError::Conflict(format!(
+                "direct message '{message_id}' changed concurrently"
+            )));
+        }
+        return Ok(SuppressionOutcome::Suppressed);
+    }
+
+    let group: Option<(String, String)> =
+        sqlx::query_as("SELECT group_name, mentions_json FROM group_messages WHERE id = ?")
+            .bind(message_id)
+            .fetch_optional(&mut *connection)
+            .await?;
+    let Some((group_name, mentions_json)) = group else {
+        return Ok(SuppressionOutcome::NotFound);
+    };
+
+    let mentions: Vec<String> = serde_json::from_str(&mentions_json)?;
+    let mentioned = mentions
+        .iter()
+        .any(|mention| mention.eq_ignore_ascii_case(agent_id));
+    let member: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM group_members \
+         WHERE group_name = ? COLLATE NOCASE AND agent_name = ? COLLATE NOCASE",
+    )
+    .bind(&group_name)
+    .bind(agent_id)
+    .fetch_optional(&mut *connection)
+    .await?;
+    if !mentioned || member.is_none() {
+        return Ok(SuppressionOutcome::NotDeliverable);
+    }
+
+    let already: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM group_mention_reads WHERE agent_name = ? AND message_id = ?",
+    )
+    .bind(agent_id)
+    .bind(message_id)
+    .fetch_optional(&mut *connection)
+    .await?;
+    if already.is_some() {
+        return Ok(SuppressionOutcome::AlreadySuppressed);
+    }
+    let inserted = sqlx::query(
+        "INSERT INTO group_mention_reads (agent_name, message_id, read_at) VALUES (?, ?, ?)",
+    )
+    .bind(agent_id)
+    .bind(message_id)
+    .bind(now_unix())
+    .execute(&mut *connection)
+    .await?;
+    if inserted.rows_affected() != 1 {
+        return Err(StoreError::Conflict(format!(
+            "group mention '{message_id}' changed concurrently"
+        )));
+    }
+    Ok(SuppressionOutcome::Suppressed)
+}

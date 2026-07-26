@@ -545,3 +545,105 @@ async fn group_mentions_for_an_unknown_group_are_not_delivered() {
         inbox.group
     );
 }
+
+#[tokio::test]
+async fn suppressing_a_direct_message_clears_only_that_message() {
+    let (store, _dir) = open_temp().await;
+    message_repo::insert_direct_message(store.pool(), direct_message("msg_keep"))
+        .await
+        .expect("insert keeper");
+    message_repo::insert_direct_message(store.pool(), direct_message("msg_drop"))
+        .await
+        .expect("insert dropped");
+
+    let outcome =
+        message_repo::suppress_message_for_agent(store.pool(), "msg_drop", "codex-worker")
+            .await
+            .expect("suppress");
+    assert_eq!(outcome, message_repo::SuppressionOutcome::Suppressed);
+
+    let replay = message_repo::suppress_message_for_agent(store.pool(), "msg_drop", "codex-worker")
+        .await
+        .expect("replayed suppress");
+    assert_eq!(replay, message_repo::SuppressionOutcome::AlreadySuppressed);
+
+    let inbox = message_repo::read_direct_inbox(
+        store.pool(),
+        "codex-worker",
+        message_repo::InboxReadOptions { drain: false },
+    )
+    .await
+    .expect("read");
+    assert_eq!(inbox.len(), 1, "{inbox:?}");
+    assert_eq!(inbox[0].id, "msg_keep");
+}
+
+#[tokio::test]
+async fn suppression_classifies_unknown_and_undeliverable_messages() {
+    let (store, _dir) = open_temp().await;
+    message_repo::insert_direct_message(store.pool(), direct_message("msg_direct_1"))
+        .await
+        .expect("insert");
+
+    assert_eq!(
+        message_repo::suppress_message_for_agent(store.pool(), "msg_missing", "codex-worker")
+            .await
+            .expect("unknown id"),
+        message_repo::SuppressionOutcome::NotFound
+    );
+    assert_eq!(
+        message_repo::suppress_message_for_agent(store.pool(), "msg_direct_1", "codex-other")
+            .await
+            .expect("wrong recipient"),
+        message_repo::SuppressionOutcome::NotDeliverable
+    );
+}
+
+#[tokio::test]
+async fn suppressing_a_group_mention_clears_only_that_mention() {
+    let (store, _dir) = open_temp().await;
+    message_repo::create_group(
+        store.pool(),
+        message_repo::GroupCreateInput {
+            name: text("factory"),
+            members: vec![text("codex-a"), text("codex-b")],
+        },
+    )
+    .await
+    .expect("create group");
+    let keep = message_repo::insert_group_message(
+        store.pool(),
+        group_message("mention keep", &["codex-b"]),
+    )
+    .await
+    .expect("insert keeper");
+    let drop = message_repo::insert_group_message(
+        store.pool(),
+        group_message("mention drop", &["codex-b"]),
+    )
+    .await
+    .expect("insert dropped");
+
+    assert_eq!(
+        message_repo::suppress_message_for_agent(store.pool(), &drop.id, "codex-b")
+            .await
+            .expect("suppress mention"),
+        message_repo::SuppressionOutcome::Suppressed
+    );
+    assert_eq!(
+        message_repo::suppress_message_for_agent(store.pool(), &keep.id, "codex-a")
+            .await
+            .expect("unmentioned member"),
+        message_repo::SuppressionOutcome::NotDeliverable
+    );
+
+    let inbox = message_repo::read_agent_inbox(
+        store.pool(),
+        "codex-b",
+        message_repo::InboxReadOptions { drain: false },
+    )
+    .await
+    .expect("read");
+    assert_eq!(inbox.group.len(), 1, "{:?}", inbox.group);
+    assert_eq!(inbox.group[0].id, keep.id);
+}

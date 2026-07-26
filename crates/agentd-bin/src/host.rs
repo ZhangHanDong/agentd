@@ -70,7 +70,8 @@ use agentd_surface::host::{
     SchedulerPoolSnapshot as SurfaceSchedulerPoolSnapshot,
     SchedulerReleaseInput as SurfaceSchedulerReleaseInput,
     SchedulerReleaseResult as SurfaceSchedulerReleaseResult,
-    SchedulerReservation as SurfaceSchedulerReservation, TaskAssignment,
+    SchedulerReservation as SurfaceSchedulerReservation,
+    SuppressionOutcome as SurfaceSuppressionOutcome, TaskAssignment,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -2583,6 +2584,26 @@ impl RunHost for ProductionRunHost {
             .collect::<Vec<_>>();
         messages.extend(rows.group.into_iter().map(surface_group_inbox_message));
         Ok(messages)
+    }
+
+    async fn suppress_message(
+        &self,
+        message_id: &str,
+        agent_id: &str,
+    ) -> Result<SurfaceSuppressionOutcome, CoreError> {
+        let outcome =
+            message_repo::suppress_message_for_agent(self.store.pool(), message_id, agent_id)
+                .await?;
+        Ok(match outcome {
+            message_repo::SuppressionOutcome::Suppressed => SurfaceSuppressionOutcome::Suppressed,
+            message_repo::SuppressionOutcome::AlreadySuppressed => {
+                SurfaceSuppressionOutcome::AlreadySuppressed
+            }
+            message_repo::SuppressionOutcome::NotDeliverable => {
+                SurfaceSuppressionOutcome::NotDeliverable
+            }
+            message_repo::SuppressionOutcome::NotFound => SurfaceSuppressionOutcome::NotFound,
+        })
     }
 
     async fn read_group_messages(

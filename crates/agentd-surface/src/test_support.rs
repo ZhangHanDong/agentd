@@ -25,7 +25,8 @@ use crate::host::{
     MatrixInboundMessageResult, MatrixOutboxCursorInput, RelayServerHeartbeat, RelayServerRecord,
     RelayStreamEventRecord, RunHost, RunSnapshot, RunSummary, SchedulerDispatchInput,
     SchedulerDispatchResult, SchedulerPoolAgent, SchedulerPoolFilters, SchedulerPoolSnapshot,
-    SchedulerReleaseInput, SchedulerReleaseResult, SchedulerReservation, TaskAssignment,
+    SchedulerReleaseInput, SchedulerReleaseResult, SchedulerReservation, SuppressionOutcome,
+    TaskAssignment,
 };
 
 /// Scripted, recording [`RunHost`] for tests.
@@ -1995,6 +1996,47 @@ impl RunHost for FakeRunHost {
             }
         }
         Ok(messages)
+    }
+
+    async fn suppress_message(
+        &self,
+        message_id: &str,
+        agent_id: &str,
+    ) -> Result<SuppressionOutcome, CoreError> {
+        let agent_id = normalize_agent_name(agent_id)?;
+        let mut inbox = self.inbox.lock().expect("inbox lock");
+        let mut mention_reads = self
+            .group_mention_reads
+            .lock()
+            .expect("group_mention_reads lock");
+        let Some(entry) = inbox
+            .iter_mut()
+            .find(|entry| entry.message.id == message_id)
+        else {
+            return Ok(SuppressionOutcome::NotFound);
+        };
+        if entry.message.group.is_some() {
+            if !entry
+                .message
+                .mentions
+                .iter()
+                .any(|mention| mention.eq_ignore_ascii_case(&agent_id))
+            {
+                return Ok(SuppressionOutcome::NotDeliverable);
+            }
+            if !mention_reads.insert((agent_id, entry.message.id.clone())) {
+                return Ok(SuppressionOutcome::AlreadySuppressed);
+            }
+            return Ok(SuppressionOutcome::Suppressed);
+        }
+        if !entry.message.to.eq_ignore_ascii_case(&agent_id) {
+            return Ok(SuppressionOutcome::NotDeliverable);
+        }
+        if entry.read {
+            return Ok(SuppressionOutcome::AlreadySuppressed);
+        }
+        entry.read = true;
+        Ok(SuppressionOutcome::Suppressed)
     }
 
     async fn read_group_messages(
