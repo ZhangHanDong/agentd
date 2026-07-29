@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use agentd_store::{SqliteStore, agent_chat_task_graph_repo, agent_repo, message_repo};
+use agentd_store::{SqliteStore, StoreError, agent_chat_task_graph_repo, agent_repo, message_repo};
 use serde_json::json;
 
 async fn open_store() -> (SqliteStore, tempfile::TempDir) {
@@ -26,6 +26,7 @@ fn node(
             .map(std::string::ToString::to_string)
             .collect(),
         condition: None,
+        execution: None,
     }
 }
 
@@ -46,6 +47,7 @@ fn scheduled_node(
             .map(std::string::ToString::to_string)
             .collect(),
         condition: None,
+        execution: None,
     }
 }
 
@@ -373,4 +375,1060 @@ async fn agent_chat_task_graph_direct_assignee_nodes_do_not_create_scheduler_res
         scalar_count(&store, "SELECT COUNT(*) FROM agent_scheduler_queue").await,
         0
     );
+}
+
+#[tokio::test]
+async fn node_updates_on_a_cancelled_graph_are_rejected() {
+    let (store, _dir) = open_store().await;
+    let graph = agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_cancelled".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Cancelled graph".to_string(),
+            nodes: chain_nodes(),
+        },
+    )
+    .await
+    .expect("create graph");
+    assert_eq!(graph.status, "active");
+
+    agent_chat_task_graph_repo::delete_graph(store.pool(), "graph_cancelled")
+        .await
+        .expect("delete graph")
+        .expect("graph present");
+
+    let error = agent_chat_task_graph_repo::update_node_and_advance(
+        store.pool(),
+        "graph_cancelled",
+        "a",
+        agent_chat_task_graph_repo::UpdateAgentChatTaskGraphNode {
+            status: Some("complete".to_string()),
+            result: Some(json!({"ok": true})),
+            error: None,
+        },
+    )
+    .await
+    .expect_err("cancelled graphs reject node updates");
+    assert!(
+        matches!(&error, agentd_store::StoreError::Conflict(message) if message.contains("cancelled")),
+        "expected a conflict naming the graph status, got: {error}"
+    );
+}
+
+#[tokio::test]
+async fn settled_nodes_reject_further_updates() {
+    let (store, _dir) = open_store().await;
+    agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_settled".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Settled graph".to_string(),
+            nodes: chain_nodes(),
+        },
+    )
+    .await
+    .expect("create graph");
+
+    agent_chat_task_graph_repo::update_node_and_advance(
+        store.pool(),
+        "graph_settled",
+        "a",
+        agent_chat_task_graph_repo::UpdateAgentChatTaskGraphNode {
+            status: Some("complete".to_string()),
+            result: Some(json!({"ok": true})),
+            error: None,
+        },
+    )
+    .await
+    .expect("first completion")
+    .expect("graph and node");
+
+    let error = agent_chat_task_graph_repo::update_node_and_advance(
+        store.pool(),
+        "graph_settled",
+        "a",
+        agent_chat_task_graph_repo::UpdateAgentChatTaskGraphNode {
+            status: Some("pending".to_string()),
+            result: None,
+            error: None,
+        },
+    )
+    .await
+    .expect_err("a settled node cannot be resurrected");
+    assert!(
+        matches!(&error, agentd_store::StoreError::Conflict(message) if message.contains("already complete")),
+        "expected a conflict naming the settled status, got: {error}"
+    );
+
+    let graph = agent_chat_task_graph_repo::get_graph(store.pool(), "graph_settled")
+        .await
+        .expect("read graph")
+        .expect("graph present");
+    assert_eq!(graph.nodes["a"].status, "complete");
+    assert_eq!(graph.nodes["a"].result, Some(json!({"ok": true})));
+}
+
+#[tokio::test]
+async fn empty_node_patches_are_rejected() {
+    let (store, _dir) = open_store().await;
+    agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_empty_patch".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Empty patch graph".to_string(),
+            nodes: chain_nodes(),
+        },
+    )
+    .await
+    .expect("create graph");
+
+    let error = agent_chat_task_graph_repo::update_node_and_advance(
+        store.pool(),
+        "graph_empty_patch",
+        "a",
+        agent_chat_task_graph_repo::UpdateAgentChatTaskGraphNode::default(),
+    )
+    .await
+    .expect_err("an empty patch is invalid");
+    assert!(
+        matches!(&error, agentd_store::StoreError::Invariant(message)
+            if message.contains("status, result, or error")),
+        "expected an invariant naming the required fields, got: {error}"
+    );
+}
+
+#[tokio::test]
+async fn late_duplicate_result_messages_are_ignored() {
+    let (store, _dir) = open_store().await;
+    agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_late".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Late result graph".to_string(),
+            nodes: chain_nodes(),
+        },
+    )
+    .await
+    .expect("create graph");
+    // `create_graph` only persists the graph; `advance_graph` is what
+    // dispatches the root node and assigns its message id.
+    let graph = agent_chat_task_graph_repo::advance_graph(store.pool(), "graph_late")
+        .await
+        .expect("advance graph")
+        .expect("graph present");
+    let reply_to = graph.nodes["a"]
+        .message_id
+        .clone()
+        .expect("dispatch message id");
+    let schema = json!({
+        "kind": "task_graph_result",
+        "version": 1,
+        "payload": {"graphId": "graph_late", "nodeId": "a", "result": {"attempt": 1}}
+    });
+
+    let first = agent_chat_task_graph_repo::handle_result_message(
+        store.pool(),
+        "codex-a",
+        Some(&reply_to),
+        Some(&schema),
+    )
+    .await
+    .expect("first result")
+    .expect("handled");
+    assert_eq!(first.status, "complete");
+
+    let second = agent_chat_task_graph_repo::handle_result_message(
+        store.pool(),
+        "codex-a",
+        Some(&reply_to),
+        Some(&json!({
+            "kind": "task_graph_failed",
+            "version": 1,
+            "payload": {"graphId": "graph_late", "nodeId": "a", "error": "too late"}
+        })),
+    )
+    .await
+    .expect("a late duplicate is not an error");
+    assert!(second.is_none(), "late duplicate results are ignored");
+
+    let graph = agent_chat_task_graph_repo::get_graph(store.pool(), "graph_late")
+        .await
+        .expect("read graph")
+        .expect("graph present");
+    assert_eq!(graph.nodes["a"].status, "complete");
+    assert_eq!(graph.nodes["a"].error, None);
+}
+
+#[tokio::test]
+async fn concurrent_sibling_node_completions_all_land() {
+    let (store, _dir) = open_store().await;
+    let mut nodes = BTreeMap::new();
+    for index in 0..8 {
+        nodes.insert(format!("n{index}"), node("codex-a", "Do work", &[]));
+    }
+    agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_concurrent".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Concurrent graph".to_string(),
+            nodes,
+        },
+    )
+    .await
+    .expect("create graph");
+
+    let mut handles = Vec::new();
+    for index in 0..8 {
+        let pool = store.pool().clone();
+        handles.push(tokio::spawn(async move {
+            agent_chat_task_graph_repo::update_node_and_advance(
+                &pool,
+                "graph_concurrent",
+                &format!("n{index}"),
+                agent_chat_task_graph_repo::UpdateAgentChatTaskGraphNode {
+                    status: Some("complete".to_string()),
+                    result: Some(json!({"node": index})),
+                    error: None,
+                },
+            )
+            .await
+        }));
+    }
+    for handle in handles {
+        handle
+            .await
+            .expect("join")
+            .expect("concurrent completion succeeds")
+            .expect("graph and node");
+    }
+
+    let graph = agent_chat_task_graph_repo::get_graph(store.pool(), "graph_concurrent")
+        .await
+        .expect("read graph")
+        .expect("graph present");
+    for index in 0..8 {
+        let node = &graph.nodes[&format!("n{index}")];
+        assert_eq!(node.status, "complete", "node n{index} lost its completion");
+        assert_eq!(node.result, Some(json!({"node": index})));
+    }
+    assert_eq!(graph.status, "complete");
+}
+
+#[tokio::test]
+async fn every_graph_write_bumps_the_record_version() {
+    let (store, _dir) = open_store().await;
+    agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_versioned".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Versioned graph".to_string(),
+            nodes: chain_nodes(),
+        },
+    )
+    .await
+    .expect("create graph");
+    let created_version = scalar_count(
+        &store,
+        "SELECT record_version FROM agent_chat_task_graphs WHERE id = 'graph_versioned'",
+    )
+    .await;
+    assert_eq!(created_version, 1);
+
+    agent_chat_task_graph_repo::update_node_and_advance(
+        store.pool(),
+        "graph_versioned",
+        "a",
+        agent_chat_task_graph_repo::UpdateAgentChatTaskGraphNode {
+            status: Some("complete".to_string()),
+            result: Some(json!({"ok": true})),
+            error: None,
+        },
+    )
+    .await
+    .expect("complete node a")
+    .expect("graph and node");
+
+    let updated_version = scalar_count(
+        &store,
+        "SELECT record_version FROM agent_chat_task_graphs WHERE id = 'graph_versioned'",
+    )
+    .await;
+    assert!(
+        updated_version > created_version,
+        "record_version must advance on every write: {created_version} -> {updated_version}"
+    );
+}
+
+#[tokio::test]
+async fn draining_a_queued_ticket_survives_a_concurrent_graph_write() {
+    let (store, _dir) = open_store().await;
+
+    // Each round needs exactly one idle coding agent: the node drained in the
+    // previous round still holds its agent's reservation, so a fresh agent
+    // joins per round to keep "a routes, b queues" reproducible.
+    for round in 0..4 {
+        register_online_coding_agent(&store, &format!("cod{round}")).await;
+        let graph_id = format!("graph_drain_{round}");
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(
+            "a".to_string(),
+            scheduled_node("coding", "medium", "Do scheduled A", &[]),
+        );
+        nodes.insert(
+            "b".to_string(),
+            scheduled_node("coding", "medium", "Do scheduled B", &[]),
+        );
+        agent_chat_task_graph_repo::create_graph(
+            store.pool(),
+            agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+                id: Some(graph_id.clone()),
+                owner: "orchestrator".to_string(),
+                label: "Drain race graph".to_string(),
+                nodes,
+            },
+        )
+        .await
+        .expect("create graph");
+
+        let advanced = agent_chat_task_graph_repo::advance_graph(store.pool(), &graph_id)
+            .await
+            .expect("advance graph")
+            .expect("graph exists");
+        assert_eq!(advanced.nodes["a"].status, "dispatched");
+        assert_eq!(advanced.nodes["b"].status, "pending");
+        assert_eq!(
+            advanced.nodes["b"].scheduler_status.as_deref(),
+            Some("queued")
+        );
+
+        // Completing "a" releases its agent and drains b's ticket in a second,
+        // separately versioned write that runs after a's patch has already
+        // committed. Marking the queue row drained is the last statement of
+        // that release, so watching for it puts this racer exactly in the
+        // drain's read-modify-write window: it then bumps the graph row's
+        // version from under the drain a few times — fewer than the drain's own
+        // attempt budget, so a drain that retries correctly still converges.
+        let racer = {
+            let pool = store.pool().clone();
+            let graph_id = graph_id.clone();
+            let ticket = advanced.nodes["b"]
+                .scheduler_ticket
+                .clone()
+                .expect("queued ticket");
+            tokio::spawn(async move {
+                for _ in 0..100_000 {
+                    let status: Option<String> = sqlx::query_scalar(
+                        "SELECT status FROM agent_scheduler_queue WHERE ticket = ?",
+                    )
+                    .bind(&ticket)
+                    .fetch_optional(&pool)
+                    .await
+                    .expect("queue row");
+                    if status.as_deref() == Some("drained") {
+                        break;
+                    }
+                }
+                for _ in 0..4 {
+                    sqlx::query(
+                        "UPDATE agent_chat_task_graphs \
+                         SET record_version = record_version + 1 WHERE id = ?",
+                    )
+                    .bind(&graph_id)
+                    .execute(&pool)
+                    .await
+                    .expect("bump graph version");
+                }
+            })
+        };
+
+        let completed = agent_chat_task_graph_repo::update_node_and_advance(
+            store.pool(),
+            &graph_id,
+            "a",
+            agent_chat_task_graph_repo::UpdateAgentChatTaskGraphNode {
+                status: Some("complete".to_string()),
+                result: Some(json!({"ok": true})),
+                error: None,
+            },
+        )
+        .await
+        .expect("completing a node whose drain lost a version race must still succeed")
+        .expect("graph and node");
+        assert_eq!(completed.1.status, "complete");
+        racer.await.expect("join racer");
+
+        let graph = agent_chat_task_graph_repo::get_graph(store.pool(), &graph_id)
+            .await
+            .expect("read graph")
+            .expect("graph present");
+        assert_eq!(
+            graph.nodes["b"].status, "dispatched",
+            "drained node must not be stranded pending"
+        );
+        assert_eq!(
+            graph.nodes["b"].scheduler_status.as_deref(),
+            Some("drained")
+        );
+        assert_eq!(graph.nodes["b"].assignee, format!("cod{round}"));
+    }
+}
+
+#[tokio::test]
+async fn duplicate_graph_ids_are_rejected_as_conflicts() {
+    let (store, _dir) = open_store().await;
+    create_live_graph(&store).await;
+
+    let error = agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_live".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Duplicate graph".to_string(),
+            nodes: chain_nodes(),
+        },
+    )
+    .await
+    .expect_err("duplicate graph id is rejected");
+    assert!(
+        matches!(&error, StoreError::Conflict(message) if message.contains("already exists")),
+        "duplicate id must be a conflict, got {error:?}"
+    );
+
+    // Concurrent creators can clear the pre-check together and only collide on
+    // the insert; the loser is still a conflict, never a raw database error.
+    let mut handles = Vec::new();
+    for index in 0..4 {
+        let pool = store.pool().clone();
+        handles.push(tokio::spawn(async move {
+            agent_chat_task_graph_repo::create_graph(
+                &pool,
+                agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+                    id: Some("graph_race".to_string()),
+                    owner: "orchestrator".to_string(),
+                    label: format!("Race graph {index}"),
+                    nodes: chain_nodes(),
+                },
+            )
+            .await
+        }));
+    }
+    let mut created = 0;
+    for handle in handles {
+        match handle.await.expect("join") {
+            Ok(_) => created += 1,
+            Err(StoreError::Conflict(message)) => {
+                assert!(
+                    message.contains("already exists"),
+                    "unexpected conflict: {message}"
+                );
+            }
+            Err(other) => panic!("duplicate create must not fail internally: {other:?}"),
+        }
+    }
+    assert_eq!(created, 1, "exactly one concurrent creator wins the id");
+}
+
+fn native_node(
+    provider: &str,
+    program: &str,
+    depends_on: &[&str],
+) -> agent_chat_task_graph_repo::AgentChatTaskGraphNodeInput {
+    agent_chat_task_graph_repo::AgentChatTaskGraphNodeInput {
+        id: None,
+        assignee: None,
+        role: None,
+        capability: None,
+        description: "Run the native step".to_string(),
+        depends_on: depends_on
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect(),
+        condition: None,
+        execution: Some(json!({
+            "version": 1,
+            "provider": provider,
+            "program": program,
+            "args": [],
+            "cwd": null,
+            "env": []
+        })),
+    }
+}
+
+#[tokio::test]
+async fn a_node_with_an_execution_spec_is_queued_for_a_native_worker() {
+    let (store, _dir) = open_store().await;
+    let mut nodes = BTreeMap::new();
+    nodes.insert(
+        "build".to_string(),
+        native_node("codex", "/usr/bin/codex", &[]),
+    );
+    agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_native".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Native graph".to_string(),
+            nodes,
+        },
+    )
+    .await
+    .expect("create graph");
+    // `create_graph` persists; `advance_graph` dispatches.
+    let graph = agent_chat_task_graph_repo::advance_graph(store.pool(), "graph_native")
+        .await
+        .expect("advance graph")
+        .expect("graph present");
+
+    let node = &graph.nodes["build"];
+    assert_eq!(node.status, "dispatched");
+    let execution_task_id = node
+        .execution_task_id
+        .clone()
+        .expect("dispatched native node records its execution task id");
+    assert_eq!(node.message_id, None, "native nodes are not messaged");
+    assert_eq!(
+        scalar_count(&store, "SELECT COUNT(*) FROM direct_messages").await,
+        0
+    );
+
+    let (queue_status, provider): (String, Option<String>) = sqlx::query_as(
+        "SELECT q.status, json_extract(t.execution_spec_json, '$.provider') \
+         FROM execution_task_queue q JOIN task_runs t ON t.id = q.execution_task_id \
+         WHERE q.execution_task_id = ?",
+    )
+    .bind(&execution_task_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("queue row");
+    assert_eq!(queue_status, "queued");
+    assert_eq!(provider.as_deref(), Some("codex"));
+
+    assert_eq!(
+        scalar_count(
+            &store,
+            "SELECT COUNT(*) FROM task_graph_node_executions \
+             WHERE graph_id = 'graph_native' AND node_id = 'build' AND settled = 0"
+        )
+        .await,
+        1
+    );
+}
+
+async fn create_single_native_graph(store: &SqliteStore, graph_id: &str) {
+    let mut nodes = BTreeMap::new();
+    nodes.insert(
+        "build".to_string(),
+        native_node("codex", "/usr/bin/codex", &[]),
+    );
+    agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some(graph_id.to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Native replay graph".to_string(),
+            nodes,
+        },
+    )
+    .await
+    .expect("create graph");
+}
+
+/// Rewind a node to `pending` behind the repo's back. `advance_graph` only
+/// dispatches pending nodes, so without this a re-advance never reaches the
+/// dispatch path and an idempotency assertion proves nothing.
+async fn rewind_node_to_pending(store: &SqliteStore, graph_id: &str, node_id: &str) {
+    sqlx::query(
+        "UPDATE agent_chat_task_graphs \
+         SET raw_json = json_set(raw_json, '$.nodes.' || ? || '.status', 'pending') WHERE id = ?",
+    )
+    .bind(node_id)
+    .bind(graph_id)
+    .execute(store.pool())
+    .await
+    .expect("rewind node");
+}
+
+#[tokio::test]
+async fn re_advancing_a_native_node_does_not_enqueue_it_twice() {
+    let (store, _dir) = open_store().await;
+    create_single_native_graph(&store, "graph_native_replay").await;
+
+    let graph = agent_chat_task_graph_repo::advance_graph(store.pool(), "graph_native_replay")
+        .await
+        .expect("advance")
+        .expect("graph present");
+    let execution_task_id = graph.nodes["build"]
+        .execution_task_id
+        .clone()
+        .expect("first advance links an execution task");
+
+    // Replay the dispatch twice with the queue row still in place.
+    for _ in 0..2 {
+        rewind_node_to_pending(&store, "graph_native_replay", "build").await;
+        let replayed =
+            agent_chat_task_graph_repo::advance_graph(store.pool(), "graph_native_replay")
+                .await
+                .expect("advance")
+                .expect("graph present");
+        assert_eq!(
+            replayed.nodes["build"].execution_task_id.as_deref(),
+            Some(execution_task_id.as_str()),
+            "a replayed dispatch reuses the linked execution task"
+        );
+    }
+
+    assert_eq!(
+        scalar_count(&store, "SELECT COUNT(*) FROM execution_task_queue").await,
+        1
+    );
+    assert_eq!(
+        scalar_count(&store, "SELECT COUNT(*) FROM task_graph_node_executions").await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_native_node_stranded_without_a_queue_row_is_healed_by_the_next_advance() {
+    let (store, _dir) = open_store().await;
+    create_single_native_graph(&store, "graph_native_strand").await;
+
+    let graph = agent_chat_task_graph_repo::advance_graph(store.pool(), "graph_native_strand")
+        .await
+        .expect("advance")
+        .expect("graph present");
+    let execution_task_id = graph.nodes["build"]
+        .execution_task_id
+        .clone()
+        .expect("first advance links an execution task");
+
+    // The link row commits before the enqueue, so a crash or a transient
+    // storage failure in between leaves exactly this shape: a linked node with
+    // no queue row and nothing to settle it.
+    sqlx::query("DELETE FROM execution_task_queue")
+        .execute(store.pool())
+        .await
+        .expect("strand the node");
+    rewind_node_to_pending(&store, "graph_native_strand", "build").await;
+
+    let healed = agent_chat_task_graph_repo::advance_graph(store.pool(), "graph_native_strand")
+        .await
+        .expect("advance")
+        .expect("graph present");
+    assert_eq!(
+        healed.nodes["build"].execution_task_id.as_deref(),
+        Some(execution_task_id.as_str()),
+        "healing re-enqueues the linked task rather than creating a new one"
+    );
+
+    let (queued_task, status): (String, String) =
+        sqlx::query_as("SELECT execution_task_id, status FROM execution_task_queue")
+            .fetch_one(store.pool())
+            .await
+            .expect("exactly one queue row after healing");
+    assert_eq!(queued_task, execution_task_id);
+    assert_eq!(status, "queued");
+    assert_eq!(
+        scalar_count(&store, "SELECT COUNT(*) FROM task_graph_node_executions").await,
+        1
+    );
+    assert_eq!(
+        scalar_count(&store, "SELECT COUNT(*) FROM task_runs").await,
+        1,
+        "healing does not mint a second execution task"
+    );
+}
+
+#[tokio::test]
+async fn a_node_cannot_be_both_scheduler_routed_and_natively_executed() {
+    let (store, _dir) = open_store().await;
+    let mut conflicting = native_node("codex", "/usr/bin/codex", &[]);
+    conflicting.role = Some("coding".to_string());
+    let mut nodes = BTreeMap::new();
+    nodes.insert("build".to_string(), conflicting);
+
+    let error = agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_native_conflict".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Conflicting graph".to_string(),
+            nodes,
+        },
+    )
+    .await
+    .expect_err("role and execution are mutually exclusive");
+    assert!(
+        matches!(&error, agentd_store::StoreError::Invariant(message)
+            if message.contains("role") && message.contains("execution")),
+        "expected an invariant naming both fields, got: {error}"
+    );
+}
+
+#[tokio::test]
+async fn a_node_cannot_be_both_assigned_to_an_agent_and_natively_executed() {
+    let (store, _dir) = open_store().await;
+    let mut conflicting = native_node("codex", "/usr/bin/codex", &[]);
+    conflicting.assignee = Some("alice".to_string());
+    let mut nodes = BTreeMap::new();
+    nodes.insert("build".to_string(), conflicting);
+
+    let error = agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_native_assignee_conflict".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Conflicting graph".to_string(),
+            nodes,
+        },
+    )
+    .await
+    .expect_err("assignee and execution are mutually exclusive");
+    assert!(
+        matches!(&error, agentd_store::StoreError::Invariant(message)
+            if message.contains("assignee") && message.contains("execution")),
+        "expected an invariant naming both fields, got: {error}"
+    );
+}
+
+async fn native_pair_graph(store: &SqliteStore, graph_id: &str) -> String {
+    let mut nodes = BTreeMap::new();
+    nodes.insert(
+        "build".to_string(),
+        native_node("codex", "/usr/bin/codex", &[]),
+    );
+    nodes.insert("report".to_string(), node("codex-b", "Report", &["build"]));
+    agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some(graph_id.to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Native pair".to_string(),
+            nodes,
+        },
+    )
+    .await
+    .expect("create graph");
+    let graph = agent_chat_task_graph_repo::advance_graph(store.pool(), graph_id)
+        .await
+        .expect("advance graph")
+        .expect("graph present");
+    graph.nodes["build"]
+        .execution_task_id
+        .clone()
+        .expect("execution task id")
+}
+
+async fn force_queue_status(store: &SqliteStore, execution_task_id: &str, status: &str) {
+    sqlx::query(
+        "UPDATE execution_task_queue SET status = ?, current_lease_id = NULL, \
+         last_reason = 'test forced', updated_at = 0 WHERE execution_task_id = ?",
+    )
+    .bind(status)
+    .bind(execution_task_id)
+    .execute(store.pool())
+    .await
+    .expect("force queue status");
+}
+
+#[tokio::test]
+async fn a_completed_queue_row_completes_its_node_and_unlocks_downstream() {
+    let (store, _dir) = open_store().await;
+    let execution_task_id = native_pair_graph(&store, "graph_settle_ok").await;
+    force_queue_status(&store, &execution_task_id, "completed").await;
+
+    let settled = agent_chat_task_graph_repo::settle_node_executions(store.pool(), 500)
+        .await
+        .expect("settle");
+    assert_eq!(settled, 1);
+
+    let graph = agent_chat_task_graph_repo::get_graph(store.pool(), "graph_settle_ok")
+        .await
+        .expect("read graph")
+        .expect("graph present");
+    assert_eq!(graph.nodes["build"].status, "complete");
+    assert_eq!(
+        graph.nodes["build"]
+            .result
+            .as_ref()
+            .and_then(|result| result
+                .get("executionTaskId")
+                .and_then(serde_json::Value::as_str)),
+        Some(execution_task_id.as_str())
+    );
+    assert_eq!(
+        graph.nodes["report"].status, "dispatched",
+        "the downstream node must be unlocked by the native completion"
+    );
+
+    let again = agent_chat_task_graph_repo::settle_node_executions(store.pool(), 600)
+        .await
+        .expect("settle again");
+    assert_eq!(again, 0, "settlement is idempotent");
+}
+
+#[tokio::test]
+async fn a_dead_lettered_queue_row_fails_its_node_and_its_graph() {
+    let (store, _dir) = open_store().await;
+    let execution_task_id = native_pair_graph(&store, "graph_settle_fail").await;
+    force_queue_status(&store, &execution_task_id, "dead_letter").await;
+
+    let settled = agent_chat_task_graph_repo::settle_node_executions(store.pool(), 500)
+        .await
+        .expect("settle");
+    assert_eq!(settled, 1);
+
+    let graph = agent_chat_task_graph_repo::get_graph(store.pool(), "graph_settle_fail")
+        .await
+        .expect("read graph")
+        .expect("graph present");
+    assert_eq!(graph.nodes["build"].status, "failed");
+    assert!(
+        graph.nodes["build"]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("test forced")),
+        "the queue reason must reach the node: {:?}",
+        graph.nodes["build"].error
+    );
+    assert_eq!(graph.nodes["report"].status, "failed");
+    assert_eq!(graph.status, "failed");
+}
+
+#[tokio::test]
+async fn settle_absorbs_a_node_already_terminated_by_a_late_message_without_losing_the_link() {
+    let (store, _dir) = open_store().await;
+    let execution_task_id = native_pair_graph(&store, "graph_settle_race").await;
+
+    // Simulate a late message reaching the node and marking it terminal
+    // *before* the queue row itself reaches a terminal status. This is the
+    // legitimate-conflict case: update_node_and_advance's settled-node guard
+    // will reject the settle pass's own patch as a `StoreError::Conflict`
+    // that is not the "changed concurrently" CAS-exhaustion variant.
+    agent_chat_task_graph_repo::update_node_and_advance(
+        store.pool(),
+        "graph_settle_race",
+        "build",
+        agent_chat_task_graph_repo::UpdateAgentChatTaskGraphNode {
+            status: Some("failed".to_string()),
+            result: None,
+            error: Some("message-path failure".to_string()),
+        },
+    )
+    .await
+    .expect("update via message path")
+    .expect("node present");
+
+    // Only now does the queue row (independently) reach a terminal status.
+    force_queue_status(&store, &execution_task_id, "completed").await;
+
+    let settled = agent_chat_task_graph_repo::settle_node_executions(store.pool(), 500)
+        .await
+        .expect("settle absorbs the legitimate terminal-state conflict");
+    assert_eq!(
+        settled, 1,
+        "the link must still be marked settled even though the patch itself was rejected"
+    );
+
+    let graph = agent_chat_task_graph_repo::get_graph(store.pool(), "graph_settle_race")
+        .await
+        .expect("read graph")
+        .expect("graph present");
+    assert_eq!(
+        graph.nodes["build"].status, "failed",
+        "node status must be left exactly as the message path set it"
+    );
+    assert_eq!(
+        graph.nodes["build"].error.as_deref(),
+        Some("message-path failure"),
+        "the settle pass must not overwrite the message path's error with its own dead-letter reason"
+    );
+
+    let again = agent_chat_task_graph_repo::settle_node_executions(store.pool(), 600)
+        .await
+        .expect("settle again");
+    assert_eq!(again, 0, "the link row must not be revisited once settled");
+}
+
+/// A graph whose downstream node is itself native, so settling the upstream one
+/// makes the advance enqueue the downstream execution. Returns the upstream
+/// node's execution task id.
+async fn native_chain_graph(store: &SqliteStore, graph_id: &str) -> String {
+    let mut nodes = BTreeMap::new();
+    nodes.insert(
+        "build".to_string(),
+        native_node("codex", "/usr/bin/codex", &[]),
+    );
+    nodes.insert(
+        "report".to_string(),
+        native_node("codex", "/usr/bin/codex", &["build"]),
+    );
+    agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some(graph_id.to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Native chain".to_string(),
+            nodes,
+        },
+    )
+    .await
+    .expect("create graph");
+    let graph = agent_chat_task_graph_repo::advance_graph(store.pool(), graph_id)
+        .await
+        .expect("advance graph")
+        .expect("graph present");
+    graph.nodes["build"]
+        .execution_task_id
+        .clone()
+        .expect("execution task id")
+}
+
+#[tokio::test]
+async fn a_downstream_enqueue_outage_keeps_the_settling_node_retryable() {
+    let (store, _dir) = open_store().await;
+    let graph_id = "graph_settle_enqueue_outage";
+    let execution_task_id = native_chain_graph(&store, graph_id).await;
+    force_queue_status(&store, &execution_task_id, "completed").await;
+
+    // Make the downstream node's enqueue fail the way a busy database does:
+    // the queue INSERT aborts, sqlx surfaces it, and the scheduler port maps it
+    // to `Unavailable`, which the repo reports as a `Conflict`. The settle pass
+    // must not read that conflict as "somebody else finished this node".
+    let downstream_request_id = format!("task-graph-{}-{graph_id}-report", graph_id.len());
+    sqlx::query(&format!(
+        "CREATE TRIGGER simulate_enqueue_outage BEFORE INSERT ON execution_task_queue \
+         WHEN NEW.request_id = '{downstream_request_id}' \
+         BEGIN SELECT RAISE(ABORT, 'database is locked'); END"
+    ))
+    .execute(store.pool())
+    .await
+    .expect("install the outage trigger");
+
+    let error = agent_chat_task_graph_repo::settle_node_executions(store.pool(), 500)
+        .await
+        .expect_err("a transient downstream enqueue failure must not be absorbed");
+    assert!(
+        matches!(&error, StoreError::Conflict(message)
+            if message.contains("enqueue node 'report' unavailable")),
+        "the outage must surface as the enqueue conflict, got {error:?}"
+    );
+
+    assert_eq!(
+        scalar_count(
+            &store,
+            "SELECT COUNT(*) FROM task_graph_node_executions \
+             WHERE graph_id = 'graph_settle_enqueue_outage' AND node_id = 'build' AND settled = 0"
+        )
+        .await,
+        1,
+        "the link must stay unsettled so the next tick retries it"
+    );
+    let graph = agent_chat_task_graph_repo::get_graph(store.pool(), graph_id)
+        .await
+        .expect("read graph")
+        .expect("graph present");
+    assert_eq!(
+        graph.nodes["build"].status, "dispatched",
+        "the patch never reached the graph, so the node must be untouched"
+    );
+    assert_eq!(graph.nodes["report"].status, "pending");
+    assert_eq!(graph.status, "active");
+
+    // The outage clears; the very next settle pass heals both nodes.
+    sqlx::query("DROP TRIGGER simulate_enqueue_outage")
+        .execute(store.pool())
+        .await
+        .expect("clear the outage");
+
+    let settled = agent_chat_task_graph_repo::settle_node_executions(store.pool(), 600)
+        .await
+        .expect("settle after the outage clears");
+    assert_eq!(settled, 1);
+    let graph = agent_chat_task_graph_repo::get_graph(store.pool(), graph_id)
+        .await
+        .expect("read graph")
+        .expect("graph present");
+    assert_eq!(graph.nodes["build"].status, "complete");
+    assert_eq!(graph.nodes["report"].status, "dispatched");
+    assert_eq!(
+        scalar_count(
+            &store,
+            "SELECT COUNT(*) FROM execution_task_queue q \
+             JOIN task_graph_node_executions e ON e.execution_task_id = q.execution_task_id \
+             WHERE e.graph_id = 'graph_settle_enqueue_outage' AND e.node_id = 'report'"
+        )
+        .await,
+        1,
+        "the downstream execution must be enqueued on the retry"
+    );
+    assert_eq!(
+        scalar_count(
+            &store,
+            "SELECT COUNT(*) FROM task_graph_node_executions \
+             WHERE graph_id = 'graph_settle_enqueue_outage' AND node_id = 'build' AND settled = 1"
+        )
+        .await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_graph_settles_its_open_node_executions() {
+    let (store, _dir) = open_store().await;
+    let execution_task_id = native_pair_graph(&store, "graph_settle_deleted").await;
+
+    agent_chat_task_graph_repo::delete_graph(store.pool(), "graph_settle_deleted")
+        .await
+        .expect("delete graph")
+        .expect("graph present");
+    force_queue_status(&store, &execution_task_id, "completed").await;
+
+    let settled = agent_chat_task_graph_repo::settle_node_executions(store.pool(), 500)
+        .await
+        .expect("settle");
+    assert_eq!(settled, 0, "a deleted graph has no open node executions");
+
+    let graph = agent_chat_task_graph_repo::get_graph(store.pool(), "graph_settle_deleted")
+        .await
+        .expect("read graph")
+        .expect("graph present");
+    assert_eq!(graph.nodes["build"].status, "cancelled");
+}
+
+#[tokio::test]
+async fn one_unreadable_legacy_row_does_not_break_the_listing() {
+    let (store, _dir) = open_store().await;
+    agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_good".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Good graph".to_string(),
+            nodes: chain_nodes(),
+        },
+    )
+    .await
+    .expect("create graph");
+    sqlx::query(
+        "INSERT INTO agent_chat_task_graphs \
+         (id, owner, label, status, raw_json, record_version, imported_at) \
+         VALUES ('graph_broken', 'alex', 'Broken', 'active', '{\"nodes\":', 1, 0)",
+    )
+    .execute(store.pool())
+    .await
+    .expect("insert unreadable row");
+
+    let listed = agent_chat_task_graph_repo::list_graphs(store.pool(), None)
+        .await
+        .expect("listing tolerates one unreadable row");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, "graph_good");
 }

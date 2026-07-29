@@ -1699,6 +1699,13 @@ fn task_error_response(e: CoreError) -> Response {
         CoreError::Invariant(message) => {
             (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))).into_response()
         }
+        // `StoreError::Conflict` arrives as `CoreError::Store("conflict: …")`
+        // (see `agentd_store::error`); classify it as 409, not 500.
+        CoreError::Store(message) if message.starts_with("conflict: ") => (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": message.trim_start_matches("conflict: ") })),
+        )
+            .into_response(),
         CoreError::Store(message) if message.starts_with("invariant violated: ") => (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": message.trim_start_matches("invariant violated: ") })),

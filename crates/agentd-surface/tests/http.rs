@@ -945,6 +945,61 @@ async fn http_agent_chat_task_graph_crud_dispatch_and_node_updates() {
 }
 
 #[tokio::test]
+async fn http_task_graph_duplicate_id_is_a_conflict() {
+    let app = app(FakeRunHost::new());
+
+    let created = post(
+        app.clone(),
+        "/api/task-graphs",
+        &chain_graph_body().to_string(),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+
+    let duplicate = post(app, "/api/task-graphs", &chain_graph_body().to_string()).await;
+    assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+    let duplicate: Value =
+        serde_json::from_str(&body_string(duplicate).await).expect("duplicate json");
+    assert!(
+        duplicate["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("already exists")),
+        "body: {duplicate}"
+    );
+}
+
+#[tokio::test]
+async fn http_task_graph_node_patch_after_delete_is_a_conflict() {
+    let app = app(FakeRunHost::new());
+
+    let created = post(
+        app.clone(),
+        "/api/task-graphs",
+        &chain_graph_body().to_string(),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+
+    let deleted = delete(app.clone(), "/api/task-graphs/graph_live").await;
+    assert_eq!(deleted.status(), StatusCode::OK);
+
+    let patched = patch(
+        app,
+        "/api/task-graphs/graph_live/nodes/a",
+        &json!({"status": "complete", "result": {"ok": true}}).to_string(),
+    )
+    .await;
+    assert_eq!(patched.status(), StatusCode::CONFLICT);
+    let patched: Value = serde_json::from_str(&body_string(patched).await).expect("patch json");
+    assert!(
+        patched["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("cancelled")),
+        "body: {patched}"
+    );
+}
+
+#[tokio::test]
 async fn http_agent_chat_task_graph_rejects_invalid_graphs_and_requires_assignee_token() {
     let mut auth = AuthConfig::open();
     auth.agent_token_mode = AgentTokenMode::Hard;

@@ -2328,6 +2328,7 @@ impl RunHost for ProductionRunHost {
                                 description: node.description,
                                 depends_on: node.depends_on,
                                 condition: node.condition,
+                                execution: node.execution,
                             },
                         )
                     })
@@ -2898,6 +2899,8 @@ fn surface_agent_chat_task_graph_node(
         result: node.result,
         error: node.error,
         condition: node.condition,
+        execution: node.execution,
+        execution_task_id: node.execution_task_id,
         message_id: node.message_id,
         started_at: node.started_at,
         dispatched_at: node.dispatched_at,
