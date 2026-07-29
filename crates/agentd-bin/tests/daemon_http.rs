@@ -1931,6 +1931,97 @@ async fn daemon_router_matrix_inbound_agent_dm_persists_source_metadata_and_dedu
 }
 
 #[tokio::test]
+async fn daemon_router_matrix_inbound_replay_short_circuits_after_trust_revoked() {
+    // Regression: a gateway can crash after the daemon durably accepts an
+    // event but before it advances its local cursor, so the same event gets
+    // replayed on restart. If trust on the room is revoked in between, a
+    // replay of an event that was ALREADY recorded must still answer with
+    // `duplicate: true`, not 403 — the message is already durably in the
+    // inbox, so a 403 protects nothing here and would permanently stall the
+    // gateway (it never advances past a replay it can't get past).
+    let (app, _dir) = empty_router().await;
+    let (agent_status, agent_body) = post(
+        app.clone(),
+        "/api/agents",
+        serde_json::json!({
+            "name": "codex-worker",
+            "runtime": "codex"
+        }),
+    )
+    .await;
+    assert_eq!(agent_status, StatusCode::OK, "body: {agent_body}");
+
+    let (room_status, room_body) = post(
+        app.clone(),
+        "/api/matrix/rooms",
+        serde_json::json!({
+            "roomId": "!ops:matrix.test",
+            "agent": "codex-worker",
+            "trusted": true,
+            "trustReason": "managed"
+        }),
+    )
+    .await;
+    assert_eq!(room_status, StatusCode::OK, "body: {room_body}");
+
+    let inbound = serde_json::json!({
+        "eventId": "$ops-1",
+        "roomId": "!ops:matrix.test",
+        "senderMxid": "@alice:matrix.test",
+        "body": "please review the patch",
+        "trustLevel": "external"
+    });
+    let (first_status, first_body) =
+        post(app.clone(), "/api/matrix/inbound", inbound.clone()).await;
+    assert_eq!(first_status, StatusCode::CREATED, "body: {first_body}");
+    let first: serde_json::Value = serde_json::from_str(&first_body).expect("first json");
+    assert_eq!(first["ok"], true);
+    assert_eq!(first["duplicate"], false);
+    let message_id = first["message"]["id"].as_str().expect("message id");
+
+    // Revoke trust on the room after the event was already accepted.
+    let (revoke_status, revoke_body) = post(
+        app.clone(),
+        "/api/matrix/rooms",
+        serde_json::json!({
+            "roomId": "!ops:matrix.test",
+            "agent": "codex-worker",
+            "trusted": false,
+            "trustReason": "compromised"
+        }),
+    )
+    .await;
+    assert_eq!(revoke_status, StatusCode::OK, "body: {revoke_body}");
+
+    // Replaying the same event must short-circuit to `duplicate: true`
+    // (HTTP 200), not 403 — trust revocation must not turn an idempotent
+    // replay of already-recorded traffic into a permanent rejection.
+    let (replay_status, replay_body) = post(app.clone(), "/api/matrix/inbound", inbound).await;
+    assert_eq!(replay_status, StatusCode::OK, "body: {replay_body}");
+    let replay: serde_json::Value = serde_json::from_str(&replay_body).expect("replay json");
+    assert_eq!(replay["duplicate"], true, "body: {replay_body}");
+    assert_eq!(replay["messageId"], message_id);
+
+    // A genuinely NEW event in the now-untrusted room must still be
+    // rejected with 403 — trust revocation still bites new traffic.
+    let (new_status, new_body) = post(
+        app,
+        "/api/matrix/inbound",
+        serde_json::json!({
+            "eventId": "$ops-2",
+            "roomId": "!ops:matrix.test",
+            "senderMxid": "@alice:matrix.test",
+            "body": "a brand new message",
+            "trustLevel": "external"
+        }),
+    )
+    .await;
+    assert_eq!(new_status, StatusCode::FORBIDDEN, "body: {new_body}");
+    let new_value: serde_json::Value = serde_json::from_str(&new_body).expect("new json");
+    assert_eq!(new_value["error"], "matrix room not trusted");
+}
+
+#[tokio::test]
 async fn daemon_router_matrix_inbound_rejects_untrusted_room() {
     let (app, _dir) = empty_router().await;
 

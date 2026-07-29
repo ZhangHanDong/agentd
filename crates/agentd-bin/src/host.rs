@@ -1988,7 +1988,39 @@ impl RunHost for ProductionRunHost {
         &self,
         input: SurfaceMatrixInboundMessageInput,
     ) -> Result<SurfaceMatrixInboundMessageResult, CoreError> {
-        let room = matrix_bridge_repo::get_room(self.store.pool(), &input.room_id)
+        let event_id = clean_required(Some(&input.event_id), "matrix event id required")?;
+        let room_id = clean_required(Some(&input.room_id), "matrix room id required")?;
+        if let Some(existing) = matrix_bridge_repo::get_event(self.store.pool(), &event_id).await? {
+            // A replay must answer with the command it already produced, not a
+            // blank. `[AGENTIGNORE]` events have no command row, so `None`
+            // here means "recorded but never a command", not "unknown".
+            //
+            // This short-circuit sits ABOVE the trust and cutover/fence checks
+            // below on purpose: the event is already durably recorded (and, if
+            // applicable, already relayed), so trust being revoked *after* the
+            // fact must not turn an idempotent replay into a rejection. A
+            // gateway that crashes before advancing its cursor would otherwise
+            // re-post this same event forever, get a permanent 403, and stall
+            // every other room queued behind it in the same batch.
+            let command = matrix_bridge_repo::get_command(
+                self.store.pool(),
+                &matrix_bridge_repo::matrix_command_id(&room_id, &event_id),
+            )
+            .await
+            .map_err(core_from_store_error)?;
+            return Ok(SurfaceMatrixInboundMessageResult {
+                ok: true,
+                duplicate: true,
+                ignored: existing.ignored,
+                route: existing.route,
+                event_id: existing.event_id,
+                message_id: existing.message_id,
+                command_id: command.map(|command| command.command_id),
+                message: None,
+            });
+        }
+
+        let room = matrix_bridge_repo::get_room(self.store.pool(), &room_id)
             .await?
             .ok_or_else(|| CoreError::Invariant("matrix room not trusted".into()))?;
         if !room.trusted {
@@ -2021,30 +2053,7 @@ impl RunHost for ProductionRunHost {
                 ));
             }
         }
-        let event_id = clean_required(Some(&input.event_id), "matrix event id required")?;
-        let room_id = clean_required(Some(&input.room_id), "matrix room id required")?;
         let sender_mxid = clean_required(Some(&input.sender_mxid), "matrix sender mxid required")?;
-        if let Some(existing) = matrix_bridge_repo::get_event(self.store.pool(), &event_id).await? {
-            // A replay must answer with the command it already produced, not a
-            // blank. `[AGENTIGNORE]` events have no command row, so `None`
-            // here means "recorded but never a command", not "unknown".
-            let command = matrix_bridge_repo::get_command(
-                self.store.pool(),
-                &matrix_bridge_repo::matrix_command_id(&room_id, &event_id),
-            )
-            .await
-            .map_err(core_from_store_error)?;
-            return Ok(SurfaceMatrixInboundMessageResult {
-                ok: true,
-                duplicate: true,
-                ignored: existing.ignored,
-                route: existing.route,
-                event_id: existing.event_id,
-                message_id: existing.message_id,
-                command_id: command.map(|command| command.command_id),
-                message: None,
-            });
-        }
 
         if input
             .body
