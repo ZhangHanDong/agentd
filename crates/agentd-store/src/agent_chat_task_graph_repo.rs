@@ -265,8 +265,19 @@ pub async fn list_graphs(
     // Pre-filter in SQL rather than only after `row_to_graph`: this runs on
     // every maintenance tick via `advance_active_graphs`, and parsing first
     // would deserialize the `raw_json` of every graph ever created — including
-    // long-completed ones, which nothing deletes. `idx_agent_chat_task_graphs_status`
-    // covers the predicate.
+    // long-completed ones, which nothing deletes.
+    //
+    // The `OR` below defeats `idx_agent_chat_task_graphs_status`: EXPLAIN QUERY
+    // PLAN reports SCAN, not a SEARCH via that index (plain `status = ?` would
+    // seek it, `ORDER BY rowid` included). So this still walks every leaf page
+    // per tick, growing with total graph count. What it does buy is the part
+    // that mattered: `raw_json` never crosses into Rust and `serde_json` never
+    // runs for a non-matching row, since SQLite reads `status` from the record
+    // header without faulting in the overflow pages. To get the index seek
+    // back, make the data agree instead of widening the predicate — have the
+    // import bind the same normalized status it writes into `raw_json`, backfill
+    // `UPDATE ... SET status = 'active' WHERE status IS NULL` (exactly what
+    // every reader already infers for those rows), then drop the `OR`.
     //
     // `OR status IS NULL` keeps the SQL predicate exactly as wide as the Rust
     // one below. `upsert_graph` always writes the column from the same value it
