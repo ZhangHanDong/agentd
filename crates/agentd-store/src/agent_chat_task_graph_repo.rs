@@ -301,7 +301,7 @@ pub async fn advance_graph(
         let Some(graph) = get_graph(pool, id).await? else {
             return Ok(None);
         };
-        match advance_graph_record(pool, graph).await {
+        match advance_graph_record(pool, graph, false).await {
             Ok(graph) => return Ok(Some(graph)),
             Err(error) if is_concurrent_write_conflict(&error) => {}
             Err(error) => return Err(error),
@@ -367,7 +367,9 @@ async fn update_node_and_advance_once(
         });
     apply_node_patch(node, patch)?;
     graph.updated_at = now_text();
-    let mut graph = advance_graph_record(pool, graph).await?;
+    // The patch above is this call's whole point, so the advance must write
+    // even when it finds nothing further to do.
+    let mut graph = advance_graph_record(pool, graph, true).await?;
     if let Some(agent) = release_agent {
         // The node patch is committed by this point, so the scheduler drain is
         // a best-effort follow-on rather than part of this call's outcome. Its
@@ -521,16 +523,28 @@ pub async fn handle_result_message(
     }))
 }
 
+/// Drive a graph as far as it will go and persist it.
+///
+/// `caller_changed` reports whether the caller already mutated `graph` and is
+/// relying on this call's write to persist it. It matters because the write is
+/// skipped when nothing changed: the maintenance sweep re-advances every active
+/// graph every tick, and a graph parked on a `dispatched` node awaiting an
+/// external reply would otherwise re-serialize its whole JSON and take the
+/// single writer on each of those ticks for no state change at all. A caller
+/// that patched a node must pass `true`, or that patch is silently dropped.
 #[allow(clippy::too_many_lines)]
 async fn advance_graph_record(
     pool: &SqlitePool,
     mut graph: AgentChatTaskGraphRecord,
+    caller_changed: bool,
 ) -> Result<AgentChatTaskGraphRecord, StoreError> {
     if graph.status != "active" {
-        upsert_graph(pool, &mut graph).await?;
+        if caller_changed {
+            upsert_graph(pool, &mut graph).await?;
+        }
         return Ok(graph);
     }
-    let mut changed = false;
+    let mut changed = caller_changed;
     loop {
         let mut changed_this_pass = false;
         let node_ids = graph.nodes.keys().cloned().collect::<Vec<_>>();
@@ -667,8 +681,8 @@ async fn advance_graph_record(
     }
     if changed {
         graph.updated_at = now_text();
+        upsert_graph(pool, &mut graph).await?;
     }
-    upsert_graph(pool, &mut graph).await?;
     Ok(graph)
 }
 

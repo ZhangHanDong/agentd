@@ -640,6 +640,57 @@ async fn every_graph_write_bumps_the_record_version() {
     .await;
     assert_eq!(created_version, 1);
 
+    // A productive advance — the root goes from `pending` to `dispatched` — is
+    // still a write.
+    agent_chat_task_graph_repo::advance_graph(store.pool(), "graph_versioned")
+        .await
+        .expect("advance graph")
+        .expect("graph exists");
+    let dispatched_version = scalar_count(
+        &store,
+        "SELECT record_version FROM agent_chat_task_graphs WHERE id = 'graph_versioned'",
+    )
+    .await;
+    assert!(
+        dispatched_version > created_version,
+        "dispatching the root must persist: {created_version} -> {dispatched_version}"
+    );
+
+    // A node patch that the advance itself cannot act on — `a` moves to
+    // `active`, so no dependent unblocks and the graph is not terminal — is
+    // still the caller's durable write and must land.
+    agent_chat_task_graph_repo::update_node_and_advance(
+        store.pool(),
+        "graph_versioned",
+        "a",
+        agent_chat_task_graph_repo::UpdateAgentChatTaskGraphNode {
+            status: Some("active".to_string()),
+            result: None,
+            error: None,
+        },
+    )
+    .await
+    .expect("mark node a active")
+    .expect("graph and node");
+    let active_version = scalar_count(
+        &store,
+        "SELECT record_version FROM agent_chat_task_graphs WHERE id = 'graph_versioned'",
+    )
+    .await;
+    assert!(
+        active_version > dispatched_version,
+        "a patch the advance cannot act on must still persist: \
+         {dispatched_version} -> {active_version}"
+    );
+    let reread = agent_chat_task_graph_repo::get_graph(store.pool(), "graph_versioned")
+        .await
+        .expect("get graph")
+        .expect("graph exists");
+    assert_eq!(
+        reread.nodes["a"].status, "active",
+        "the patch must survive a re-read"
+    );
+
     agent_chat_task_graph_repo::update_node_and_advance(
         store.pool(),
         "graph_versioned",
@@ -660,8 +711,8 @@ async fn every_graph_write_bumps_the_record_version() {
     )
     .await;
     assert!(
-        updated_version > created_version,
-        "record_version must advance on every write: {created_version} -> {updated_version}"
+        updated_version > active_version,
+        "record_version must advance on every write: {active_version} -> {updated_version}"
     );
 }
 
@@ -1518,4 +1569,67 @@ async fn advance_active_graphs_is_idempotent_and_skips_settled_graphs() {
         .await
         .expect("third sweep");
     assert_eq!(third, 0, "a cancelled graph is not active and is skipped");
+}
+
+#[tokio::test]
+async fn a_sweep_that_advances_nothing_does_not_write() {
+    let (store, _dir) = open_store().await;
+
+    // The sweep runs every maintenance tick, and a graph parked on a
+    // `dispatched` node waiting for an external reply advances nothing on each
+    // of those ticks. Re-serializing the whole graph and taking the single
+    // writer for that is pure write amplification, so a no-op advance must not
+    // touch the row at all.
+    let mut nodes = BTreeMap::new();
+    nodes.insert("a".to_string(), node("codex-a", "Do A", &[]));
+    nodes.insert("b".to_string(), node("codex-b", "Do B", &["a"]));
+    agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_parked".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Parked".to_string(),
+            nodes,
+        },
+    )
+    .await
+    .expect("create graph");
+
+    let advanced = agent_chat_task_graph_repo::advance_active_graphs(store.pool())
+        .await
+        .expect("first sweep");
+    assert_eq!(advanced, 1);
+    let parked = agent_chat_task_graph_repo::get_graph(store.pool(), "graph_parked")
+        .await
+        .expect("get graph")
+        .expect("graph exists");
+    assert_eq!(parked.nodes["a"].status, "dispatched");
+    assert_eq!(parked.nodes["b"].status, "pending");
+
+    let parked_version = scalar_count(
+        &store,
+        "SELECT record_version FROM agent_chat_task_graphs WHERE id = 'graph_parked'",
+    )
+    .await;
+
+    for _ in 0..4 {
+        agent_chat_task_graph_repo::advance_active_graphs(store.pool())
+            .await
+            .expect("no-op sweep");
+    }
+
+    let swept_version = scalar_count(
+        &store,
+        "SELECT record_version FROM agent_chat_task_graphs WHERE id = 'graph_parked'",
+    )
+    .await;
+    assert_eq!(
+        swept_version, parked_version,
+        "a sweep that changes nothing must not write the graph row"
+    );
+    assert_eq!(
+        scalar_count(&store, "SELECT COUNT(*) FROM direct_messages").await,
+        1,
+        "and must not re-dispatch"
+    );
 }
