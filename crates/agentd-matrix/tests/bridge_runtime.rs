@@ -313,6 +313,40 @@ fn matrix_bridge_runtime_does_not_advance_past_a_batch_it_failed_to_deliver() {
 }
 
 #[test]
+fn matrix_bridge_runtime_clears_the_local_cursor_when_the_daemon_reports_none() {
+    let backend = CursorBackend {
+        // The daemon has no cursor recorded at all, e.g. because its data
+        // dir was recreated or the bridge was repointed at a fresh daemon.
+        seeded: None,
+        ..CursorBackend::default()
+    };
+    // Simulate a BridgeState loaded from a stale local state file: it still
+    // remembers a sync token and cursor version the daemon no longer has.
+    let state: BridgeState =
+        serde_json::from_str(r#"{"nextFromSeq":0,"syncToken":"s_stale","cursorVersion":3}"#)
+            .expect("decode stale state");
+    let transport = FakeTransport {
+        inbound: vec![inbound_event("$event-1", "first")],
+        ..FakeTransport::default()
+    };
+    let mut runtime = BridgeRuntime::new(backend, transport, state);
+
+    runtime.run_once().expect("run once succeeds");
+
+    // The daemon's "no cursor" answer is authoritative, so the stale local
+    // sync token must be cleared, not carried forward.
+    assert_eq!(runtime.state().sync_token(), None);
+    // And the stale local version must NOT be sent as expected_version -
+    // that would make the daemon's fresh-cursor CAS write fail with a
+    // spurious Conflict on every iteration forever.
+    assert_eq!(
+        runtime.backend().advances,
+        vec![(None, Some("$event-1".to_owned()), None)]
+    );
+    assert_eq!(runtime.state().cursor_version(), Some(1));
+}
+
+#[test]
 fn bridge_state_defaults_the_gateway_cursor_fields_to_none() {
     let state = BridgeState::new(9);
     assert_eq!(state.next_from_seq(), 9);

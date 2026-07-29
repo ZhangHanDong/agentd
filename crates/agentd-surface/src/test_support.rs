@@ -872,11 +872,16 @@ impl RunHost for FakeRunHost {
         &self,
         gateway_id: &str,
     ) -> Result<Option<MatrixGatewayCursorRecord>, CoreError> {
+        // Mirrors `matrix_bridge_repo::get_gateway_cursor`, which runs the id
+        // through `required()`: trims and rejects blank as an Invariant (400)
+        // rather than a plain lookup miss, and never truncates.
+        let gateway_id =
+            normalize_required_text(gateway_id, usize::MAX, "matrix gateway id required")?;
         Ok(self
             .matrix_gateway_cursors
             .lock()
             .expect("matrix gateway cursors lock")
-            .get(gateway_id)
+            .get(&gateway_id)
             .cloned())
     }
 
@@ -884,11 +889,11 @@ impl RunHost for FakeRunHost {
         &self,
         input: MatrixGatewayCursorInput,
     ) -> Result<MatrixGatewayCursorRecord, CoreError> {
-        let gateway_id =
-            normalize_required_text(&input.gateway_id, 256, "matrix gateway id required")?;
-        // `usize::MAX`: the SQLite path trims and maps empty to `None` but never
+        // `usize::MAX`: the SQLite path trims and rejects blank but never
         // truncates, and this fake must produce the same record for the same
         // input or surface tests assert nothing.
+        let gateway_id =
+            normalize_required_text(&input.gateway_id, usize::MAX, "matrix gateway id required")?;
         let sync_token = clean_text(input.sync_token.as_deref(), usize::MAX);
         let last_event_id = clean_text(input.last_event_id.as_deref(), usize::MAX);
         let mut cursors = self

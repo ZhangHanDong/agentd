@@ -3321,6 +3321,9 @@ where
         if let Some((sync_token, version)) = self.backend.gateway_cursor()? {
             self.state.sync_token = sync_token;
             self.state.cursor_version = Some(version);
+        } else {
+            self.state.sync_token = None;
+            self.state.cursor_version = None;
         }
 
         for room in self.transport.room_registrations()? {
