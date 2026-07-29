@@ -103,3 +103,106 @@ async fn matrix_outbox_cursor_is_durable_and_monotonic() {
         12
     );
 }
+
+#[tokio::test]
+async fn matrix_gateway_cursor_is_created_then_advanced_under_compare_and_set() {
+    let (store, _dir) = open_temp().await;
+
+    assert!(
+        matrix_bridge_repo::get_gateway_cursor(store.pool(), "gateway-1")
+            .await
+            .expect("get missing cursor")
+            .is_none()
+    );
+
+    let created = matrix_bridge_repo::advance_gateway_cursor(
+        store.pool(),
+        matrix_bridge_repo::MatrixGatewayCursorInput {
+            gateway_id: text("gateway-1"),
+            sync_token: Some(text("s_batch_1")),
+            last_event_id: Some(text("$event-1")),
+            expected_version: None,
+        },
+    )
+    .await
+    .expect("create cursor");
+    assert_eq!(created.record_version, 1);
+    assert_eq!(created.sync_token.as_deref(), Some("s_batch_1"));
+
+    let advanced = matrix_bridge_repo::advance_gateway_cursor(
+        store.pool(),
+        matrix_bridge_repo::MatrixGatewayCursorInput {
+            gateway_id: text("gateway-1"),
+            sync_token: Some(text("s_batch_2")),
+            last_event_id: Some(text("$event-2")),
+            expected_version: Some(1),
+        },
+    )
+    .await
+    .expect("advance cursor");
+    assert_eq!(advanced.record_version, 2);
+    assert_eq!(advanced.sync_token.as_deref(), Some("s_batch_2"));
+    assert_eq!(advanced.last_event_id.as_deref(), Some("$event-2"));
+
+    // The cursor survives a reopen: it lives in the daemon database, not in a
+    // JSON file next to the bridge binary.
+    let loaded = matrix_bridge_repo::get_gateway_cursor(store.pool(), "gateway-1")
+        .await
+        .expect("get cursor")
+        .expect("cursor exists");
+    assert_eq!(loaded.record_version, 2);
+    assert_eq!(loaded.sync_token.as_deref(), Some("s_batch_2"));
+}
+
+#[tokio::test]
+async fn matrix_gateway_cursor_rejects_a_stale_or_missing_version() {
+    let (store, _dir) = open_temp().await;
+
+    matrix_bridge_repo::advance_gateway_cursor(
+        store.pool(),
+        matrix_bridge_repo::MatrixGatewayCursorInput {
+            gateway_id: text("gateway-1"),
+            sync_token: Some(text("s_batch_1")),
+            last_event_id: None,
+            expected_version: None,
+        },
+    )
+    .await
+    .expect("create cursor");
+
+    let stale = matrix_bridge_repo::advance_gateway_cursor(
+        store.pool(),
+        matrix_bridge_repo::MatrixGatewayCursorInput {
+            gateway_id: text("gateway-1"),
+            sync_token: Some(text("s_batch_stale")),
+            last_event_id: None,
+            expected_version: Some(7),
+        },
+    )
+    .await
+    .expect_err("stale version must conflict");
+    let message = stale.to_string();
+    assert!(message.contains("record version mismatch"), "{message}");
+    // Must NOT trip the task-graph retry wrapper's sentinel.
+    assert!(!message.ends_with("changed concurrently"), "{message}");
+
+    let recreate = matrix_bridge_repo::advance_gateway_cursor(
+        store.pool(),
+        matrix_bridge_repo::MatrixGatewayCursorInput {
+            gateway_id: text("gateway-1"),
+            sync_token: Some(text("s_batch_clobber")),
+            last_event_id: None,
+            expected_version: None,
+        },
+    )
+    .await
+    .expect_err("a versionless write must not clobber an existing cursor");
+    assert!(recreate.to_string().contains("record version mismatch"));
+
+    let loaded = matrix_bridge_repo::get_gateway_cursor(store.pool(), "gateway-1")
+        .await
+        .expect("get cursor")
+        .expect("cursor exists");
+    assert_eq!(loaded.sync_token.as_deref(), Some("s_batch_1"));
+    assert_eq!(loaded.record_version, 1);
+}
