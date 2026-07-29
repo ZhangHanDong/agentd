@@ -67,17 +67,25 @@ impl BridgeConfig {
 }
 
 /// Durable bridge progress that can be persisted by a process wrapper.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BridgeState {
     next_from_seq: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sync_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cursor_version: Option<i64>,
 }
 
 impl BridgeState {
     /// Build bridge state from a previously confirmed outbox sequence.
     #[must_use]
-    pub const fn new(next_from_seq: i64) -> Self {
-        Self { next_from_seq }
+    pub fn new(next_from_seq: i64) -> Self {
+        Self {
+            next_from_seq,
+            sync_token: None,
+            cursor_version: None,
+        }
     }
 
     /// Load bridge state from a JSON file. Missing files default to cursor 0.
@@ -113,6 +121,18 @@ impl BridgeState {
     #[must_use]
     pub const fn next_from_seq(&self) -> i64 {
         self.next_from_seq
+    }
+
+    /// Last Matrix sync token confirmed by the daemon-owned cursor.
+    #[must_use]
+    pub fn sync_token(&self) -> Option<&str> {
+        self.sync_token.as_deref()
+    }
+
+    /// `record_version` of the daemon-owned cursor this state last observed.
+    #[must_use]
+    pub const fn cursor_version(&self) -> Option<i64> {
+        self.cursor_version
     }
 }
 
@@ -3215,6 +3235,25 @@ pub trait AgentdBridgeBackend {
     fn outbox_cursor(&mut self) -> Result<Option<i64>, BridgeError> {
         Ok(None)
     }
+
+    /// Read the daemon-owned inbound cursor: `(sync_token, record_version)`.
+    ///
+    /// The default is `Ok(None)` so fake backends in existing tests keep
+    /// compiling; the HTTP backend overrides it.
+    fn gateway_cursor(&mut self) -> Result<Option<(Option<String>, i64)>, BridgeError> {
+        Ok(None)
+    }
+
+    /// Advance the daemon-owned inbound cursor, returning its new
+    /// `record_version`.
+    fn advance_gateway_cursor(
+        &mut self,
+        _sync_token: Option<&str>,
+        _last_event_id: Option<&str>,
+        _expected_version: Option<i64>,
+    ) -> Result<i64, BridgeError> {
+        Ok(0)
+    }
 }
 
 /// Matrix-side adapter contract used by the bridge runtime.
@@ -3276,14 +3315,35 @@ where
     pub fn run_once(&mut self) -> Result<BridgeRunReport, BridgeError> {
         let mut report = BridgeRunReport::default();
 
+        // The daemon owns the inbound cursor. Seed from it every iteration so a
+        // restarted gateway resumes where the daemon says it left off, not
+        // where this process's local file happens to say.
+        if let Some((sync_token, version)) = self.backend.gateway_cursor()? {
+            self.state.sync_token = sync_token;
+            self.state.cursor_version = Some(version);
+        }
+
         for room in self.transport.room_registrations()? {
             self.backend.register_room(room)?;
             report.registered_rooms += 1;
         }
 
+        let mut last_inbound_event_id = None;
         for event in self.transport.inbound_events()? {
+            last_inbound_event_id = Some(event.event_id.clone());
             self.backend.post_inbound(event)?;
             report.inbound_forwarded += 1;
+        }
+        if let Some(event_id) = last_inbound_event_id {
+            // Advance only after every event in this batch is durably accepted
+            // by the daemon, so a crash mid-batch replays the batch rather than
+            // skipping its tail.
+            let version = self.backend.advance_gateway_cursor(
+                self.state.sync_token.as_deref(),
+                Some(event_id.as_str()),
+                self.state.cursor_version,
+            )?;
+            self.state.cursor_version = Some(version);
         }
 
         let mut acknowledged_seq = None;
@@ -4086,6 +4146,61 @@ impl AgentdHttpBackend {
             .ok_or_else(|| BridgeError::backend("matrix cursor response missing lastSeq"))
     }
 
+    /// Read the daemon-owned Matrix gateway inbound cursor. A `404` means the
+    /// cursor has never been written and is reported as `None`, not an error:
+    /// that is the normal first-run state of a fresh gateway.
+    pub fn read_gateway_cursor(&self) -> Result<Option<(Option<String>, i64)>, BridgeError> {
+        let Some(value) = self.request_optional_json(
+            "GET",
+            "/api/matrix/gateway/cursor?gatewayId=matrix-bridge",
+            None,
+        )?
+        else {
+            return Ok(None);
+        };
+        let cursor = value
+            .get("cursor")
+            .ok_or_else(|| BridgeError::backend("gateway cursor response missing cursor"))?;
+        let record_version = cursor
+            .get("recordVersion")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| BridgeError::backend("gateway cursor response missing recordVersion"))?;
+        let sync_token = cursor
+            .get("syncToken")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        Ok(Some((sync_token, record_version)))
+    }
+
+    /// Advance the daemon-owned Matrix gateway inbound cursor under CAS.
+    ///
+    /// A `409` from the daemon means another writer moved the cursor; it
+    /// surfaces as an error rather than a silent success so the caller re-reads
+    /// and retries instead of skipping undelivered events.
+    pub fn write_gateway_cursor(
+        &self,
+        sync_token: Option<&str>,
+        last_event_id: Option<&str>,
+        expected_version: Option<i64>,
+    ) -> Result<i64, BridgeError> {
+        let mut body = json!({ "gatewayId": "matrix-bridge" });
+        if let Some(token) = sync_token {
+            body["syncToken"] = json!(token);
+        }
+        if let Some(event_id) = last_event_id {
+            body["lastEventId"] = json!(event_id);
+        }
+        if let Some(version) = expected_version {
+            body["expectedVersion"] = json!(version);
+        }
+        let value = self.request_json("PUT", "/api/matrix/gateway/cursor", Some(body))?;
+        value
+            .get("cursor")
+            .and_then(|cursor| cursor.get("recordVersion"))
+            .and_then(Value::as_i64)
+            .ok_or_else(|| BridgeError::backend("gateway cursor response missing recordVersion"))
+    }
+
     fn request_json(
         &self,
         method: &str,
@@ -4339,6 +4454,19 @@ impl AgentdBridgeBackend for AgentdHttpBackend {
 
     fn outbox_cursor(&mut self) -> Result<Option<i64>, BridgeError> {
         self.matrix_outbox_cursor().map(Some)
+    }
+
+    fn gateway_cursor(&mut self) -> Result<Option<(Option<String>, i64)>, BridgeError> {
+        self.read_gateway_cursor()
+    }
+
+    fn advance_gateway_cursor(
+        &mut self,
+        sync_token: Option<&str>,
+        last_event_id: Option<&str>,
+        expected_version: Option<i64>,
+    ) -> Result<i64, BridgeError> {
+        self.write_gateway_cursor(sync_token, last_event_id, expected_version)
     }
 }
 

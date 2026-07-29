@@ -14,7 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_stream::stream;
 use axum::Router;
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -37,9 +37,9 @@ use crate::host::{
     AgentChatTaskPatchInput, AgentChatTaskTransitionInput, AgentHeartbeat, AgentIdentityPatch,
     AgentOffline, AgentProfilePatch, AgentRegistration, AgentRuntimeUpdate, DeliveryEventInput,
     DirectMessageInput, EventRecord, GroupCreateInput, GroupMemberUpdate, LiveEvent,
-    MatrixBridgeRoomInput, MatrixInboundMessageInput, MatrixOutboxCursorInput,
-    RelayServerHeartbeat, RelayStreamEventRecord, RunHost, RunSnapshot, SchedulerDispatchInput,
-    SchedulerPoolFilters, SchedulerReleaseInput, SuppressionOutcome,
+    MatrixBridgeRoomInput, MatrixGatewayCursorInput, MatrixInboundMessageInput,
+    MatrixOutboxCursorInput, RelayServerHeartbeat, RelayStreamEventRecord, RunHost, RunSnapshot,
+    SchedulerDispatchInput, SchedulerPoolFilters, SchedulerReleaseInput, SuppressionOutcome,
 };
 use crate::mcp_server::dispatch;
 use crate::tools::attachments::{
@@ -149,6 +149,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/matrix/outbox", get(matrix_outbox))
         .route("/api/matrix/outbox/cursor", get(matrix_outbox_cursor))
         .route("/api/matrix/outbox/ack", post(ack_matrix_outbox))
+        .route(
+            "/api/matrix/gateway/cursor",
+            get(matrix_gateway_cursor).put(put_matrix_gateway_cursor),
+        )
         .route("/api/messages", post(post_message))
         .route("/api/messages/:id/suppress", post(suppress_message))
         .route("/api/delivery-events", post(post_delivery_event))
@@ -332,6 +336,12 @@ struct RelayStreamQuery {
 struct MatrixCursorQuery {
     #[serde(rename = "bridgeId", alias = "bridge_id")]
     bridge_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MatrixGatewayCursorQuery {
+    #[serde(rename = "gatewayId", alias = "gateway_id")]
+    gateway_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -672,6 +682,54 @@ async fn matrix_outbox_cursor(
             Json(json!({ "bridgeId": query.bridge_id, "lastSeq": last_seq })).into_response()
         }
         Err(error) => agent_error_response(error),
+    }
+}
+
+async fn matrix_gateway_cursor(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<MatrixGatewayCursorQuery>,
+) -> Response {
+    if let Err(err) = require_operator_bearer(&state.auth, &headers) {
+        return err.into_response();
+    }
+    match state.host.matrix_gateway_cursor(&query.gateway_id).await {
+        Ok(Some(cursor)) => Json(json!({ "cursor": cursor })).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "matrix gateway cursor not found" })),
+        )
+            .into_response(),
+        // `task_error_response`, not `agent_error_response`: a CAS conflict
+        // must surface as 409, and only 503 is retryable.
+        Err(error) => task_error_response(error),
+    }
+}
+
+/// Body-as-`Bytes` rather than the `Json` extractor so the bearer check runs
+/// before any parsing: an unauthenticated caller must get 401, never a 422
+/// that confirms the route exists and leaks the body schema.
+async fn put_matrix_gateway_cursor(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(err) = require_operator_bearer(&state.auth, &headers) {
+        return err.into_response();
+    }
+    let input: MatrixGatewayCursorInput = match serde_json::from_slice(&body) {
+        Ok(input) => input,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("invalid matrix gateway cursor body: {error}") })),
+            )
+                .into_response();
+        }
+    };
+    match state.host.advance_matrix_gateway_cursor(input).await {
+        Ok(cursor) => Json(json!({ "ok": true, "cursor": cursor })).into_response(),
+        Err(error) => task_error_response(error),
     }
 }
 

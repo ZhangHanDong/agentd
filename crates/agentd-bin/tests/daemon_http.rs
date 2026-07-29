@@ -220,6 +220,26 @@ async fn post(app: Router, uri: &str, body: serde_json::Value) -> (StatusCode, S
     (status, String::from_utf8(bytes.to_vec()).expect("utf8"))
 }
 
+async fn put(app: Router, uri: &str, body: serde_json::Value) -> (StatusCode, String) {
+    let resp = app
+        .oneshot(
+            Request::put(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let status = resp.status();
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    (status, String::from_utf8(bytes.to_vec()).expect("utf8"))
+}
+
 async fn patch(app: Router, uri: &str, body: serde_json::Value) -> (StatusCode, String) {
     let resp = app
         .oneshot(
@@ -2388,4 +2408,91 @@ async fn bind_listener_reports_already_running() {
         "friendly already-running message, not a raw OS error: {err}"
     );
     assert!(err.contains(&addr.to_string()), "names the address: {err}");
+}
+
+#[tokio::test]
+async fn daemon_router_matrix_gateway_cursor_round_trips_and_fences_stale_writes() {
+    let (app, _dir) = empty_router().await;
+
+    let (missing_status, missing_body) = get(
+        app.clone(),
+        "/api/matrix/gateway/cursor?gatewayId=gateway-1",
+    )
+    .await;
+    assert_eq!(
+        missing_status,
+        StatusCode::NOT_FOUND,
+        "body: {missing_body}"
+    );
+
+    let (created_status, created_body) = put(
+        app.clone(),
+        "/api/matrix/gateway/cursor",
+        serde_json::json!({
+            "gatewayId": "gateway-1",
+            "syncToken": "s_batch_1",
+            "lastEventId": "$event-1"
+        }),
+    )
+    .await;
+    assert_eq!(created_status, StatusCode::OK, "body: {created_body}");
+    let created: serde_json::Value = serde_json::from_str(&created_body).expect("created json");
+    assert_eq!(created["cursor"]["gatewayId"], "gateway-1");
+    assert_eq!(created["cursor"]["syncToken"], "s_batch_1");
+    assert_eq!(created["cursor"]["recordVersion"], 1);
+
+    // A second create-shaped write (no `expectedVersion`) against an existing
+    // row is a conflict. `FakeRunHost` mirrors this; keep the two in step.
+    let (recreate_status, recreate_body) = put(
+        app.clone(),
+        "/api/matrix/gateway/cursor",
+        serde_json::json!({ "gatewayId": "gateway-1", "syncToken": "s_batch_recreate" }),
+    )
+    .await;
+    assert_eq!(
+        recreate_status,
+        StatusCode::CONFLICT,
+        "body: {recreate_body}"
+    );
+
+    let (advanced_status, advanced_body) = put(
+        app.clone(),
+        "/api/matrix/gateway/cursor",
+        serde_json::json!({
+            "gatewayId": "gateway-1",
+            "syncToken": "s_batch_2",
+            "lastEventId": "$event-2",
+            "expectedVersion": 1
+        }),
+    )
+    .await;
+    assert_eq!(advanced_status, StatusCode::OK, "body: {advanced_body}");
+    let advanced: serde_json::Value = serde_json::from_str(&advanced_body).expect("advanced json");
+    assert_eq!(advanced["cursor"]["recordVersion"], 2);
+
+    let (stale_status, stale_body) = put(
+        app.clone(),
+        "/api/matrix/gateway/cursor",
+        serde_json::json!({
+            "gatewayId": "gateway-1",
+            "syncToken": "s_batch_stale",
+            "expectedVersion": 1
+        }),
+    )
+    .await;
+    assert_eq!(stale_status, StatusCode::CONFLICT, "body: {stale_body}");
+
+    let (blank_status, blank_body) = put(
+        app.clone(),
+        "/api/matrix/gateway/cursor",
+        serde_json::json!({ "gatewayId": "   " }),
+    )
+    .await;
+    assert_eq!(blank_status, StatusCode::BAD_REQUEST, "body: {blank_body}");
+
+    let (read_status, read_body) = get(app, "/api/matrix/gateway/cursor?gatewayId=gateway-1").await;
+    assert_eq!(read_status, StatusCode::OK, "body: {read_body}");
+    let read: serde_json::Value = serde_json::from_str(&read_body).expect("read json");
+    assert_eq!(read["cursor"]["syncToken"], "s_batch_2");
+    assert_eq!(read["cursor"]["recordVersion"], 2);
 }

@@ -57,6 +57,8 @@ use agentd_surface::host::{
     GroupRecord as SurfaceGroupRecord, InboxMessage as SurfaceInboxMessage, LiveEvent,
     MatrixBridgeRoomInput as SurfaceMatrixBridgeRoomInput,
     MatrixBridgeRoomRecord as SurfaceMatrixBridgeRoomRecord,
+    MatrixGatewayCursorInput as SurfaceMatrixGatewayCursorInput,
+    MatrixGatewayCursorRecord as SurfaceMatrixGatewayCursorRecord,
     MatrixInboundMessageInput as SurfaceMatrixInboundMessageInput,
     MatrixInboundMessageResult as SurfaceMatrixInboundMessageResult,
     MatrixOutboxCursorInput as SurfaceMatrixOutboxCursorInput,
@@ -1954,6 +1956,34 @@ impl RunHost for ProductionRunHost {
         Ok(room.map(surface_matrix_bridge_room))
     }
 
+    async fn matrix_gateway_cursor(
+        &self,
+        gateway_id: &str,
+    ) -> Result<Option<SurfaceMatrixGatewayCursorRecord>, CoreError> {
+        let cursor = matrix_bridge_repo::get_gateway_cursor(self.store.pool(), gateway_id)
+            .await
+            .map_err(core_from_store_error)?;
+        Ok(cursor.map(surface_matrix_gateway_cursor))
+    }
+
+    async fn advance_matrix_gateway_cursor(
+        &self,
+        input: SurfaceMatrixGatewayCursorInput,
+    ) -> Result<SurfaceMatrixGatewayCursorRecord, CoreError> {
+        let cursor = matrix_bridge_repo::advance_gateway_cursor(
+            self.store.pool(),
+            matrix_bridge_repo::MatrixGatewayCursorInput {
+                gateway_id: input.gateway_id,
+                sync_token: input.sync_token,
+                last_event_id: input.last_event_id,
+                expected_version: input.expected_version,
+            },
+        )
+        .await
+        .map_err(core_from_store_error)?;
+        Ok(surface_matrix_gateway_cursor(cursor))
+    }
+
     async fn post_matrix_inbound_message(
         &self,
         input: SurfaceMatrixInboundMessageInput,
@@ -2724,6 +2754,19 @@ fn surface_matrix_bridge_room(
         inviter_mxid: record.inviter_mxid,
         created_at: record.created_at,
         updated_at: record.updated_at,
+    }
+}
+
+fn surface_matrix_gateway_cursor(
+    cursor: matrix_bridge_repo::MatrixGatewayCursorRecord,
+) -> SurfaceMatrixGatewayCursorRecord {
+    SurfaceMatrixGatewayCursorRecord {
+        gateway_id: cursor.gateway_id,
+        sync_token: cursor.sync_token,
+        last_event_id: cursor.last_event_id,
+        record_version: cursor.record_version,
+        created_at: cursor.created_at,
+        updated_at: cursor.updated_at,
     }
 }
 
