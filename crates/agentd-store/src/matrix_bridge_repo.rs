@@ -274,29 +274,23 @@ pub async fn advance_gateway_cursor(
     let last_event_id = clean_opt(input.last_event_id);
     let now = now_unix();
 
-    let mut connection = pool.acquire().await?;
-    sqlx::query("BEGIN IMMEDIATE")
-        .execute(&mut *connection)
-        .await?;
-    let result = advance_gateway_cursor_in_transaction(
-        &mut connection,
+    // `begin_with` rather than a raw `sqlx::query("BEGIN IMMEDIATE")`: only the
+    // tracked `Transaction` rolls back on drop. This route is driven by the
+    // bridge, which abandons the request after its own read timeout, and a
+    // dropped handler future must not hand the pool back a connection that
+    // still holds SQLite's write lock.
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let record = advance_gateway_cursor_in_transaction(
+        &mut tx,
         &gateway_id,
         sync_token.as_deref(),
         last_event_id.as_deref(),
         input.expected_version,
         now,
     )
-    .await;
-    match result {
-        Ok(record) => {
-            sqlx::query("COMMIT").execute(&mut *connection).await?;
-            Ok(record)
-        }
-        Err(error) => {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
-            Err(error)
-        }
-    }
+    .await?;
+    tx.commit().await?;
+    Ok(record)
 }
 
 async fn advance_gateway_cursor_in_transaction(
@@ -550,21 +544,14 @@ pub async fn accept_inbound_event(
     pool: &SqlitePool,
     acceptance: MatrixInboundAcceptance,
 ) -> Result<MatrixInboundAcceptanceResult, StoreError> {
-    let mut connection = pool.acquire().await?;
-    sqlx::query("BEGIN IMMEDIATE")
-        .execute(&mut *connection)
-        .await?;
-    let result = accept_inbound_event_in_transaction(&mut connection, acceptance).await;
-    match result {
-        Ok(value) => {
-            sqlx::query("COMMIT").execute(&mut *connection).await?;
-            Ok(value)
-        }
-        Err(error) => {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
-            Err(error)
-        }
-    }
+    // `begin_with` rather than a raw `sqlx::query("BEGIN IMMEDIATE")`: only the
+    // tracked `Transaction` rolls back on drop. The bridge abandons an inbound
+    // POST after its own read timeout, and a dropped handler future must not
+    // hand the pool back a connection that still holds SQLite's write lock.
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let value = accept_inbound_event_in_transaction(&mut tx, acceptance).await?;
+    tx.commit().await?;
+    Ok(value)
 }
 
 /// One inbound command with every field trimmed, derived, and checked, so the

@@ -261,10 +261,30 @@ pub async fn list_graphs(
     pool: &SqlitePool,
     status: Option<&str>,
 ) -> Result<Vec<AgentChatTaskGraphRecord>, StoreError> {
-    let rows = sqlx::query(graph_select_sql("ORDER BY rowid").as_str())
-        .fetch_all(pool)
-        .await?;
     let status = status.and_then(|value| clean_text(Some(value.to_string())));
+    // Pre-filter in SQL rather than only after `row_to_graph`: this runs on
+    // every maintenance tick via `advance_active_graphs`, and parsing first
+    // would deserialize the `raw_json` of every graph ever created — including
+    // long-completed ones, which nothing deletes. `idx_agent_chat_task_graphs_status`
+    // covers the predicate.
+    //
+    // `OR status IS NULL` keeps the SQL predicate exactly as wide as the Rust
+    // one below. `upsert_graph` always writes the column from the same value it
+    // serializes into `raw_json`, and `upsert_imported_task_graph` binds the
+    // source's `status` field trimmed the same way `normalize_imported_task_graph`
+    // trims it — so a non-NULL column always equals the JSON status. The one
+    // divergence is an imported graph with no usable `status` field at all: the
+    // column is NULL while the JSON gets the `"active"` fallback. Those rows
+    // must still reach the Rust filter or importing would strand active graphs.
+    let sql = match status {
+        Some(_) => graph_select_sql("WHERE status = ? OR status IS NULL ORDER BY rowid"),
+        None => graph_select_sql("ORDER BY rowid"),
+    };
+    let mut query = sqlx::query(sql.as_str());
+    if let Some(status) = status.clone() {
+        query = query.bind(status);
+    }
+    let rows = query.fetch_all(pool).await?;
     // A legacy row that predates normalization must not take the whole listing
     // down with it; `get_graph` still surfaces the parse error for that id.
     let graphs = rows

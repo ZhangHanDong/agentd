@@ -1633,3 +1633,107 @@ async fn a_sweep_that_advances_nothing_does_not_write() {
         "and must not re-dispatch"
     );
 }
+
+/// The status filter must run in SQL, keyed on the `status` column, not in
+/// Rust on the status deserialized from `raw_json`.
+///
+/// `advance_active_graphs` calls this on every maintenance tick, so filtering
+/// after `row_to_graph` would deserialize every graph ever created — nothing
+/// deletes completed ones — twelve times a minute on the pool the HTTP
+/// handlers share.
+///
+/// Desyncing the column from the JSON is a test-only artifact: no writer can
+/// produce it, and it is the only way to observe which of the two the query
+/// actually keys on. Before the SQL predicate this listing returned the row,
+/// because the parsed status still said `active`.
+#[tokio::test]
+async fn list_graphs_filters_on_the_status_column_not_the_parsed_json() {
+    let (store, _dir) = open_store().await;
+    agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_desynced".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Desynced".to_string(),
+            nodes: chain_nodes(),
+        },
+    )
+    .await
+    .expect("create graph");
+    sqlx::query("UPDATE agent_chat_task_graphs SET status = 'completed' WHERE id = ?")
+        .bind("graph_desynced")
+        .execute(store.pool())
+        .await
+        .expect("desync the status column from raw_json");
+
+    let active = agent_chat_task_graph_repo::list_graphs(store.pool(), Some("active"))
+        .await
+        .expect("list active graphs");
+    assert!(
+        active.is_empty(),
+        "a row whose status column is 'completed' must never be selected for 'active', \
+         even though its raw_json still says active: {active:?}"
+    );
+
+    // An unparseable row that the status column excludes must not change the
+    // outcome either, and the unfiltered listing still tolerates it.
+    sqlx::query(
+        "INSERT INTO agent_chat_task_graphs \
+         (id, owner, label, status, raw_json, record_version, imported_at) \
+         VALUES ('graph_broken', 'alex', 'Broken', 'completed', '{\"nodes\":', 1, 0)",
+    )
+    .execute(store.pool())
+    .await
+    .expect("insert unreadable row");
+    let active = agent_chat_task_graph_repo::list_graphs(store.pool(), Some("active"))
+        .await
+        .expect("list active graphs alongside an unreadable row");
+    assert!(active.is_empty());
+    let all = agent_chat_task_graph_repo::list_graphs(store.pool(), None)
+        .await
+        .expect("unfiltered listing still tolerates the unreadable row");
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].id, "graph_desynced");
+}
+
+/// `upsert_imported_task_graph` binds the source's `status` field, which is
+/// `NULL` when the imported graph has none — while `normalize_imported_task_graph`
+/// gives that same graph the `"active"` fallback inside `raw_json`. A bare
+/// `WHERE status = ?` would drop those rows, stranding every imported active
+/// graph: invisible to `/api/task-graphs?status=active` and never advanced by
+/// the maintenance sweep.
+#[tokio::test]
+async fn list_graphs_still_matches_an_imported_row_with_a_null_status_column() {
+    let (store, _dir) = open_store().await;
+    agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_imported".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Imported".to_string(),
+            nodes: chain_nodes(),
+        },
+    )
+    .await
+    .expect("create graph");
+    sqlx::query("UPDATE agent_chat_task_graphs SET status = NULL WHERE id = ?")
+        .bind("graph_imported")
+        .execute(store.pool())
+        .await
+        .expect("null the status column the way an import without a status does");
+
+    let active = agent_chat_task_graph_repo::list_graphs(store.pool(), Some("active"))
+        .await
+        .expect("list active graphs");
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].id, "graph_imported");
+    assert_eq!(active[0].status, "active");
+
+    let completed = agent_chat_task_graph_repo::list_graphs(store.pool(), Some("completed"))
+        .await
+        .expect("list completed graphs");
+    assert!(
+        completed.is_empty(),
+        "a NULL status column still has to satisfy the Rust filter: {completed:?}"
+    );
+}

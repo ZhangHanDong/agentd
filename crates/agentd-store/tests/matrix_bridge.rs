@@ -1,4 +1,4 @@
-use agentd_store::{SqliteStore, matrix_bridge_repo};
+use agentd_store::{SqliteStore, StoreError, matrix_bridge_repo};
 
 async fn open_temp() -> (SqliteStore, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1195,4 +1195,198 @@ async fn a_replayed_settle_sweep_is_a_no_op() {
         after.record_version, settled.record_version,
         "a replayed settle must not bump the version"
     );
+}
+
+/// One closed inbound acceptance, in the shape the bridge posts.
+fn acceptance(
+    room_id: &str,
+    event_id: &str,
+    body: &str,
+) -> matrix_bridge_repo::MatrixInboundAcceptance {
+    matrix_bridge_repo::MatrixInboundAcceptance {
+        command: matrix_bridge_repo::MatrixCommandInput {
+            event_id: text(event_id),
+            room_id: text(room_id),
+            project_id: None,
+            sender_mxid: text("@alice:matrix.test"),
+            route: text("agent"),
+            body: text(body),
+            open: false,
+            run_request: None,
+        },
+        direct: None,
+        group: None,
+        relay_payload: serde_json::json!({ "kind": "direct", "source": "matrix" }),
+    }
+}
+
+/// Give a dropped request's worker time to finish the `BEGIN IMMEDIATE` it was
+/// parked on and run whatever cleanup that leaves. Generous by design: the
+/// worker is already inside `sqlite3_step`, so this only has to outlast one
+/// lock handoff, and being slow here costs a second while being fast would let
+/// a stranded-lock regression pass by racing.
+async fn settle_the_abandoned_transaction() {
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+}
+
+/// An abandoned inbound POST must not leave `SQLite`'s write lock held.
+///
+/// `accept_inbound_event` runs under `BEGIN IMMEDIATE`. The bridge puts a 5s
+/// read timeout on every daemon request, so axum drops the handler future
+/// while the transaction is open. That is only safe because the transaction is
+/// tracked: a raw `sqlx::query("BEGIN IMMEDIATE")` hands the connection back to
+/// the pool still inside the transaction, and every later writer in the daemon
+/// then waits out the busy timeout and fails `SQLITE_BUSY`.
+///
+/// The drop point is forced rather than raced: another connection holds the
+/// write lock for the whole timeout window, so the accept below cannot
+/// possibly have finished when it is dropped.
+#[tokio::test]
+async fn a_dropped_accept_does_not_strand_the_write_lock() {
+    let (store, _dir) = open_temp().await;
+    matrix_bridge_repo::upsert_room(
+        store.pool(),
+        matrix_bridge_repo::MatrixBridgeRoomInput {
+            room_id: text("!drop:matrix.test"),
+            project_id: None,
+            group_name: None,
+            agent_name: Some(text("codex-worker")),
+            trusted: true,
+            trust_reason: text("managed"),
+            inviter_mxid: None,
+        },
+    )
+    .await
+    .expect("upsert room");
+
+    let mut holder = store.pool().acquire().await.expect("holder connection");
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *holder)
+        .await
+        .expect("hold the write lock");
+
+    let blocked = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        matrix_bridge_repo::accept_inbound_event(
+            store.pool(),
+            acceptance("!drop:matrix.test", "$dropped", "abandoned"),
+        ),
+    )
+    .await;
+    assert!(
+        blocked.is_err(),
+        "the accept must still be inside the transaction path when it is dropped"
+    );
+
+    sqlx::query("ROLLBACK")
+        .execute(&mut *holder)
+        .await
+        .expect("release the write lock");
+    drop(holder);
+    // The abandoned request is still parked in `sqlite3_step` on its own
+    // `BEGIN IMMEDIATE`, so it takes the lock the moment the holder frees it.
+    // Wait that out before probing: otherwise the assertion below races the
+    // abandoned transaction for the lock and passes by winning the race rather
+    // than by the transaction having been rolled back.
+    settle_the_abandoned_transaction().await;
+
+    matrix_bridge_repo::accept_inbound_event(
+        store.pool(),
+        acceptance("!drop:matrix.test", "$after-drop", "later"),
+    )
+    .await
+    .expect("a writer after the dropped request must not be blocked by a stranded lock");
+}
+
+/// The error path has no explicit `ROLLBACK` any more: dropping the tracked
+/// transaction is what ends it. `normalize_command` runs inside the
+/// transaction body, so a blank event id returns after `BEGIN IMMEDIATE` and
+/// exercises exactly that drop.
+#[tokio::test]
+async fn a_rejected_accept_does_not_strand_the_write_lock() {
+    let (store, _dir) = open_temp().await;
+    matrix_bridge_repo::upsert_room(
+        store.pool(),
+        matrix_bridge_repo::MatrixBridgeRoomInput {
+            room_id: text("!reject:matrix.test"),
+            project_id: None,
+            group_name: None,
+            agent_name: Some(text("codex-worker")),
+            trusted: true,
+            trust_reason: text("managed"),
+            inviter_mxid: None,
+        },
+    )
+    .await
+    .expect("upsert room");
+
+    let error = matrix_bridge_repo::accept_inbound_event(
+        store.pool(),
+        acceptance("!reject:matrix.test", "   ", "blank event id"),
+    )
+    .await
+    .expect_err("a blank event id is rejected");
+    assert!(
+        matches!(error, StoreError::Invariant(_)),
+        "expected an invariant rejection, got {error:?}"
+    );
+
+    matrix_bridge_repo::accept_inbound_event(
+        store.pool(),
+        acceptance("!reject:matrix.test", "$after-reject", "later"),
+    )
+    .await
+    .expect("a writer after the rejected request must not be blocked by a stranded lock");
+}
+
+/// The same drop guarantee for the other remote-facing route. The gateway
+/// cursor is advanced straight from the bridge's sync loop, under the same 5s
+/// read timeout.
+#[tokio::test]
+async fn a_dropped_cursor_advance_does_not_strand_the_write_lock() {
+    let (store, _dir) = open_temp().await;
+
+    let mut holder = store.pool().acquire().await.expect("holder connection");
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *holder)
+        .await
+        .expect("hold the write lock");
+
+    let blocked = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        matrix_bridge_repo::advance_gateway_cursor(
+            store.pool(),
+            matrix_bridge_repo::MatrixGatewayCursorInput {
+                gateway_id: text("gateway-drop"),
+                sync_token: Some(text("s1")),
+                last_event_id: None,
+                expected_version: None,
+            },
+        ),
+    )
+    .await;
+    assert!(
+        blocked.is_err(),
+        "the advance must still be inside the transaction path when it is dropped"
+    );
+
+    sqlx::query("ROLLBACK")
+        .execute(&mut *holder)
+        .await
+        .expect("release the write lock");
+    drop(holder);
+    settle_the_abandoned_transaction().await;
+
+    let created = matrix_bridge_repo::advance_gateway_cursor(
+        store.pool(),
+        matrix_bridge_repo::MatrixGatewayCursorInput {
+            gateway_id: text("gateway-drop"),
+            sync_token: Some(text("s2")),
+            last_event_id: None,
+            expected_version: None,
+        },
+    )
+    .await
+    .expect("a writer after the dropped advance must not be blocked by a stranded lock");
+    assert_eq!(created.record_version, 1);
 }
