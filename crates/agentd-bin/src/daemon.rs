@@ -147,6 +147,17 @@ pub async fn worker_fleet_tick(
     {
         tracing::warn!(%error, "settling task-graph node executions failed this tick");
     }
+    // Settlement moves nodes to terminal states; advancing is what unlocks the
+    // downstream ones and re-drives any graph whose creation-time advance
+    // failed. Order matters: advance after settle, so a node settled this tick
+    // unlocks its dependants in the same tick.
+    if let Err(error) = agentd_store::agent_chat_task_graph_repo::advance_active_graphs(
+        native_worker.store().pool(),
+    )
+    .await
+    {
+        tracing::warn!(%error, "re-advancing active task graphs failed this tick");
+    }
     let _ = agent_registry_tick(native_worker.store().pool(), observed_at).await;
     let _ = recovery_registry.recover_one(native_worker).await;
 }

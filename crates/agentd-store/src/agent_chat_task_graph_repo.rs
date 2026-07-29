@@ -936,6 +936,37 @@ async fn dispatch_native_node(
     Ok(link.execution_task_id)
 }
 
+/// Re-drive every `active` task graph.
+///
+/// `advance_graph` has exactly one caller — graph creation — so a create whose
+/// advance failed on a transient database error strands an `active` graph with
+/// a `pending` root that nothing else re-drives. Advancing is idempotent (a
+/// node already `dispatched` is not re-dispatched), so an unconditional sweep
+/// is the whole repair.
+///
+/// Returns the number of graphs advanced. One graph's failure is isolated and
+/// logged, never propagated: this runs on the maintenance tick, where a single
+/// poisoned graph must not stop the sweep or the loop.
+pub async fn advance_active_graphs(pool: &SqlitePool) -> Result<u64, StoreError> {
+    let graphs = list_graphs(pool, Some("active")).await?;
+    let mut advanced = 0_u64;
+    for graph in graphs {
+        match advance_graph(pool, &graph.id).await {
+            Ok(Some(_)) => advanced += 1,
+            // Deleted between the listing and the advance; nothing to repair.
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    graph_id = graph.id.as_str(),
+                    %error,
+                    "re-advancing active task graph failed this tick"
+                );
+            }
+        }
+    }
+    Ok(advanced)
+}
+
 /// `(graph_id, node_id, execution_task_id, queue_status, last_reason)`
 type NodeSettlementRow = (String, String, String, String, Option<String>);
 

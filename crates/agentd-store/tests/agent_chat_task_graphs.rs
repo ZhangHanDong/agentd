@@ -1432,3 +1432,90 @@ async fn one_unreadable_legacy_row_does_not_break_the_listing() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].id, "graph_good");
 }
+
+#[tokio::test]
+async fn advance_active_graphs_redrives_a_graph_whose_initial_advance_never_ran() {
+    let (store, _dir) = open_store().await;
+
+    // `create_graph` only persists; `advance_graph` is what dispatches. A
+    // create whose advance failed on a transient database error leaves exactly
+    // this state, and before this sweep nothing re-drove it.
+    let mut nodes = BTreeMap::new();
+    nodes.insert("a".to_string(), node("codex-a", "Do A", &[]));
+    let created = agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_stranded".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Stranded graph".to_string(),
+            nodes,
+        },
+    )
+    .await
+    .expect("create graph");
+    assert_eq!(created.status, "active");
+    assert_eq!(created.nodes["a"].status, "pending");
+    assert_eq!(
+        scalar_count(&store, "SELECT COUNT(*) FROM direct_messages").await,
+        0
+    );
+
+    let advanced = agent_chat_task_graph_repo::advance_active_graphs(store.pool())
+        .await
+        .expect("advance active graphs");
+    assert_eq!(advanced, 1);
+
+    let graph = agent_chat_task_graph_repo::get_graph(store.pool(), "graph_stranded")
+        .await
+        .expect("get graph")
+        .expect("graph exists");
+    assert_eq!(graph.nodes["a"].status, "dispatched");
+    assert_eq!(
+        scalar_count(&store, "SELECT COUNT(*) FROM direct_messages").await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn advance_active_graphs_is_idempotent_and_skips_settled_graphs() {
+    let (store, _dir) = open_store().await;
+
+    let mut nodes = BTreeMap::new();
+    nodes.insert("a".to_string(), node("codex-a", "Do A", &[]));
+    agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_once".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Once".to_string(),
+            nodes,
+        },
+    )
+    .await
+    .expect("create graph");
+
+    let first = agent_chat_task_graph_repo::advance_active_graphs(store.pool())
+        .await
+        .expect("first sweep");
+    assert_eq!(first, 1);
+    let second = agent_chat_task_graph_repo::advance_active_graphs(store.pool())
+        .await
+        .expect("second sweep");
+    assert_eq!(
+        second, 1,
+        "an already-dispatched active graph re-advances cleanly"
+    );
+    // The dispatch itself must not be repeated: one message, not two.
+    assert_eq!(
+        scalar_count(&store, "SELECT COUNT(*) FROM direct_messages").await,
+        1
+    );
+
+    agent_chat_task_graph_repo::delete_graph(store.pool(), "graph_once")
+        .await
+        .expect("delete graph");
+    let third = agent_chat_task_graph_repo::advance_active_graphs(store.pool())
+        .await
+        .expect("third sweep");
+    assert_eq!(third, 0, "a cancelled graph is not active and is skipped");
+}
