@@ -2711,6 +2711,74 @@ async fn daemon_router_matrix_inbound_second_open_run_request_is_a_conflict() {
     assert_eq!(clash_status, StatusCode::CONFLICT, "body: {clash_body}");
 }
 
+/// The production maintenance tick, assembled the way the daemon assembles it.
+///
+/// Tests drive this rather than the sweeps it calls: the set and order of
+/// those sweeps is load-bearing — dispatch creates a command's run, advance
+/// drives it, settle retires the finished command and frees the room's dedup
+/// slot — and calling them directly would leave a reorder, or a dropped call,
+/// passing.
+struct MaintenanceTick {
+    fleet: agentd_store::worker_fleet::SqliteWorkerFleet,
+    recovery_registry: agentd_bin::native_worker::NativeRecoveryRegistry,
+    native_worker: agentd_bin::native_worker::AgentdWorker,
+    scheduler: agentd_store::durable_scheduler::SqliteDurableScheduler,
+    observed_at: i64,
+}
+
+impl MaintenanceTick {
+    fn new(store: SqliteStore) -> Self {
+        let pool = store.pool().clone();
+        Self {
+            fleet: agentd_store::worker_fleet::SqliteWorkerFleet::new(pool.clone()),
+            recovery_registry: agentd_bin::native_worker::NativeRecoveryRegistry::new(),
+            native_worker: agentd_bin::native_worker::AgentdWorker::new(store),
+            scheduler: agentd_store::durable_scheduler::SqliteDurableScheduler::new(pool),
+            observed_at: i64::try_from(
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .expect("clock")
+                    .as_secs(),
+            )
+            .expect("timestamp fits i64"),
+        }
+    }
+
+    async fn run(&self) {
+        daemon::worker_fleet_tick(
+            &self.fleet,
+            &self.recovery_registry,
+            &self.native_worker,
+            &self.scheduler,
+            self.observed_at,
+        )
+        .await;
+    }
+}
+
+async fn count_rows(pool: &sqlx::SqlitePool, table: &str) -> i64 {
+    sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+        .fetch_one(pool)
+        .await
+        .unwrap_or_else(|error| panic!("count {table}: {error}"))
+}
+
+/// One Matrix event asking for the same run, under a caller-chosen event id.
+fn matrix_run_event(event_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "eventId": event_id,
+        "roomId": "!ops:matrix.test",
+        "senderMxid": "@alice:matrix.test",
+        "body": "run the build",
+        "runRequest": {
+            "label": "build",
+            "owner": "alice",
+            "assignee": "codex-worker",
+            "description": "run the build"
+        }
+    })
+}
+
 #[tokio::test]
 async fn matrix_run_request_produces_exactly_one_execution_across_restart_and_replay() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2718,7 +2786,7 @@ async fn matrix_run_request_produces_exactly_one_execution_across_restart_and_re
     let store = SqliteStore::connect(&db).await.expect("connect");
     let pool = store.pool().clone();
     let host = ProductionRunHost::new(
-        store,
+        store.clone(),
         Box::new(SharedBackend(Arc::new(FakeBackend::new()))),
         Box::new(RecordingCommandRunner::new()),
         Box::new(MempalStub::new()),
@@ -2726,6 +2794,7 @@ async fn matrix_run_request_produces_exactly_one_execution_across_restart_and_re
         workflows_dir(),
     );
     let app = daemon::build_router(Arc::new(host));
+    let tick = MaintenanceTick::new(store);
 
     let (agent_status, _) = post(
         app.clone(),
@@ -2747,30 +2816,25 @@ async fn matrix_run_request_produces_exactly_one_execution_across_restart_and_re
     .await;
     assert_eq!(room_status, StatusCode::OK);
 
-    let inbound = serde_json::json!({
-        "eventId": "$run-restart",
-        "roomId": "!ops:matrix.test",
-        "senderMxid": "@alice:matrix.test",
-        "body": "run the build",
-        "runRequest": {
-            "label": "build",
-            "owner": "alice",
-            "assignee": "codex-worker",
-            "description": "run the build"
-        }
-    });
-
+    let inbound = matrix_run_event("$run-restart");
     let (status, body) = post(app.clone(), "/api/matrix/inbound", inbound.clone()).await;
     assert_eq!(status, StatusCode::CREATED, "body: {body}");
 
     // Tick, restart (replayed inbound), tick, tick.
     for round in 0..3 {
-        agentd_store::matrix_command_dispatch::dispatch_accepted_commands(&pool)
-            .await
-            .expect("dispatch accepted commands");
-        agentd_store::agent_chat_task_graph_repo::advance_active_graphs(&pool)
-            .await
-            .expect("advance active graphs");
+        tick.run().await;
+        if round == 0 {
+            // Dispatch runs before advance inside the tick, so a single tick
+            // takes an accepted command all the way to a dispatched node: the
+            // inbox message written at accept time plus the node's
+            // task_graph_dispatch message. Advancing first would leave the
+            // freshly created graph for the next tick and this count at 1.
+            assert_eq!(
+                count_rows(&pool, "direct_messages").await,
+                2,
+                "one tick did not dispatch the command's run"
+            );
+        }
         let (replay_status, replay_body) =
             post(app.clone(), "/api/matrix/inbound", inbound.clone()).await;
         assert_eq!(
@@ -2780,16 +2844,49 @@ async fn matrix_run_request_produces_exactly_one_execution_across_restart_and_re
         );
     }
 
-    let graphs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_chat_task_graphs")
-        .fetch_one(&pool)
-        .await
-        .expect("count graphs");
-    assert_eq!(graphs, 1, "restart/replay produced a duplicate execution");
-    let messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM direct_messages")
-        .fetch_one(&pool)
-        .await
-        .expect("count messages");
+    assert_eq!(
+        count_rows(&pool, "agent_chat_task_graphs").await,
+        1,
+        "restart/replay produced a duplicate execution"
+    );
     // One inbox message for the Matrix event, one task_graph_dispatch message
     // for the single node the run advanced.
-    assert_eq!(messages, 2, "restart/replay produced a duplicate message");
+    assert_eq!(
+        count_rows(&pool, "direct_messages").await,
+        2,
+        "restart/replay produced a duplicate message"
+    );
+
+    // A fresh event carrying the same command text is refused while the first
+    // command is still open: the room's dedup slot is held by the running run.
+    let resend = matrix_run_event("$run-again");
+    let (blocked_status, blocked_body) =
+        post(app.clone(), "/api/matrix/inbound", resend.clone()).await;
+    assert_eq!(blocked_status, StatusCode::CONFLICT, "body: {blocked_body}");
+
+    // Finish the run the way its assignee would, then let the tick settle it.
+    let graph_id: String =
+        sqlx::query_scalar("SELECT run_id FROM matrix_commands WHERE run_id IS NOT NULL")
+            .fetch_one(&pool)
+            .await
+            .expect("bound run id");
+    let (patch_status, patch_body) = patch(
+        app.clone(),
+        &format!("/api/task-graphs/{graph_id}/nodes/run"),
+        serde_json::json!({ "status": "complete", "result": { "ok": true } }),
+    )
+    .await;
+    assert_eq!(patch_status, StatusCode::OK, "body: {patch_body}");
+    tick.run().await;
+
+    // Settled: the same command text is sendable in that room again, and the
+    // re-send produces its own execution rather than being swallowed.
+    let (resent_status, resent_body) = post(app.clone(), "/api/matrix/inbound", resend).await;
+    assert_eq!(resent_status, StatusCode::CREATED, "body: {resent_body}");
+    tick.run().await;
+    assert_eq!(
+        count_rows(&pool, "agent_chat_task_graphs").await,
+        2,
+        "the re-sent command did not produce a run"
+    );
 }
