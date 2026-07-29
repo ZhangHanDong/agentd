@@ -968,6 +968,7 @@ impl RunHost for FakeRunHost {
                 route: "ignored".to_string(),
                 event_id,
                 message_id: None,
+                command_id: None,
                 message: None,
             };
             self.matrix_events
@@ -1034,6 +1035,7 @@ impl RunHost for FakeRunHost {
             duplicate: false,
             ignored: false,
             route,
+            command_id: Some(format!("mxc_fake_{event_id}")),
             event_id,
             message_id: Some(message.id.clone()),
             message: Some(message),

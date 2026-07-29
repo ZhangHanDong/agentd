@@ -624,7 +624,8 @@ async fn post_matrix_inbound(
             Json(json!({ "error": "matrix room not trusted" })),
         )
             .into_response(),
-        Err(e) => agent_error_response(e),
+        // A second *open* command for one room and project is a 409, not a 500.
+        Err(error) => task_error_response(error),
     }
 }
 

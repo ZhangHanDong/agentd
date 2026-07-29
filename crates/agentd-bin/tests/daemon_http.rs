@@ -2496,3 +2496,126 @@ async fn daemon_router_matrix_gateway_cursor_round_trips_and_fences_stale_writes
     assert_eq!(read["cursor"]["syncToken"], "s_batch_2");
     assert_eq!(read["cursor"]["recordVersion"], 2);
 }
+
+#[tokio::test]
+async fn daemon_router_matrix_inbound_replay_never_creates_a_second_message() {
+    let (app, _dir) = empty_router().await;
+    let (agent_status, agent_body) = post(
+        app.clone(),
+        "/api/agents",
+        serde_json::json!({ "name": "codex-worker", "runtime": "codex" }),
+    )
+    .await;
+    assert_eq!(agent_status, StatusCode::OK, "body: {agent_body}");
+
+    let (room_status, room_body) = post(
+        app.clone(),
+        "/api/matrix/rooms",
+        serde_json::json!({
+            "roomId": "!dm:matrix.test",
+            "agent": "codex-worker",
+            "trusted": true,
+            "trustReason": "managed"
+        }),
+    )
+    .await;
+    assert_eq!(room_status, StatusCode::OK, "body: {room_body}");
+
+    let inbound = serde_json::json!({
+        "eventId": "$dm-replay",
+        "roomId": "!dm:matrix.test",
+        "senderMxid": "@alice:matrix.test",
+        "body": "please review the patch"
+    });
+
+    let (first_status, first_body) =
+        post(app.clone(), "/api/matrix/inbound", inbound.clone()).await;
+    assert_eq!(first_status, StatusCode::CREATED, "body: {first_body}");
+    let first: serde_json::Value = serde_json::from_str(&first_body).expect("first json");
+    let command_id = first["commandId"].as_str().expect("command id").to_string();
+    assert!(command_id.starts_with("mxc_"), "{command_id}");
+    let message_id = first["message"]["id"]
+        .as_str()
+        .expect("message id")
+        .to_string();
+
+    for _ in 0..3 {
+        let (status, body) = post(app.clone(), "/api/matrix/inbound", inbound.clone()).await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        let replay: serde_json::Value = serde_json::from_str(&body).expect("replay json");
+        assert_eq!(replay["duplicate"], true);
+        assert_eq!(replay["commandId"], command_id);
+        assert_eq!(replay["messageId"], message_id);
+    }
+
+    let (inbox_status, inbox_body) = get(app.clone(), "/api/inbox/codex-worker").await;
+    assert_eq!(inbox_status, StatusCode::OK, "body: {inbox_body}");
+    let inbox: serde_json::Value = serde_json::from_str(&inbox_body).expect("inbox json");
+    assert_eq!(inbox["dm"].as_array().expect("dm array").len(), 1);
+
+    let (outbox_status, outbox_body) = get(app, "/api/matrix/outbox?from_seq=0").await;
+    assert_eq!(outbox_status, StatusCode::OK, "body: {outbox_body}");
+    let outbox: serde_json::Value = serde_json::from_str(&outbox_body).expect("outbox json");
+    // The echo filter drops `source == "matrix"` events, so the Matrix-sourced
+    // inbound echo must not be replayed back at Matrix even once.
+    assert_eq!(outbox["events"].as_array().expect("events").len(), 0);
+}
+
+#[tokio::test]
+async fn daemon_router_matrix_inbound_second_open_run_request_is_a_conflict() {
+    let (app, _dir) = empty_router().await;
+    let (agent_status, _) = post(
+        app.clone(),
+        "/api/agents",
+        serde_json::json!({ "name": "codex-worker", "runtime": "codex" }),
+    )
+    .await;
+    assert_eq!(agent_status, StatusCode::OK);
+    let (room_status, _) = post(
+        app.clone(),
+        "/api/matrix/rooms",
+        serde_json::json!({
+            "roomId": "!ops:matrix.test",
+            "agent": "codex-worker",
+            "trusted": true,
+            "trustReason": "managed"
+        }),
+    )
+    .await;
+    assert_eq!(room_status, StatusCode::OK);
+
+    let run_request = serde_json::json!({
+        "label": "build",
+        "owner": "alice",
+        "assignee": "codex-worker",
+        "description": "run the build"
+    });
+
+    let (first_status, first_body) = post(
+        app.clone(),
+        "/api/matrix/inbound",
+        serde_json::json!({
+            "eventId": "$run-1",
+            "roomId": "!ops:matrix.test",
+            "senderMxid": "@alice:matrix.test",
+            "body": "run the build",
+            "runRequest": run_request
+        }),
+    )
+    .await;
+    assert_eq!(first_status, StatusCode::CREATED, "body: {first_body}");
+
+    let (clash_status, clash_body) = post(
+        app,
+        "/api/matrix/inbound",
+        serde_json::json!({
+            "eventId": "$run-2",
+            "roomId": "!ops:matrix.test",
+            "senderMxid": "@alice:matrix.test",
+            "body": "Run the build",
+            "runRequest": run_request
+        }),
+    )
+    .await;
+    assert_eq!(clash_status, StatusCode::CONFLICT, "body: {clash_body}");
+}

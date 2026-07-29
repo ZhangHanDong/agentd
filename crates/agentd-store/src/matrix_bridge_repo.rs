@@ -514,6 +514,311 @@ fn row_to_command(row: &sqlx::sqlite::SqliteRow) -> MatrixCommandRecord {
     }
 }
 
+/// Everything one accepted inbound Matrix event writes, as one unit.
+#[derive(Debug, Clone)]
+pub struct MatrixInboundAcceptance {
+    pub command: MatrixCommandInput,
+    pub direct: Option<crate::message_repo::DirectMessageInput>,
+    pub group: Option<crate::message_repo::GroupMessageInput>,
+    pub relay_payload: serde_json::Value,
+}
+
+/// What the acceptance produced. `duplicate` means the event was already
+/// accepted and nothing new was written.
+#[derive(Debug, Clone)]
+pub struct MatrixInboundAcceptanceResult {
+    pub command: MatrixCommandRecord,
+    pub duplicate: bool,
+    pub direct: Option<crate::message_repo::DirectMessageRecord>,
+    pub group: Option<crate::message_repo::GroupMessageRecord>,
+}
+
+/// Accept one inbound Matrix event: processed-event row, canonical command
+/// row, inbox message, and outbox event, in one `BEGIN IMMEDIATE` or none.
+///
+/// Before this, the four writes were independent pool calls behind a
+/// read-only duplicate check, so a crash between the message insert and the
+/// event insert let the replay create a second message under a fresh ULID.
+/// Here the message id is caller-supplied and derived from the command id, so
+/// even a torn write is repaired by `ON CONFLICT(id) DO NOTHING`.
+///
+/// # Errors
+/// [`StoreError::Invariant`] on blank required fields or when `open` disagrees
+/// with `run_request`; [`StoreError::Conflict`] when an open command for the
+/// same `(room, project, payload)` already exists.
+pub async fn accept_inbound_event(
+    pool: &SqlitePool,
+    acceptance: MatrixInboundAcceptance,
+) -> Result<MatrixInboundAcceptanceResult, StoreError> {
+    let mut connection = pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *connection)
+        .await?;
+    let result = accept_inbound_event_in_transaction(&mut connection, acceptance).await;
+    match result {
+        Ok(value) => {
+            sqlx::query("COMMIT").execute(&mut *connection).await?;
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            Err(error)
+        }
+    }
+}
+
+/// One inbound command with every field trimmed, derived, and checked, so the
+/// transaction body below is nothing but writes.
+struct NormalizedCommand {
+    event_id: String,
+    room_id: String,
+    sender_mxid: String,
+    route: String,
+    project_key: String,
+    dedup_key: String,
+    command_id: String,
+    status: &'static str,
+    run_request_json: Option<String>,
+}
+
+fn normalize_command(command: MatrixCommandInput) -> Result<NormalizedCommand, StoreError> {
+    // `open` is what the partial unique index keys on and `run_request` is
+    // what the Task 6 sweep acts on. Coercing a mismatch silently would either
+    // disable the dedup slot or leave the sweep a run nobody holds a slot for,
+    // so a caller that computed them inconsistently is stopped here.
+    if command.open != command.run_request.is_some() {
+        return Err(StoreError::Invariant(
+            "matrix command open flag must match the presence of a run request".to_string(),
+        ));
+    }
+    let event_id = required(command.event_id, "matrix event id required")?;
+    let room_id = required(command.room_id, "matrix room id required")?;
+    let run_request_json = command
+        .run_request
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+    Ok(NormalizedCommand {
+        sender_mxid: required(command.sender_mxid, "matrix sender mxid required")?,
+        route: required(command.route, "matrix route required")?,
+        project_key: clean_opt(command.project_id).unwrap_or_default(),
+        dedup_key: matrix_command_dedup_key(&command.body),
+        command_id: matrix_command_id(&room_id, &event_id),
+        status: if command.open { "accepted" } else { "settled" },
+        run_request_json,
+        event_id,
+        room_id,
+    })
+}
+
+async fn accept_inbound_event_in_transaction(
+    connection: &mut sqlx::SqliteConnection,
+    acceptance: MatrixInboundAcceptance,
+) -> Result<MatrixInboundAcceptanceResult, StoreError> {
+    let MatrixInboundAcceptance {
+        command,
+        direct,
+        group,
+        relay_payload,
+    } = acceptance;
+    let command = normalize_command(command)?;
+    let now = now_unix();
+
+    // The duplicate check is inside the transaction, so a concurrent POST of
+    // the same event cannot slip between the read and the writes.
+    if let Some(row) = sqlx::query(&format!("{COMMAND_SELECT_SQL} WHERE command_id = ?"))
+        .bind(&command.command_id)
+        .fetch_optional(&mut *connection)
+        .await?
+    {
+        return Ok(MatrixInboundAcceptanceResult {
+            command: row_to_command(&row),
+            duplicate: true,
+            direct: None,
+            group: None,
+        });
+    }
+
+    insert_event_and_command(&mut *connection, &command, now).await?;
+    let NormalizedCommand {
+        event_id,
+        command_id,
+        ..
+    } = command;
+
+    let direct_record = match direct {
+        Some(input) => {
+            Some(crate::message_repo::insert_direct_message_on(&mut *connection, input).await?)
+        }
+        None => None,
+    };
+    let group_record = match group {
+        Some(input) => {
+            Some(crate::message_repo::insert_group_message_on(&mut *connection, input).await?)
+        }
+        None => None,
+    };
+
+    let message_id = direct_record
+        .as_ref()
+        .map(|record| record.id.clone())
+        .or_else(|| group_record.as_ref().map(|record| record.id.clone()));
+    if let Some(message_id) = message_id.as_deref() {
+        link_message(connection, &event_id, &command_id, message_id, now).await?;
+    }
+
+    let mut payload = match relay_payload {
+        serde_json::Value::Object(_) => relay_payload,
+        other => serde_json::json!({ "value": other }),
+    };
+    payload["commandId"] = serde_json::json!(command_id);
+    if let Some(message_id) = message_id.as_deref() {
+        payload["messageId"] = serde_json::json!(message_id);
+    }
+    crate::relay_repo::append_relay_stream_event_on(&mut *connection, "message", payload).await?;
+
+    let row = sqlx::query(&format!("{COMMAND_SELECT_SQL} WHERE command_id = ?"))
+        .bind(&command_id)
+        .fetch_optional(&mut *connection)
+        .await?
+        .ok_or_else(|| {
+            StoreError::Invariant(format!("matrix command '{command_id}' is missing"))
+        })?;
+    Ok(MatrixInboundAcceptanceResult {
+        command: row_to_command(&row),
+        duplicate: false,
+        direct: direct_record,
+        group: group_record,
+    })
+}
+
+/// Does this insert failure come from the open-command dedup slot?
+///
+/// Write the processed-event row and the canonical command row.
+///
+/// Both are guarded inserts rather than upserts: the acceptance either claims
+/// this event or refuses it, and refusing is the point.
+async fn insert_event_and_command(
+    connection: &mut sqlx::SqliteConnection,
+    command: &NormalizedCommand,
+    now: i64,
+) -> Result<(), StoreError> {
+    // `DO NOTHING` rather than a bare insert: an event recorded before this
+    // transaction existed (an `[AGENTIGNORE]` row, or a pre-M4 message) has no
+    // command row, so the duplicate read above cannot see it. That is a
+    // non-retryable conflict, not a 500.
+    let inserted_event = sqlx::query(
+        "INSERT INTO matrix_bridge_events \
+         (event_id, room_id, sender_mxid, message_id, route, ignored, created_at) \
+         VALUES (?, ?, ?, NULL, ?, 0, ?) \
+         ON CONFLICT(event_id) DO NOTHING",
+    )
+    .bind(&command.event_id)
+    .bind(&command.room_id)
+    .bind(&command.sender_mxid)
+    .bind(&command.route)
+    .bind(now)
+    .execute(&mut *connection)
+    .await?;
+    if inserted_event.rows_affected() != 1 {
+        return Err(StoreError::Conflict(format!(
+            "matrix event '{}' was already accepted",
+            command.event_id
+        )));
+    }
+
+    let inserted_command = sqlx::query(
+        "INSERT INTO matrix_commands \
+         (command_id, event_id, room_id, project_key, dedup_key, sender_mxid, route, status, \
+          message_id, run_id, run_request_json, record_version, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, 1, ?, ?)",
+    )
+    .bind(&command.command_id)
+    .bind(&command.event_id)
+    .bind(&command.room_id)
+    .bind(&command.project_key)
+    .bind(&command.dedup_key)
+    .bind(&command.sender_mxid)
+    .bind(&command.route)
+    .bind(command.status)
+    .bind(command.run_request_json.as_deref())
+    .bind(now)
+    .bind(now)
+    .execute(&mut *connection)
+    .await
+    .map_err(|error| {
+        if is_open_command_clash(&error) {
+            // The partial unique index fired: an equivalent command for this
+            // room and project is still running. Not "changed concurrently" —
+            // the caller must not retry this, it must wait for the open one.
+            StoreError::Conflict(format!(
+                "matrix command for room '{}' is already open",
+                command.room_id
+            ))
+        } else {
+            StoreError::Sqlx(error)
+        }
+    })?;
+    if inserted_command.rows_affected() != 1 {
+        return Err(StoreError::Conflict(format!(
+            "matrix command '{}' was already accepted",
+            command.command_id
+        )));
+    }
+    Ok(())
+}
+
+/// Point the freshly written event and command rows at the inbox message they
+/// produced. Both updates are guarded, so a row that moved underneath us — it
+/// cannot, inside `BEGIN IMMEDIATE`, but the guard is what makes that true
+/// rather than assumed — aborts the whole acceptance.
+async fn link_message(
+    connection: &mut sqlx::SqliteConnection,
+    event_id: &str,
+    command_id: &str,
+    message_id: &str,
+    now: i64,
+) -> Result<(), StoreError> {
+    let linked = sqlx::query(
+        "UPDATE matrix_bridge_events SET message_id = ? WHERE event_id = ? AND message_id IS NULL",
+    )
+    .bind(message_id)
+    .bind(event_id)
+    .execute(&mut *connection)
+    .await?;
+    if linked.rows_affected() != 1 {
+        return Err(StoreError::Conflict(format!(
+            "matrix event '{event_id}' record version mismatch"
+        )));
+    }
+    let linked_command = sqlx::query(
+        "UPDATE matrix_commands SET message_id = ?, record_version = record_version + 1, \
+         updated_at = ? WHERE command_id = ? AND record_version = 1",
+    )
+    .bind(message_id)
+    .bind(now)
+    .bind(command_id)
+    .execute(&mut *connection)
+    .await?;
+    if linked_command.rows_affected() != 1 {
+        return Err(StoreError::Conflict(format!(
+            "matrix command '{command_id}' record version mismatch"
+        )));
+    }
+    Ok(())
+}
+
+/// `SQLite` names the *columns* of the violated unique index, never the index
+/// itself, so this matches on `dedup_key` — the one column that appears in no
+/// other constraint on `matrix_commands`.
+fn is_open_command_clash(error: &sqlx::Error) -> bool {
+    error.as_database_error().is_some_and(|db| {
+        let message = db.message();
+        message.contains("UNIQUE constraint failed")
+            && message.contains("matrix_commands.dedup_key")
+    })
+}
+
 fn required(value: String, message: &str) -> Result<String, StoreError> {
     clean_opt(Some(value)).ok_or_else(|| StoreError::Invariant(message.to_string()))
 }

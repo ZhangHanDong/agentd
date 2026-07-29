@@ -350,6 +350,21 @@ pub struct MatrixInboundMessageInput {
     pub reply_to: Option<String>,
     #[serde(default, rename = "trustLevel", alias = "trust_level")]
     pub trust_level: Option<String>,
+    /// Optional run request. M4 Plan A accepts and honours this field; M4 Plan
+    /// B is what populates it from a normalized bang command. Absent — every
+    /// call the bridge makes today — the command is recorded `settled` and
+    /// behaviour is unchanged.
+    #[serde(default, rename = "runRequest", alias = "run_request")]
+    pub run_request: Option<MatrixCommandRunRequest>,
+}
+
+/// A run the inbound Matrix command asks agentd to create.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MatrixCommandRunRequest {
+    pub label: String,
+    pub owner: String,
+    pub assignee: String,
+    pub description: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -400,6 +415,9 @@ pub struct MatrixInboundMessageResult {
     pub event_id: String,
     #[serde(rename = "messageId")]
     pub message_id: Option<String>,
+    /// Canonical agentd command id for this Matrix event.
+    #[serde(rename = "commandId")]
+    pub command_id: Option<String>,
     pub message: Option<InboxMessage>,
 }
 

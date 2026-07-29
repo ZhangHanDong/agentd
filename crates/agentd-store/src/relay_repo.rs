@@ -205,6 +205,21 @@ pub async fn append_relay_stream_event(
     event: &str,
     payload: Value,
 ) -> Result<RelayStreamEventRecord, StoreError> {
+    let mut connection = pool.acquire().await?;
+    append_relay_stream_event_on(&mut connection, event, payload).await
+}
+
+/// Append one relay-stream (Matrix outbox) event on the caller's connection,
+/// so the outbox echo can share a transaction with the message it echoes.
+///
+/// # Errors
+/// [`StoreError::Invariant`] when the event name is blank; [`StoreError::Sqlx`]
+/// on a store failure.
+pub async fn append_relay_stream_event_on(
+    connection: &mut sqlx::SqliteConnection,
+    event: &str,
+    payload: Value,
+) -> Result<RelayStreamEventRecord, StoreError> {
     let event = required(event.to_string(), "stream event required")?;
     let payload = match payload {
         Value::Object(_) => payload,
@@ -218,7 +233,7 @@ pub async fn append_relay_stream_event(
     .bind(&event)
     .bind(payload_json)
     .bind(created_at)
-    .execute(pool)
+    .execute(&mut *connection)
     .await?;
     let seq = result.last_insert_rowid();
     Ok(RelayStreamEventRecord {
