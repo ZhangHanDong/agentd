@@ -77,7 +77,7 @@ async fn migration_is_idempotent_on_reopen() {
         .fetch_one(s2.pool())
         .await
         .expect("schema version row");
-    assert_eq!(version, "28");
+    assert_eq!(version, "29");
 }
 
 #[tokio::test]
@@ -134,7 +134,7 @@ async fn migration_adds_message_attachment_columns() {
         .fetch_one(store.pool())
         .await
         .expect("schema version row");
-    assert_eq!(version, "28");
+    assert_eq!(version, "29");
 }
 
 #[tokio::test]
@@ -225,7 +225,7 @@ async fn migration_creates_remote_relay_backend_tables() {
         .fetch_one(store.pool())
         .await
         .expect("schema version row");
-    assert_eq!(version, "28");
+    assert_eq!(version, "29");
 }
 
 #[tokio::test]
@@ -294,7 +294,7 @@ async fn migration_creates_matrix_bridge_contract_tables() {
         .fetch_one(store.pool())
         .await
         .expect("schema version row");
-    assert_eq!(version, "28");
+    assert_eq!(version, "29");
 }
 
 #[tokio::test]
@@ -346,7 +346,7 @@ async fn migration_creates_agent_chat_task_import_tables() {
         .fetch_one(store.pool())
         .await
         .expect("schema version row");
-    assert_eq!(version, "28");
+    assert_eq!(version, "29");
 }
 
 #[tokio::test]
@@ -366,7 +366,7 @@ async fn migration_adds_direct_message_schema_column() {
         .fetch_one(store.pool())
         .await
         .expect("schema version row");
-    assert_eq!(version, "28");
+    assert_eq!(version, "29");
 }
 
 #[tokio::test]
@@ -476,7 +476,7 @@ async fn migration_creates_agent_scheduler_tables() {
         .fetch_one(store.pool())
         .await
         .expect("schema version row");
-    assert_eq!(version, "28");
+    assert_eq!(version, "29");
 }
 
 #[tokio::test]
@@ -523,7 +523,7 @@ async fn migration_creates_enterprise_agent_worker_runtime_tables() {
         .fetch_one(store.pool())
         .await
         .expect("schema version");
-    assert_eq!(version, "28");
+    assert_eq!(version, "29");
 
     let indexes: Vec<String> = sqlx::query_scalar(
         "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_%one_current'",
@@ -587,7 +587,7 @@ async fn migration_creates_enterprise_artifact_audit_tables() {
         .fetch_one(store.pool())
         .await
         .expect("schema version");
-    assert_eq!(version, "28");
+    assert_eq!(version, "29");
 
     let triggers: Vec<String> =
         sqlx::query("SELECT name FROM sqlite_master WHERE type='trigger' ORDER BY name")
@@ -656,7 +656,7 @@ async fn migration_creates_constrained_task_lease_tables() {
         .fetch_one(store.pool())
         .await
         .expect("schema version");
-    assert_eq!(version, "28");
+    assert_eq!(version, "29");
 
     let lease_fk_tables: Vec<String> = sqlx::query_scalar(
         "SELECT \"table\" FROM pragma_foreign_key_list('execution_task_leases') ORDER BY \"table\"",
@@ -849,7 +849,7 @@ async fn migration_creates_enterprise_scheduler_tables() {
         .fetch_one(store.pool())
         .await
         .expect("schema version row");
-    assert_eq!(version, "28");
+    assert_eq!(version, "29");
 }
 
 #[tokio::test]
@@ -868,7 +868,7 @@ async fn migration_adds_worker_incarnation_capacity_column() {
         .fetch_one(store.pool())
         .await
         .expect("schema version row");
-    assert_eq!(version, "28");
+    assert_eq!(version, "29");
 }
 
 #[tokio::test]
@@ -886,5 +886,37 @@ async fn migration_creates_matrix_gateway_cursor_table() {
         .fetch_one(store.pool())
         .await
         .expect("schema version");
-    assert_eq!(version, "28");
+    assert_eq!(version, "29");
+}
+
+#[tokio::test]
+async fn migration_creates_matrix_command_table_with_the_open_dedup_index() {
+    let (store, _dir) = open_temp().await;
+    let table: Option<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'matrix_commands'",
+    )
+    .fetch_optional(store.pool())
+    .await
+    .expect("query sqlite_master");
+    assert_eq!(table.as_deref(), Some("matrix_commands"));
+
+    let index: Option<String> = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' \
+         AND name = 'idx_matrix_commands_open_room_project'",
+    )
+    .fetch_optional(store.pool())
+    .await
+    .expect("query sqlite_master index");
+    let index = index.expect("open dedup index exists");
+    assert!(index.contains("UNIQUE"), "{index}");
+    assert!(index.contains("room_id"), "{index}");
+    assert!(index.contains("project_key"), "{index}");
+    assert!(index.contains("dedup_key"), "{index}");
+    assert!(index.contains("accepted"), "{index}");
+
+    let version: String = sqlx::query_scalar("SELECT value FROM schema_meta WHERE key = 'version'")
+        .fetch_one(store.pool())
+        .await
+        .expect("schema version");
+    assert_eq!(version, "29");
 }

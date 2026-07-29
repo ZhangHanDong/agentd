@@ -4,6 +4,7 @@
 //! trusted room mappings and inbound event idempotency. Actual agent messages
 //! continue to live in `message_repo`.
 
+use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
 
 use crate::error::StoreError;
@@ -369,6 +370,144 @@ fn row_to_gateway_cursor(row: &sqlx::sqlite::SqliteRow) -> MatrixGatewayCursorRe
         gateway_id: row.get("gateway_id"),
         sync_token: row.get("sync_token"),
         last_event_id: row.get("last_event_id"),
+        record_version: row.get("record_version"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+/// The canonical agentd command id for one Matrix event.
+///
+/// Deterministic: a replayed event recomputes the identical id with no read,
+/// which is what lets the inbound transaction be a pure insert-or-conflict.
+/// The domain prefix and the unit-separator framing keep `(room, event)` pairs
+/// from colliding across concatenations.
+#[must_use]
+pub fn matrix_command_id(room_id: &str, event_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"agentd.matrix.command.v1\x1f");
+    hasher.update(room_id.trim().as_bytes());
+    hasher.update(b"\x1f");
+    hasher.update(event_id.trim().as_bytes());
+    format!("mxc_{}", hex32(&hasher.finalize()))
+}
+
+/// The room/project dedup key for one command payload.
+///
+/// The normalization here is deliberately minimal — trim, ASCII-lowercase,
+/// collapse internal whitespace. Full command normalization (mention
+/// stripping, bang-command parsing) is M4 Plan B, and it replaces this
+/// function and the dedup key together.
+#[must_use]
+pub fn matrix_command_dedup_key(body: &str) -> String {
+    let normalized = body
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    let mut hasher = Sha256::new();
+    hasher.update(b"agentd.matrix.dedup.v1\x1f");
+    hasher.update(normalized.as_bytes());
+    hex32(&hasher.finalize())
+}
+
+fn hex32(digest: &[u8]) -> String {
+    use std::fmt::Write as _;
+    digest.iter().take(16).fold(String::new(), |mut hex, byte| {
+        let _ = write!(hex, "{byte:02x}");
+        hex
+    })
+}
+
+/// The run a Matrix command asks agentd to create, as stored on the command.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MatrixCommandRunPlan {
+    pub label: String,
+    pub owner: String,
+    pub assignee: String,
+    pub description: String,
+}
+
+/// One inbound Matrix command as accepted by the gateway.
+#[derive(Debug, Clone)]
+pub struct MatrixCommandInput {
+    pub event_id: String,
+    pub room_id: String,
+    pub project_id: Option<String>,
+    pub sender_mxid: String,
+    pub route: String,
+    pub body: String,
+    /// `true` when the command requests a run and must hold the open-dedup
+    /// slot until it settles; `false` for plain chat, which is recorded
+    /// `settled` and never contends. Always equals `run_request.is_some()` for
+    /// callers going through the inbound route, but stays a separate field so
+    /// the index predicate is explicit at the insert site.
+    pub open: bool,
+    /// The run to create, or `None` for plain chat.
+    pub run_request: Option<MatrixCommandRunPlan>,
+}
+
+/// Durable canonical command record.
+#[derive(Debug, Clone)]
+pub struct MatrixCommandRecord {
+    pub command_id: String,
+    pub event_id: String,
+    pub room_id: String,
+    pub project_key: String,
+    pub dedup_key: String,
+    pub sender_mxid: String,
+    pub route: String,
+    pub status: String,
+    pub message_id: Option<String>,
+    pub run_id: Option<String>,
+    pub run_request_json: Option<String>,
+    pub record_version: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+const COMMAND_SELECT_SQL: &str = "SELECT command_id, event_id, room_id, project_key, dedup_key, \
+     sender_mxid, route, status, message_id, run_id, run_request_json, record_version, \
+     created_at, updated_at FROM matrix_commands";
+
+pub async fn get_command(
+    pool: &SqlitePool,
+    command_id: &str,
+) -> Result<Option<MatrixCommandRecord>, StoreError> {
+    let command_id = required(command_id.to_string(), "matrix command id required")?;
+    let row = sqlx::query(&format!("{COMMAND_SELECT_SQL} WHERE command_id = ?"))
+        .bind(command_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(|row| row_to_command(&row)))
+}
+
+/// Commands that were accepted but have no run yet, oldest first.
+pub async fn list_accepted_commands(
+    pool: &SqlitePool,
+) -> Result<Vec<MatrixCommandRecord>, StoreError> {
+    let rows = sqlx::query(&format!(
+        "{COMMAND_SELECT_SQL} WHERE status = 'accepted' AND run_id IS NULL \
+         ORDER BY created_at ASC, command_id ASC"
+    ))
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.iter().map(row_to_command).collect())
+}
+
+fn row_to_command(row: &sqlx::sqlite::SqliteRow) -> MatrixCommandRecord {
+    MatrixCommandRecord {
+        command_id: row.get("command_id"),
+        event_id: row.get("event_id"),
+        room_id: row.get("room_id"),
+        project_key: row.get("project_key"),
+        dedup_key: row.get("dedup_key"),
+        sender_mxid: row.get("sender_mxid"),
+        route: row.get("route"),
+        status: row.get("status"),
+        message_id: row.get("message_id"),
+        run_id: row.get("run_id"),
+        run_request_json: row.get("run_request_json"),
         record_version: row.get("record_version"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),

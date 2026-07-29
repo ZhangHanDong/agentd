@@ -206,3 +206,29 @@ async fn matrix_gateway_cursor_rejects_a_stale_or_missing_version() {
     assert_eq!(loaded.sync_token.as_deref(), Some("s_batch_1"));
     assert_eq!(loaded.record_version, 1);
 }
+
+#[tokio::test]
+async fn matrix_command_id_is_canonical_and_deterministic() {
+    let first = matrix_bridge_repo::matrix_command_id("!ops:matrix.test", "$event-1");
+    let again = matrix_bridge_repo::matrix_command_id("!ops:matrix.test", "$event-1");
+    let other_event = matrix_bridge_repo::matrix_command_id("!ops:matrix.test", "$event-2");
+    let other_room = matrix_bridge_repo::matrix_command_id("!other:matrix.test", "$event-1");
+
+    assert_eq!(
+        first, again,
+        "the same event always yields the same command id"
+    );
+    assert_ne!(first, other_event);
+    assert_ne!(first, other_room);
+    assert!(first.starts_with("mxc_"), "{first}");
+    assert_eq!(first.len(), 4 + 32, "{first}");
+}
+
+#[tokio::test]
+async fn matrix_command_dedup_key_ignores_case_and_surrounding_whitespace() {
+    let plain = matrix_bridge_repo::matrix_command_dedup_key("Ship  the   patch");
+    let noisy = matrix_bridge_repo::matrix_command_dedup_key("  ship the patch  ");
+    let different = matrix_bridge_repo::matrix_command_dedup_key("ship the other patch");
+    assert_eq!(plain, noisy);
+    assert_ne!(plain, different);
+}
