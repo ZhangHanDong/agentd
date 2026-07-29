@@ -170,6 +170,16 @@ pub async fn worker_fleet_tick(
     {
         tracing::warn!(%error, "re-advancing active task graphs failed this tick");
     }
+    // A command holds its room's open-dedup slot until it settles, so a
+    // finished run must release it or the same command text can never be sent
+    // in that room again. Order matters: settle after advance, so a graph that
+    // reaches a terminal state this tick retires its command in the same tick.
+    if let Err(error) =
+        agentd_store::matrix_command_dispatch::settle_running_commands(native_worker.store().pool())
+            .await
+    {
+        tracing::warn!(%error, "settling finished Matrix commands failed this tick");
+    }
     let _ = agent_registry_tick(native_worker.store().pool(), observed_at).await;
     let _ = recovery_registry.recover_one(native_worker).await;
 }

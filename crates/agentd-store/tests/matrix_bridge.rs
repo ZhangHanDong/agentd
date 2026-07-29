@@ -11,6 +11,87 @@ fn text(value: &str) -> String {
     value.to_string()
 }
 
+/// Accept one open command in `room_id` and run the dispatch sweep, leaving it
+/// `running` against a freshly created graph — the state every settle test
+/// starts from.
+async fn running_command(
+    store: &SqliteStore,
+    room_id: &str,
+    event_id: &str,
+    body: &str,
+) -> matrix_bridge_repo::MatrixCommandRecord {
+    matrix_bridge_repo::upsert_room(
+        store.pool(),
+        matrix_bridge_repo::MatrixBridgeRoomInput {
+            room_id: text(room_id),
+            project_id: None,
+            group_name: None,
+            agent_name: Some(text("codex-worker")),
+            trusted: true,
+            trust_reason: text("managed"),
+            inviter_mxid: None,
+        },
+    )
+    .await
+    .expect("upsert room");
+
+    let accepted = matrix_bridge_repo::accept_inbound_event(
+        store.pool(),
+        matrix_bridge_repo::MatrixInboundAcceptance {
+            command: matrix_bridge_repo::MatrixCommandInput {
+                event_id: text(event_id),
+                room_id: text(room_id),
+                project_id: None,
+                sender_mxid: text("@alice:matrix.test"),
+                route: text("agent"),
+                body: text(body),
+                open: true,
+                run_request: Some(matrix_bridge_repo::MatrixCommandRunPlan {
+                    label: text("build"),
+                    owner: text("alice"),
+                    assignee: text("codex-worker"),
+                    description: text(body),
+                }),
+            },
+            direct: None,
+            group: None,
+            relay_payload: serde_json::json!({ "kind": "direct", "source": "matrix" }),
+        },
+    )
+    .await
+    .expect("accept command");
+
+    agentd_store::matrix_command_dispatch::dispatch_accepted_commands(store.pool())
+        .await
+        .expect("dispatch");
+
+    let command = matrix_bridge_repo::get_command(store.pool(), &accepted.command.command_id)
+        .await
+        .expect("get command")
+        .expect("command exists");
+    assert_eq!(command.status, "running");
+    command
+}
+
+/// Drive the single `run` node of a dispatched command's graph to `status`,
+/// which settles the graph itself.
+async fn finish_run_node(store: &SqliteStore, graph_id: &str, status: &str) {
+    let (graph, _node) = agentd_store::agent_chat_task_graph_repo::update_node_and_advance(
+        store.pool(),
+        graph_id,
+        "run",
+        agentd_store::agent_chat_task_graph_repo::UpdateAgentChatTaskGraphNode {
+            status: Some(text(status)),
+            result: Some(serde_json::json!({ "ok": status == "complete" })),
+            error: None,
+        },
+    )
+    .await
+    .expect("update run node")
+    .expect("graph exists");
+    assert_eq!(graph.status, status);
+}
+
 #[tokio::test]
 async fn matrix_bridge_store_persists_room_mapping_and_event_records() {
     let (store, _dir) = open_temp().await;
@@ -938,4 +1019,180 @@ async fn dispatch_settles_an_accepted_command_that_carries_no_run_plan() {
         .await
         .expect("count graphs");
     assert_eq!(graphs, 0);
+}
+
+#[tokio::test]
+async fn settling_a_finished_command_lets_the_same_text_be_sent_again() {
+    // The user-visible bug: the open-dedup index covers `accepted` and
+    // `running`, so a command left at `running` after its run finished held
+    // the room's slot forever and made "run the build" un-repeatable there.
+    let (store, _dir) = open_temp().await;
+    let command = running_command(&store, "!ops:matrix.test", "$run-1", "run the build").await;
+    let graph_id = command.run_id.clone().expect("bound run");
+
+    finish_run_node(&store, &graph_id, "complete").await;
+
+    let settled = agentd_store::matrix_command_dispatch::settle_running_commands(store.pool())
+        .await
+        .expect("settle sweep");
+    assert_eq!(settled, 1);
+
+    let after = matrix_bridge_repo::get_command(store.pool(), &command.command_id)
+        .await
+        .expect("get command")
+        .expect("command exists");
+    assert_eq!(after.status, "settled");
+    assert_eq!(after.record_version, command.record_version + 1);
+
+    // The point of settling: the identical command text is accepted again.
+    let resent = matrix_bridge_repo::accept_inbound_event(
+        store.pool(),
+        matrix_bridge_repo::MatrixInboundAcceptance {
+            command: matrix_bridge_repo::MatrixCommandInput {
+                event_id: text("$run-2"),
+                room_id: text("!ops:matrix.test"),
+                project_id: None,
+                sender_mxid: text("@alice:matrix.test"),
+                route: text("agent"),
+                body: text("run the build"),
+                open: true,
+                run_request: Some(matrix_bridge_repo::MatrixCommandRunPlan {
+                    label: text("build"),
+                    owner: text("alice"),
+                    assignee: text("codex-worker"),
+                    description: text("run the build"),
+                }),
+            },
+            direct: None,
+            group: None,
+            relay_payload: serde_json::json!({ "kind": "direct", "source": "matrix" }),
+        },
+    )
+    .await
+    .expect("re-sending a finished command must be accepted, not rejected as open");
+    assert_eq!(resent.command.status, "accepted");
+    assert!(!resent.duplicate);
+    assert_eq!(resent.command.dedup_key, command.dedup_key);
+}
+
+#[tokio::test]
+async fn settling_covers_failed_and_cancelled_runs_too() {
+    let (store, _dir) = open_temp().await;
+    let failed = running_command(
+        &store,
+        "!failed:matrix.test",
+        "$run-failed",
+        "run the build",
+    )
+    .await;
+    let cancelled = running_command(
+        &store,
+        "!cancelled:matrix.test",
+        "$run-cancelled",
+        "run the build",
+    )
+    .await;
+
+    finish_run_node(&store, &failed.run_id.clone().expect("bound run"), "failed").await;
+    let cancelled_graph = cancelled.run_id.clone().expect("bound run");
+    let deleted =
+        agentd_store::agent_chat_task_graph_repo::delete_graph(store.pool(), &cancelled_graph)
+            .await
+            .expect("cancel graph")
+            .expect("graph exists");
+    assert_eq!(deleted.status, "cancelled");
+
+    let settled = agentd_store::matrix_command_dispatch::settle_running_commands(store.pool())
+        .await
+        .expect("settle sweep");
+    assert_eq!(settled, 2, "a cancelled run must release its slot too");
+
+    for command_id in [&failed.command_id, &cancelled.command_id] {
+        let after = matrix_bridge_repo::get_command(store.pool(), command_id)
+            .await
+            .expect("get command")
+            .expect("command exists");
+        assert_eq!(after.status, "settled", "{command_id}");
+    }
+}
+
+#[tokio::test]
+async fn settling_leaves_a_command_whose_run_is_still_active() {
+    let (store, _dir) = open_temp().await;
+    let command = running_command(&store, "!ops:matrix.test", "$run-1", "run the build").await;
+
+    let settled = agentd_store::matrix_command_dispatch::settle_running_commands(store.pool())
+        .await
+        .expect("settle sweep");
+    assert_eq!(settled, 0, "an active run still owns its command");
+
+    let after = matrix_bridge_repo::get_command(store.pool(), &command.command_id)
+        .await
+        .expect("get command")
+        .expect("command exists");
+    assert_eq!(after.status, "running");
+    assert_eq!(after.record_version, command.record_version);
+}
+
+#[tokio::test]
+async fn settling_releases_a_command_whose_graph_row_is_gone() {
+    // The last way the slot can leak: the graph row was removed out of band,
+    // so no terminal status will ever be observable for it.
+    let (store, _dir) = open_temp().await;
+    let command = running_command(&store, "!ops:matrix.test", "$run-1", "run the build").await;
+
+    sqlx::query("DELETE FROM agent_chat_task_graphs WHERE id = ?")
+        .bind(command.run_id.as_deref().expect("bound run"))
+        .execute(store.pool())
+        .await
+        .expect("orphan the run");
+
+    let settled = agentd_store::matrix_command_dispatch::settle_running_commands(store.pool())
+        .await
+        .expect("settle sweep");
+    assert_eq!(settled, 1);
+
+    let after = matrix_bridge_repo::get_command(store.pool(), &command.command_id)
+        .await
+        .expect("get command")
+        .expect("command exists");
+    assert_eq!(after.status, "settled");
+}
+
+#[tokio::test]
+async fn a_replayed_settle_sweep_is_a_no_op() {
+    let (store, _dir) = open_temp().await;
+    let command = running_command(&store, "!ops:matrix.test", "$run-1", "run the build").await;
+    finish_run_node(
+        &store,
+        &command.run_id.clone().expect("bound run"),
+        "complete",
+    )
+    .await;
+
+    let first = agentd_store::matrix_command_dispatch::settle_running_commands(store.pool())
+        .await
+        .expect("settle sweep");
+    assert_eq!(first, 1);
+    let settled = matrix_bridge_repo::get_command(store.pool(), &command.command_id)
+        .await
+        .expect("get command")
+        .expect("command exists");
+
+    for _ in 0..3 {
+        let again = agentd_store::matrix_command_dispatch::settle_running_commands(store.pool())
+            .await
+            .expect("replayed settle sweep must not error");
+        assert_eq!(again, 0);
+    }
+
+    let after = matrix_bridge_repo::get_command(store.pool(), &command.command_id)
+        .await
+        .expect("get command")
+        .expect("command exists");
+    assert_eq!(after.status, "settled");
+    assert_eq!(
+        after.record_version, settled.record_version,
+        "a replayed settle must not bump the version"
+    );
 }
