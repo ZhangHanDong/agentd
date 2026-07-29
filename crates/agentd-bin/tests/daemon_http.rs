@@ -2710,3 +2710,86 @@ async fn daemon_router_matrix_inbound_second_open_run_request_is_a_conflict() {
     .await;
     assert_eq!(clash_status, StatusCode::CONFLICT, "body: {clash_body}");
 }
+
+#[tokio::test]
+async fn matrix_run_request_produces_exactly_one_execution_across_restart_and_replay() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("agentd.db");
+    let store = SqliteStore::connect(&db).await.expect("connect");
+    let pool = store.pool().clone();
+    let host = ProductionRunHost::new(
+        store,
+        Box::new(SharedBackend(Arc::new(FakeBackend::new()))),
+        Box::new(RecordingCommandRunner::new()),
+        Box::new(MempalStub::new()),
+        Box::new(SystemClock),
+        workflows_dir(),
+    );
+    let app = daemon::build_router(Arc::new(host));
+
+    let (agent_status, _) = post(
+        app.clone(),
+        "/api/agents",
+        serde_json::json!({ "name": "codex-worker", "runtime": "codex" }),
+    )
+    .await;
+    assert_eq!(agent_status, StatusCode::OK);
+    let (room_status, _) = post(
+        app.clone(),
+        "/api/matrix/rooms",
+        serde_json::json!({
+            "roomId": "!ops:matrix.test",
+            "agent": "codex-worker",
+            "trusted": true,
+            "trustReason": "managed"
+        }),
+    )
+    .await;
+    assert_eq!(room_status, StatusCode::OK);
+
+    let inbound = serde_json::json!({
+        "eventId": "$run-restart",
+        "roomId": "!ops:matrix.test",
+        "senderMxid": "@alice:matrix.test",
+        "body": "run the build",
+        "runRequest": {
+            "label": "build",
+            "owner": "alice",
+            "assignee": "codex-worker",
+            "description": "run the build"
+        }
+    });
+
+    let (status, body) = post(app.clone(), "/api/matrix/inbound", inbound.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "body: {body}");
+
+    // Tick, restart (replayed inbound), tick, tick.
+    for round in 0..3 {
+        agentd_store::matrix_command_dispatch::dispatch_accepted_commands(&pool)
+            .await
+            .expect("dispatch accepted commands");
+        agentd_store::agent_chat_task_graph_repo::advance_active_graphs(&pool)
+            .await
+            .expect("advance active graphs");
+        let (replay_status, replay_body) =
+            post(app.clone(), "/api/matrix/inbound", inbound.clone()).await;
+        assert_eq!(
+            replay_status,
+            StatusCode::OK,
+            "round {round} body: {replay_body}"
+        );
+    }
+
+    let graphs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_chat_task_graphs")
+        .fetch_one(&pool)
+        .await
+        .expect("count graphs");
+    assert_eq!(graphs, 1, "restart/replay produced a duplicate execution");
+    let messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM direct_messages")
+        .fetch_one(&pool)
+        .await
+        .expect("count messages");
+    // One inbox message for the Matrix event, one task_graph_dispatch message
+    // for the single node the run advanced.
+    assert_eq!(messages, 2, "restart/replay produced a duplicate message");
+}

@@ -626,3 +626,316 @@ async fn accept_inbound_event_serializes_concurrent_posts_of_one_event() {
         .expect("count outbox");
     assert_eq!(outbox, 1);
 }
+
+#[tokio::test]
+async fn dispatching_accepted_commands_creates_exactly_one_run_across_replays() {
+    let (store, _dir) = open_temp().await;
+    matrix_bridge_repo::upsert_room(
+        store.pool(),
+        matrix_bridge_repo::MatrixBridgeRoomInput {
+            room_id: text("!ops:matrix.test"),
+            project_id: None,
+            group_name: None,
+            agent_name: Some(text("codex-worker")),
+            trusted: true,
+            trust_reason: text("managed"),
+            inviter_mxid: None,
+        },
+    )
+    .await
+    .expect("upsert room");
+
+    let accepted = matrix_bridge_repo::accept_inbound_event(
+        store.pool(),
+        matrix_bridge_repo::MatrixInboundAcceptance {
+            command: matrix_bridge_repo::MatrixCommandInput {
+                event_id: text("$run-1"),
+                room_id: text("!ops:matrix.test"),
+                project_id: Some(text("project-ops")),
+                sender_mxid: text("@alice:matrix.test"),
+                route: text("agent"),
+                body: text("run the build"),
+                open: true,
+                run_request: Some(matrix_bridge_repo::MatrixCommandRunPlan {
+                    label: text("build"),
+                    owner: text("alice"),
+                    assignee: text("codex-worker"),
+                    description: text("run the build"),
+                }),
+            },
+            direct: None,
+            group: None,
+            relay_payload: serde_json::json!({ "kind": "direct", "source": "matrix" }),
+        },
+    )
+    .await
+    .expect("accept command");
+    assert_eq!(accepted.command.status, "accepted");
+    assert!(accepted.command.run_id.is_none());
+
+    let first = agentd_store::matrix_command_dispatch::dispatch_accepted_commands(store.pool())
+        .await
+        .expect("first dispatch");
+    assert_eq!(first, 1);
+
+    // Replay the sweep as many times as a restart loop would. `create_graph`
+    // conflicts on the deterministic id, the sweep re-reads and binds, and no
+    // second graph is ever created.
+    for _ in 0..3 {
+        let again = agentd_store::matrix_command_dispatch::dispatch_accepted_commands(store.pool())
+            .await
+            .expect("replayed dispatch");
+        assert_eq!(again, 0, "a bound command is never dispatched twice");
+    }
+
+    let graphs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_chat_task_graphs")
+        .fetch_one(store.pool())
+        .await
+        .expect("count graphs");
+    assert_eq!(graphs, 1, "zero duplicate accepted executions");
+
+    let command = matrix_bridge_repo::get_command(store.pool(), &accepted.command.command_id)
+        .await
+        .expect("get command")
+        .expect("command exists");
+    assert_eq!(command.status, "running");
+    assert_eq!(
+        command.run_id.as_deref(),
+        Some(matrix_bridge_repo::matrix_command_graph_id(&accepted.command.command_id).as_str())
+    );
+}
+
+#[tokio::test]
+async fn binding_a_command_run_rejects_a_stale_version() {
+    let (store, _dir) = open_temp().await;
+    matrix_bridge_repo::upsert_room(
+        store.pool(),
+        matrix_bridge_repo::MatrixBridgeRoomInput {
+            room_id: text("!ops:matrix.test"),
+            project_id: None,
+            group_name: None,
+            agent_name: Some(text("codex-worker")),
+            trusted: true,
+            trust_reason: text("managed"),
+            inviter_mxid: None,
+        },
+    )
+    .await
+    .expect("upsert room");
+
+    let accepted = matrix_bridge_repo::accept_inbound_event(
+        store.pool(),
+        matrix_bridge_repo::MatrixInboundAcceptance {
+            command: matrix_bridge_repo::MatrixCommandInput {
+                event_id: text("$run-1"),
+                room_id: text("!ops:matrix.test"),
+                project_id: None,
+                sender_mxid: text("@alice:matrix.test"),
+                route: text("agent"),
+                body: text("run the build"),
+                open: true,
+                run_request: Some(matrix_bridge_repo::MatrixCommandRunPlan {
+                    label: text("build"),
+                    owner: text("alice"),
+                    assignee: text("codex-worker"),
+                    description: text("run the build"),
+                }),
+            },
+            direct: None,
+            group: None,
+            relay_payload: serde_json::json!({ "kind": "direct", "source": "matrix" }),
+        },
+    )
+    .await
+    .expect("accept command");
+
+    matrix_bridge_repo::bind_command_run(
+        store.pool(),
+        &accepted.command.command_id,
+        "graph_one",
+        accepted.command.record_version,
+    )
+    .await
+    .expect("bind run");
+
+    let stale = matrix_bridge_repo::bind_command_run(
+        store.pool(),
+        &accepted.command.command_id,
+        "graph_two",
+        accepted.command.record_version,
+    )
+    .await
+    .expect_err("a second bind at the same version must conflict");
+    let message = stale.to_string();
+    assert!(message.contains("record version mismatch"), "{message}");
+    assert!(!message.ends_with("changed concurrently"), "{message}");
+}
+
+#[tokio::test]
+async fn dispatch_adopts_a_graph_left_behind_by_a_crash_before_the_bind() {
+    // The real crash window is between `create_graph` and `bind_command_run`:
+    // the graph is durable, the command is still `accepted` with no `run_id`,
+    // and the next tick re-lists it. Simulated here by creating the graph at
+    // the deterministic id out of band, exactly as the crashed sweep left it.
+    let (store, _dir) = open_temp().await;
+    matrix_bridge_repo::upsert_room(
+        store.pool(),
+        matrix_bridge_repo::MatrixBridgeRoomInput {
+            room_id: text("!ops:matrix.test"),
+            project_id: None,
+            group_name: None,
+            agent_name: Some(text("codex-worker")),
+            trusted: true,
+            trust_reason: text("managed"),
+            inviter_mxid: None,
+        },
+    )
+    .await
+    .expect("upsert room");
+
+    let accepted = matrix_bridge_repo::accept_inbound_event(
+        store.pool(),
+        matrix_bridge_repo::MatrixInboundAcceptance {
+            command: matrix_bridge_repo::MatrixCommandInput {
+                event_id: text("$run-crash"),
+                room_id: text("!ops:matrix.test"),
+                project_id: None,
+                sender_mxid: text("@alice:matrix.test"),
+                route: text("agent"),
+                body: text("run the build"),
+                open: true,
+                run_request: Some(matrix_bridge_repo::MatrixCommandRunPlan {
+                    label: text("build"),
+                    owner: text("alice"),
+                    assignee: text("codex-worker"),
+                    description: text("run the build"),
+                }),
+            },
+            direct: None,
+            group: None,
+            relay_payload: serde_json::json!({ "kind": "direct", "source": "matrix" }),
+        },
+    )
+    .await
+    .expect("accept command");
+
+    let graph_id = matrix_bridge_repo::matrix_command_graph_id(&accepted.command.command_id);
+    let mut nodes = std::collections::BTreeMap::new();
+    nodes.insert(
+        "run".to_string(),
+        agentd_store::agent_chat_task_graph_repo::AgentChatTaskGraphNodeInput {
+            id: None,
+            assignee: Some(text("codex-worker")),
+            role: None,
+            capability: None,
+            description: text("run the build"),
+            depends_on: Vec::new(),
+            condition: None,
+            execution: None,
+        },
+    );
+    agentd_store::agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agentd_store::agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some(graph_id.clone()),
+            owner: text("alice"),
+            label: text("build"),
+            nodes,
+        },
+    )
+    .await
+    .expect("pre-existing graph from the crashed sweep");
+
+    let dispatched =
+        agentd_store::matrix_command_dispatch::dispatch_accepted_commands(store.pool())
+            .await
+            .expect("dispatch after crash");
+    assert_eq!(
+        dispatched, 1,
+        "the orphaned graph is adopted, not abandoned"
+    );
+
+    let graphs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_chat_task_graphs")
+        .fetch_one(store.pool())
+        .await
+        .expect("count graphs");
+    assert_eq!(
+        graphs, 1,
+        "the crashed sweep's graph is reused, not duplicated"
+    );
+
+    let command = matrix_bridge_repo::get_command(store.pool(), &accepted.command.command_id)
+        .await
+        .expect("get command")
+        .expect("command exists");
+    assert_eq!(command.status, "running");
+    assert_eq!(command.run_id.as_deref(), Some(graph_id.as_str()));
+}
+
+#[tokio::test]
+async fn dispatch_settles_an_accepted_command_that_carries_no_run_plan() {
+    // Plain chat is written `settled` by the inbound writer, so an `accepted`
+    // row with no plan can only come from an older schema or a torn write. It
+    // must not sit in the open-dedup slot forever.
+    let (store, _dir) = open_temp().await;
+    matrix_bridge_repo::upsert_room(
+        store.pool(),
+        matrix_bridge_repo::MatrixBridgeRoomInput {
+            room_id: text("!ops:matrix.test"),
+            project_id: None,
+            group_name: None,
+            agent_name: Some(text("codex-worker")),
+            trusted: true,
+            trust_reason: text("managed"),
+            inviter_mxid: None,
+        },
+    )
+    .await
+    .expect("upsert room");
+
+    let accepted = matrix_bridge_repo::accept_inbound_event(
+        store.pool(),
+        matrix_bridge_repo::MatrixInboundAcceptance {
+            command: matrix_bridge_repo::MatrixCommandInput {
+                event_id: text("$chat-1"),
+                room_id: text("!ops:matrix.test"),
+                project_id: None,
+                sender_mxid: text("@alice:matrix.test"),
+                route: text("agent"),
+                body: text("just chatting"),
+                open: false,
+                run_request: None,
+            },
+            direct: None,
+            group: None,
+            relay_payload: serde_json::json!({ "kind": "direct", "source": "matrix" }),
+        },
+    )
+    .await
+    .expect("accept command");
+    assert_eq!(accepted.command.status, "settled");
+
+    sqlx::query("UPDATE matrix_commands SET status = 'accepted' WHERE command_id = ?")
+        .bind(&accepted.command.command_id)
+        .execute(store.pool())
+        .await
+        .expect("force the stray accepted row");
+
+    let dispatched =
+        agentd_store::matrix_command_dispatch::dispatch_accepted_commands(store.pool())
+            .await
+            .expect("dispatch");
+    assert_eq!(dispatched, 0, "a command with no run plan creates no run");
+
+    let command = matrix_bridge_repo::get_command(store.pool(), &accepted.command.command_id)
+        .await
+        .expect("get command")
+        .expect("command exists");
+    assert_eq!(command.status, "settled");
+    assert!(command.run_id.is_none());
+    let graphs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_chat_task_graphs")
+        .fetch_one(store.pool())
+        .await
+        .expect("count graphs");
+    assert_eq!(graphs, 0);
+}

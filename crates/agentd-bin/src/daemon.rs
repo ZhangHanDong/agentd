@@ -147,6 +147,18 @@ pub async fn worker_fleet_tick(
     {
         tracing::warn!(%error, "settling task-graph node executions failed this tick");
     }
+    // Accepted Matrix commands become runs here, not inside the inbound
+    // request: the durable command row is the handoff, and both the graph id
+    // and the command→run bind are idempotent, so a replayed sweep after a
+    // restart creates nothing new. Order matters: dispatch before advance, so
+    // a command's graph is created and advanced in the same tick.
+    if let Err(error) = agentd_store::matrix_command_dispatch::dispatch_accepted_commands(
+        native_worker.store().pool(),
+    )
+    .await
+    {
+        tracing::warn!(%error, "dispatching accepted Matrix commands failed this tick");
+    }
     // Settlement moves nodes to terminal states; advancing is what unlocks the
     // downstream ones and re-drives any graph whose creation-time advance
     // failed. Order matters: advance after settle, so a node settled this tick

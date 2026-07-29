@@ -829,3 +829,48 @@ fn clean_opt(value: Option<String>) -> Option<String> {
         (!trimmed.is_empty()).then(|| trimmed.to_string())
     })
 }
+
+/// The deterministic task-graph id for one command's run.
+///
+/// Derived from the canonical `command_id`, so a sweep replayed after a crash
+/// recomputes the identical id and hits `create_graph`'s duplicate-id conflict
+/// instead of creating a second graph.
+#[must_use]
+pub fn matrix_command_graph_id(command_id: &str) -> String {
+    format!("graph_{}", command_id.trim())
+}
+
+/// Bind one accepted command to its run under compare-and-set.
+///
+/// # Errors
+/// [`StoreError::Conflict`] when the command is no longer at
+/// `expected_version` or is no longer `accepted` — which is exactly what makes
+/// a replayed dispatch sweep a no-op instead of a second execution.
+pub async fn bind_command_run(
+    pool: &SqlitePool,
+    command_id: &str,
+    run_id: &str,
+    expected_version: i64,
+) -> Result<MatrixCommandRecord, StoreError> {
+    let command_id = required(command_id.to_string(), "matrix command id required")?;
+    let run_id = required(run_id.to_string(), "matrix command run id required")?;
+    let updated = sqlx::query(
+        "UPDATE matrix_commands \
+         SET run_id = ?, status = 'running', record_version = record_version + 1, updated_at = ? \
+         WHERE command_id = ? AND record_version = ? AND status = 'accepted' AND run_id IS NULL",
+    )
+    .bind(&run_id)
+    .bind(now_unix())
+    .bind(&command_id)
+    .bind(expected_version)
+    .execute(pool)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(StoreError::Conflict(format!(
+            "matrix command '{command_id}' record version mismatch"
+        )));
+    }
+    get_command(pool, &command_id)
+        .await?
+        .ok_or_else(|| StoreError::Invariant(format!("matrix command '{command_id}' is missing")))
+}
