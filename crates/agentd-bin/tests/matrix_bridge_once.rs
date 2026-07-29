@@ -189,11 +189,35 @@ fn native_runtime_capabilities_response() -> FakeResponse {
     )
 }
 
+/// `run_once` seeds from the daemon-owned inbound cursor before registering
+/// rooms; a gateway that has never written one gets a 404, which is a normal
+/// first-run state rather than a failure.
+fn gateway_cursor_missing_response() -> FakeResponse {
+    FakeResponse::status(
+        404,
+        json!({"error": "matrix gateway cursor not found"}).to_string(),
+    )
+}
+
+/// The advance the bridge writes after a batch of inbound events is accepted.
+fn gateway_cursor_advance_response(record_version: i64) -> FakeResponse {
+    FakeResponse::status(
+        200,
+        json!({
+            "ok": true,
+            "cursor": {"gatewayId": "matrix-bridge", "recordVersion": record_version}
+        })
+        .to_string(),
+    )
+}
+
 fn bridge_runtime_responses(seq: i64, summary: &str) -> Vec<FakeResponse> {
     vec![
         native_runtime_capabilities_response(),
+        gateway_cursor_missing_response(),
         FakeResponse::status(200, json!({"ok": true}).to_string()),
         FakeResponse::status(201, json!({"ok": true}).to_string()),
+        gateway_cursor_advance_response(1),
         FakeResponse::status(
             200,
             json!({
@@ -294,15 +318,23 @@ fn agentd_bin_matrix_bridge_once_runs_against_fake_agentd() {
     );
     assert_eq!(requests[0].method, "GET");
     assert_eq!(requests[0].path, "/api/runtime/capabilities");
-    assert_eq!(requests[1].method, "POST");
-    assert_eq!(requests[1].path, "/api/matrix/rooms");
+    assert_eq!(requests[1].method, "GET");
+    assert_eq!(
+        requests[1].path,
+        "/api/matrix/gateway/cursor?gatewayId=matrix-bridge"
+    );
     assert_eq!(requests[2].method, "POST");
-    assert_eq!(requests[2].path, "/api/matrix/inbound");
-    assert_eq!(requests[3].method, "GET");
-    assert_eq!(requests[3].path, "/api/matrix/outbox?from_seq=0");
-    assert_eq!(requests[4].method, "POST");
-    assert_eq!(requests[4].path, "/api/matrix/outbox/ack");
-    let inbound_body: Value = serde_json::from_str(&requests[2].body).expect("inbound body");
+    assert_eq!(requests[2].path, "/api/matrix/rooms");
+    assert_eq!(requests[3].method, "POST");
+    assert_eq!(requests[3].path, "/api/matrix/inbound");
+    // The advance lands after the inbound post, never before it.
+    assert_eq!(requests[4].method, "PUT");
+    assert_eq!(requests[4].path, "/api/matrix/gateway/cursor");
+    assert_eq!(requests[5].method, "GET");
+    assert_eq!(requests[5].path, "/api/matrix/outbox?from_seq=0");
+    assert_eq!(requests[6].method, "POST");
+    assert_eq!(requests[6].path, "/api/matrix/outbox/ack");
+    let inbound_body: Value = serde_json::from_str(&requests[3].body).expect("inbound body");
     assert_eq!(inbound_body["body"], "please continue");
 
     let sent = std::fs::read_to_string(&sent_path).expect("sent log");
@@ -375,16 +407,22 @@ fn agentd_bin_matrix_bridge_once_provisions_puppets_with_file_store() {
         puppet_report.pruned_token_names(),
         &["old-agent".to_owned()]
     );
-    assert_eq!(agentd_requests.len(), 5);
+    assert_eq!(agentd_requests.len(), 7);
     assert_eq!(
         agentd_requests[0].header("authorization"),
         Some("Bearer bridge-secret")
     );
     assert_eq!(agentd_requests[0].path, "/api/runtime/capabilities");
-    assert_eq!(agentd_requests[1].path, "/api/matrix/rooms");
-    assert_eq!(agentd_requests[2].path, "/api/matrix/inbound");
-    assert_eq!(agentd_requests[3].path, "/api/matrix/outbox?from_seq=0");
-    assert_eq!(agentd_requests[4].path, "/api/matrix/outbox/ack");
+    assert_eq!(
+        agentd_requests[1].path,
+        "/api/matrix/gateway/cursor?gatewayId=matrix-bridge"
+    );
+    assert_eq!(agentd_requests[2].path, "/api/matrix/rooms");
+    assert_eq!(agentd_requests[3].path, "/api/matrix/inbound");
+    assert_eq!(agentd_requests[4].method, "PUT");
+    assert_eq!(agentd_requests[4].path, "/api/matrix/gateway/cursor");
+    assert_eq!(agentd_requests[5].path, "/api/matrix/outbox?from_seq=0");
+    assert_eq!(agentd_requests[6].path, "/api/matrix/outbox/ack");
     assert_eq!(report.run.registered_rooms, 1);
     assert_eq!(report.run.inbound_forwarded, 1);
     assert_eq!(report.run.outbound_sent, 1);
