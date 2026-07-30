@@ -598,6 +598,12 @@ impl MatrixBridgeTransport for FakeTransport {
 #[test]
 fn matrix_runtime_with_http_backend_sends_outbox_and_persists_cursor() {
     let server = FakeAgentdServer::new(vec![
+        // `run_once` seeds from the daemon-owned inbound cursor first; this
+        // gateway has never written one.
+        FakeResponse::status(
+            404,
+            json!({"error": "matrix gateway cursor not found"}).to_string(),
+        ),
         FakeResponse::status(
             200,
             json!({
@@ -657,4 +663,93 @@ fn matrix_runtime_with_http_backend_sends_outbox_and_persists_cursor() {
             .next_from_seq(),
         2
     );
+}
+
+#[test]
+fn http_backend_reads_and_advances_the_gateway_cursor_over_http() {
+    let server = FakeAgentdServer::new(vec![
+        FakeResponse::status(
+            200,
+            json!({"cursor": {
+                "gatewayId": "matrix-bridge",
+                "syncToken": "s_batch_1",
+                "lastEventId": "$e1",
+                "recordVersion": 3,
+                "created_at": 0,
+                "updated_at": 0
+            }})
+            .to_string(),
+        ),
+        FakeResponse::status(
+            200,
+            json!({"ok": true, "cursor": {
+                "gatewayId": "matrix-bridge",
+                "syncToken": "s_batch_2",
+                "lastEventId": "$e2",
+                "recordVersion": 4,
+                "created_at": 0,
+                "updated_at": 0
+            }})
+            .to_string(),
+        ),
+    ]);
+    let config = BridgeConfig::new(server.base_url()).expect("config");
+    let mut backend = AgentdHttpBackend::new(&config).expect("http backend");
+
+    let cursor = backend.gateway_cursor().expect("gateway cursor");
+    assert_eq!(cursor, Some((Some("s_batch_1".to_string()), 3)));
+
+    let version = backend
+        .advance_gateway_cursor(Some("s_batch_2"), Some("$e2"), Some(3))
+        .expect("advance gateway cursor");
+    assert_eq!(version, 4);
+
+    let requests = server.requests();
+    server.join();
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(
+        requests[0].path,
+        "/api/matrix/gateway/cursor?gatewayId=matrix-bridge"
+    );
+    assert_eq!(requests[1].method, "PUT");
+    assert_eq!(requests[1].path, "/api/matrix/gateway/cursor");
+    let put_body: serde_json::Value = serde_json::from_str(&requests[1].body).expect("put body");
+    assert_eq!(put_body["gatewayId"], "matrix-bridge");
+    assert_eq!(put_body["syncToken"], "s_batch_2");
+    assert_eq!(put_body["lastEventId"], "$e2");
+    assert_eq!(put_body["expectedVersion"], 3);
+}
+
+#[test]
+fn http_backend_reports_a_never_written_gateway_cursor_as_none() {
+    let server = FakeAgentdServer::new(vec![FakeResponse::status(
+        404,
+        json!({"error": "matrix gateway cursor not found"}).to_string(),
+    )]);
+    let config = BridgeConfig::new(server.base_url()).expect("config");
+    let mut backend = AgentdHttpBackend::new(&config).expect("http backend");
+
+    // First run of a fresh gateway: no cursor row yet is a normal state, not a
+    // bridge failure, so the runtime keeps going and creates one.
+    assert_eq!(backend.gateway_cursor().expect("gateway cursor"), None);
+    server.join();
+}
+
+#[test]
+fn http_backend_surfaces_a_gateway_cursor_conflict_as_an_error() {
+    let server = FakeAgentdServer::new(vec![FakeResponse::status(
+        409,
+        json!({"error": "matrix gateway cursor 'matrix-bridge' record version mismatch"})
+            .to_string(),
+    )]);
+    let config = BridgeConfig::new(server.base_url()).expect("config");
+    let mut backend = AgentdHttpBackend::new(&config).expect("http backend");
+
+    // 409 is terminal for this attempt — it must not be swallowed into a
+    // success, or the bridge would advance past events it never delivered.
+    let error = backend
+        .advance_gateway_cursor(Some("s_stale"), Some("$e9"), Some(1))
+        .expect_err("stale advance is a conflict");
+    server.join();
+    assert!(error.to_string().contains("409"), "{error}");
 }

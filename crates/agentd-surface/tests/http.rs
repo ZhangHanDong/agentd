@@ -2042,3 +2042,133 @@ async fn http_inbox_consuming_read_requires_the_agent_token() {
         .expect("response");
     assert_eq!(authed.status(), StatusCode::OK);
 }
+
+async fn put_with_bearer(
+    app: Router,
+    uri: &str,
+    body: &str,
+    token: Option<&str>,
+) -> axum::http::Response<Body> {
+    let mut req = Request::put(uri).header(CONTENT_TYPE, "application/json");
+    if let Some(token) = token {
+        req = req.header("authorization", format!("Bearer {token}"));
+    }
+    app.oneshot(req.body(Body::from(body.to_owned())).expect("request"))
+        .await
+        .expect("response")
+}
+
+#[tokio::test]
+async fn http_matrix_gateway_cursor_creates_advances_and_fences_on_version() {
+    let app = app(FakeRunHost::new());
+
+    let missing = get(
+        app.clone(),
+        "/api/matrix/gateway/cursor?gatewayId=matrix-bridge",
+    )
+    .await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    let created = put_with_bearer(
+        app.clone(),
+        "/api/matrix/gateway/cursor",
+        &json!({"gatewayId": "matrix-bridge", "syncToken": "s_1", "lastEventId": "$e1"})
+            .to_string(),
+        None,
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let created: Value = serde_json::from_str(&body_string(created).await).expect("created json");
+    assert_eq!(created["cursor"]["recordVersion"], 1);
+    assert_eq!(created["cursor"]["syncToken"], "s_1");
+    assert_eq!(created["cursor"]["lastEventId"], "$e1");
+
+    // A second create-shaped write (no `expectedVersion`) against an existing
+    // row is a conflict, exactly as the SQLite CAS treats it.
+    let recreate = put_with_bearer(
+        app.clone(),
+        "/api/matrix/gateway/cursor",
+        &json!({"gatewayId": "matrix-bridge", "syncToken": "s_2"}).to_string(),
+        None,
+    )
+    .await;
+    assert_eq!(recreate.status(), StatusCode::CONFLICT);
+
+    let advanced = put_with_bearer(
+        app.clone(),
+        "/api/matrix/gateway/cursor",
+        &json!({"gatewayId": "matrix-bridge", "syncToken": "s_2", "expectedVersion": 1})
+            .to_string(),
+        None,
+    )
+    .await;
+    assert_eq!(advanced.status(), StatusCode::OK);
+    let advanced: Value =
+        serde_json::from_str(&body_string(advanced).await).expect("advanced json");
+    assert_eq!(advanced["cursor"]["recordVersion"], 2);
+
+    let stale = put_with_bearer(
+        app.clone(),
+        "/api/matrix/gateway/cursor",
+        &json!({"gatewayId": "matrix-bridge", "syncToken": "s_stale", "expectedVersion": 1})
+            .to_string(),
+        None,
+    )
+    .await;
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+
+    let read = get(app, "/api/matrix/gateway/cursor?gatewayId=matrix-bridge").await;
+    assert_eq!(read.status(), StatusCode::OK);
+    let read: Value = serde_json::from_str(&body_string(read).await).expect("read json");
+    assert_eq!(read["cursor"]["syncToken"], "s_2");
+    assert_eq!(read["cursor"]["recordVersion"], 2);
+}
+
+#[tokio::test]
+async fn http_matrix_gateway_cursor_put_rejects_bad_bearer_before_reading_the_body() {
+    let mut auth = AuthConfig::open();
+    auth.api_token = Some("operator-secret".to_string());
+    let app = app_with_auth(FakeRunHost::new(), auth);
+
+    // Deliberately unparseable body: an unauthenticated caller must still see
+    // 401, not a 400/422 that confirms the route and leaks the body schema.
+    let unauthorized = put_with_bearer(
+        app.clone(),
+        "/api/matrix/gateway/cursor",
+        "{not json at all",
+        None,
+    )
+    .await;
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let wrong_token = put_with_bearer(
+        app.clone(),
+        "/api/matrix/gateway/cursor",
+        "{not json at all",
+        Some("wrong"),
+    )
+    .await;
+    assert_eq!(wrong_token.status(), StatusCode::UNAUTHORIZED);
+
+    let unauthorized_get = get(app.clone(), "/api/matrix/gateway/cursor?gatewayId=g").await;
+    assert_eq!(unauthorized_get.status(), StatusCode::UNAUTHORIZED);
+
+    // Authenticated but malformed is the caller's fault: 400, not 401.
+    let malformed = put_with_bearer(
+        app.clone(),
+        "/api/matrix/gateway/cursor",
+        "{not json at all",
+        Some("operator-secret"),
+    )
+    .await;
+    assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+
+    let blank_id = put_with_bearer(
+        app,
+        "/api/matrix/gateway/cursor",
+        &json!({"gatewayId": "   "}).to_string(),
+        Some("operator-secret"),
+    )
+    .await;
+    assert_eq!(blank_id.status(), StatusCode::BAD_REQUEST);
+}

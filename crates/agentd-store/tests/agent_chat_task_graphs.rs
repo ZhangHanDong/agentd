@@ -640,6 +640,57 @@ async fn every_graph_write_bumps_the_record_version() {
     .await;
     assert_eq!(created_version, 1);
 
+    // A productive advance — the root goes from `pending` to `dispatched` — is
+    // still a write.
+    agent_chat_task_graph_repo::advance_graph(store.pool(), "graph_versioned")
+        .await
+        .expect("advance graph")
+        .expect("graph exists");
+    let dispatched_version = scalar_count(
+        &store,
+        "SELECT record_version FROM agent_chat_task_graphs WHERE id = 'graph_versioned'",
+    )
+    .await;
+    assert!(
+        dispatched_version > created_version,
+        "dispatching the root must persist: {created_version} -> {dispatched_version}"
+    );
+
+    // A node patch that the advance itself cannot act on — `a` moves to
+    // `active`, so no dependent unblocks and the graph is not terminal — is
+    // still the caller's durable write and must land.
+    agent_chat_task_graph_repo::update_node_and_advance(
+        store.pool(),
+        "graph_versioned",
+        "a",
+        agent_chat_task_graph_repo::UpdateAgentChatTaskGraphNode {
+            status: Some("active".to_string()),
+            result: None,
+            error: None,
+        },
+    )
+    .await
+    .expect("mark node a active")
+    .expect("graph and node");
+    let active_version = scalar_count(
+        &store,
+        "SELECT record_version FROM agent_chat_task_graphs WHERE id = 'graph_versioned'",
+    )
+    .await;
+    assert!(
+        active_version > dispatched_version,
+        "a patch the advance cannot act on must still persist: \
+         {dispatched_version} -> {active_version}"
+    );
+    let reread = agent_chat_task_graph_repo::get_graph(store.pool(), "graph_versioned")
+        .await
+        .expect("get graph")
+        .expect("graph exists");
+    assert_eq!(
+        reread.nodes["a"].status, "active",
+        "the patch must survive a re-read"
+    );
+
     agent_chat_task_graph_repo::update_node_and_advance(
         store.pool(),
         "graph_versioned",
@@ -660,8 +711,8 @@ async fn every_graph_write_bumps_the_record_version() {
     )
     .await;
     assert!(
-        updated_version > created_version,
-        "record_version must advance on every write: {created_version} -> {updated_version}"
+        updated_version > active_version,
+        "record_version must advance on every write: {active_version} -> {updated_version}"
     );
 }
 
@@ -1431,4 +1482,258 @@ async fn one_unreadable_legacy_row_does_not_break_the_listing() {
         .expect("listing tolerates one unreadable row");
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].id, "graph_good");
+}
+
+#[tokio::test]
+async fn advance_active_graphs_redrives_a_graph_whose_initial_advance_never_ran() {
+    let (store, _dir) = open_store().await;
+
+    // `create_graph` only persists; `advance_graph` is what dispatches. A
+    // create whose advance failed on a transient database error leaves exactly
+    // this state, and before this sweep nothing re-drove it.
+    let mut nodes = BTreeMap::new();
+    nodes.insert("a".to_string(), node("codex-a", "Do A", &[]));
+    let created = agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_stranded".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Stranded graph".to_string(),
+            nodes,
+        },
+    )
+    .await
+    .expect("create graph");
+    assert_eq!(created.status, "active");
+    assert_eq!(created.nodes["a"].status, "pending");
+    assert_eq!(
+        scalar_count(&store, "SELECT COUNT(*) FROM direct_messages").await,
+        0
+    );
+
+    let advanced = agent_chat_task_graph_repo::advance_active_graphs(store.pool())
+        .await
+        .expect("advance active graphs");
+    assert_eq!(advanced, 1);
+
+    let graph = agent_chat_task_graph_repo::get_graph(store.pool(), "graph_stranded")
+        .await
+        .expect("get graph")
+        .expect("graph exists");
+    assert_eq!(graph.nodes["a"].status, "dispatched");
+    assert_eq!(
+        scalar_count(&store, "SELECT COUNT(*) FROM direct_messages").await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn advance_active_graphs_is_idempotent_and_skips_settled_graphs() {
+    let (store, _dir) = open_store().await;
+
+    let mut nodes = BTreeMap::new();
+    nodes.insert("a".to_string(), node("codex-a", "Do A", &[]));
+    agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_once".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Once".to_string(),
+            nodes,
+        },
+    )
+    .await
+    .expect("create graph");
+
+    let first = agent_chat_task_graph_repo::advance_active_graphs(store.pool())
+        .await
+        .expect("first sweep");
+    assert_eq!(first, 1);
+    let second = agent_chat_task_graph_repo::advance_active_graphs(store.pool())
+        .await
+        .expect("second sweep");
+    assert_eq!(
+        second, 1,
+        "an already-dispatched active graph re-advances cleanly"
+    );
+    // The dispatch itself must not be repeated: one message, not two.
+    assert_eq!(
+        scalar_count(&store, "SELECT COUNT(*) FROM direct_messages").await,
+        1
+    );
+
+    agent_chat_task_graph_repo::delete_graph(store.pool(), "graph_once")
+        .await
+        .expect("delete graph");
+    let third = agent_chat_task_graph_repo::advance_active_graphs(store.pool())
+        .await
+        .expect("third sweep");
+    assert_eq!(third, 0, "a cancelled graph is not active and is skipped");
+}
+
+#[tokio::test]
+async fn a_sweep_that_advances_nothing_does_not_write() {
+    let (store, _dir) = open_store().await;
+
+    // The sweep runs every maintenance tick, and a graph parked on a
+    // `dispatched` node waiting for an external reply advances nothing on each
+    // of those ticks. Re-serializing the whole graph and taking the single
+    // writer for that is pure write amplification, so a no-op advance must not
+    // touch the row at all.
+    let mut nodes = BTreeMap::new();
+    nodes.insert("a".to_string(), node("codex-a", "Do A", &[]));
+    nodes.insert("b".to_string(), node("codex-b", "Do B", &["a"]));
+    agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_parked".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Parked".to_string(),
+            nodes,
+        },
+    )
+    .await
+    .expect("create graph");
+
+    let advanced = agent_chat_task_graph_repo::advance_active_graphs(store.pool())
+        .await
+        .expect("first sweep");
+    assert_eq!(advanced, 1);
+    let parked = agent_chat_task_graph_repo::get_graph(store.pool(), "graph_parked")
+        .await
+        .expect("get graph")
+        .expect("graph exists");
+    assert_eq!(parked.nodes["a"].status, "dispatched");
+    assert_eq!(parked.nodes["b"].status, "pending");
+
+    let parked_version = scalar_count(
+        &store,
+        "SELECT record_version FROM agent_chat_task_graphs WHERE id = 'graph_parked'",
+    )
+    .await;
+
+    for _ in 0..4 {
+        agent_chat_task_graph_repo::advance_active_graphs(store.pool())
+            .await
+            .expect("no-op sweep");
+    }
+
+    let swept_version = scalar_count(
+        &store,
+        "SELECT record_version FROM agent_chat_task_graphs WHERE id = 'graph_parked'",
+    )
+    .await;
+    assert_eq!(
+        swept_version, parked_version,
+        "a sweep that changes nothing must not write the graph row"
+    );
+    assert_eq!(
+        scalar_count(&store, "SELECT COUNT(*) FROM direct_messages").await,
+        1,
+        "and must not re-dispatch"
+    );
+}
+
+/// The status filter must run in SQL, keyed on the `status` column, not in
+/// Rust on the status deserialized from `raw_json`.
+///
+/// `advance_active_graphs` calls this on every maintenance tick, so filtering
+/// after `row_to_graph` would deserialize every graph ever created — nothing
+/// deletes completed ones — twelve times a minute on the pool the HTTP
+/// handlers share.
+///
+/// Desyncing the column from the JSON is a test-only artifact: no writer can
+/// produce it, and it is the only way to observe which of the two the query
+/// actually keys on. Before the SQL predicate this listing returned the row,
+/// because the parsed status still said `active`.
+#[tokio::test]
+async fn list_graphs_filters_on_the_status_column_not_the_parsed_json() {
+    let (store, _dir) = open_store().await;
+    agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_desynced".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Desynced".to_string(),
+            nodes: chain_nodes(),
+        },
+    )
+    .await
+    .expect("create graph");
+    sqlx::query("UPDATE agent_chat_task_graphs SET status = 'completed' WHERE id = ?")
+        .bind("graph_desynced")
+        .execute(store.pool())
+        .await
+        .expect("desync the status column from raw_json");
+
+    let active = agent_chat_task_graph_repo::list_graphs(store.pool(), Some("active"))
+        .await
+        .expect("list active graphs");
+    assert!(
+        active.is_empty(),
+        "a row whose status column is 'completed' must never be selected for 'active', \
+         even though its raw_json still says active: {active:?}"
+    );
+
+    // An unparseable row that the status column excludes must not change the
+    // outcome either, and the unfiltered listing still tolerates it.
+    sqlx::query(
+        "INSERT INTO agent_chat_task_graphs \
+         (id, owner, label, status, raw_json, record_version, imported_at) \
+         VALUES ('graph_broken', 'alex', 'Broken', 'completed', '{\"nodes\":', 1, 0)",
+    )
+    .execute(store.pool())
+    .await
+    .expect("insert unreadable row");
+    let active = agent_chat_task_graph_repo::list_graphs(store.pool(), Some("active"))
+        .await
+        .expect("list active graphs alongside an unreadable row");
+    assert!(active.is_empty());
+    let all = agent_chat_task_graph_repo::list_graphs(store.pool(), None)
+        .await
+        .expect("unfiltered listing still tolerates the unreadable row");
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].id, "graph_desynced");
+}
+
+/// `upsert_imported_task_graph` binds the source's `status` field, which is
+/// `NULL` when the imported graph has none — while `normalize_imported_task_graph`
+/// gives that same graph the `"active"` fallback inside `raw_json`. A bare
+/// `WHERE status = ?` would drop those rows, stranding every imported active
+/// graph: invisible to `/api/task-graphs?status=active` and never advanced by
+/// the maintenance sweep.
+#[tokio::test]
+async fn list_graphs_still_matches_an_imported_row_with_a_null_status_column() {
+    let (store, _dir) = open_store().await;
+    agent_chat_task_graph_repo::create_graph(
+        store.pool(),
+        agent_chat_task_graph_repo::CreateAgentChatTaskGraph {
+            id: Some("graph_imported".to_string()),
+            owner: "orchestrator".to_string(),
+            label: "Imported".to_string(),
+            nodes: chain_nodes(),
+        },
+    )
+    .await
+    .expect("create graph");
+    sqlx::query("UPDATE agent_chat_task_graphs SET status = NULL WHERE id = ?")
+        .bind("graph_imported")
+        .execute(store.pool())
+        .await
+        .expect("null the status column the way an import without a status does");
+
+    let active = agent_chat_task_graph_repo::list_graphs(store.pool(), Some("active"))
+        .await
+        .expect("list active graphs");
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].id, "graph_imported");
+    assert_eq!(active[0].status, "active");
+
+    let completed = agent_chat_task_graph_repo::list_graphs(store.pool(), Some("completed"))
+        .await
+        .expect("list completed graphs");
+    assert!(
+        completed.is_empty(),
+        "a NULL status column still has to satisfy the Rust filter: {completed:?}"
+    );
 }

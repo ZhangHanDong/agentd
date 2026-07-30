@@ -21,12 +21,12 @@ use crate::host::{
     AgentStartHandle, AgentStartResult, DeliveryEventInput, DeliveryEventRecord,
     DirectMessageInput, EventRecord, GroupCreateInput, GroupMemberUpdate, GroupMessageInput,
     GroupReadAdvance, GroupReadRequest, GroupReadResult, GroupRecord, InboxMessage, LiveEvent,
-    MatrixBridgeRoomInput, MatrixBridgeRoomRecord, MatrixInboundMessageInput,
-    MatrixInboundMessageResult, MatrixOutboxCursorInput, RelayServerHeartbeat, RelayServerRecord,
-    RelayStreamEventRecord, RunHost, RunSnapshot, RunSummary, SchedulerDispatchInput,
-    SchedulerDispatchResult, SchedulerPoolAgent, SchedulerPoolFilters, SchedulerPoolSnapshot,
-    SchedulerReleaseInput, SchedulerReleaseResult, SchedulerReservation, SuppressionOutcome,
-    TaskAssignment,
+    MatrixBridgeRoomInput, MatrixBridgeRoomRecord, MatrixGatewayCursorInput,
+    MatrixGatewayCursorRecord, MatrixInboundMessageInput, MatrixInboundMessageResult,
+    MatrixOutboxCursorInput, RelayServerHeartbeat, RelayServerRecord, RelayStreamEventRecord,
+    RunHost, RunSnapshot, RunSummary, SchedulerDispatchInput, SchedulerDispatchResult,
+    SchedulerPoolAgent, SchedulerPoolFilters, SchedulerPoolSnapshot, SchedulerReleaseInput,
+    SchedulerReleaseResult, SchedulerReservation, SuppressionOutcome, TaskAssignment,
 };
 
 /// Scripted, recording [`RunHost`] for tests.
@@ -59,6 +59,7 @@ pub struct FakeRunHost {
     matrix_rooms: Mutex<HashMap<String, MatrixBridgeRoomRecord>>,
     matrix_events: Mutex<HashMap<String, MatrixInboundMessageResult>>,
     matrix_outbox_cursors: Mutex<HashMap<String, i64>>,
+    matrix_gateway_cursors: Mutex<HashMap<String, MatrixGatewayCursorRecord>>,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +121,7 @@ impl Default for FakeRunHost {
             matrix_rooms: Mutex::default(),
             matrix_events: Mutex::default(),
             matrix_outbox_cursors: Mutex::default(),
+            matrix_gateway_cursors: Mutex::default(),
         }
     }
 }
@@ -866,6 +868,64 @@ impl RunHost for FakeRunHost {
             .unwrap_or(0))
     }
 
+    async fn matrix_gateway_cursor(
+        &self,
+        gateway_id: &str,
+    ) -> Result<Option<MatrixGatewayCursorRecord>, CoreError> {
+        // Mirrors `matrix_bridge_repo::get_gateway_cursor`, which runs the id
+        // through `required()`: trims and rejects blank as an Invariant (400)
+        // rather than a plain lookup miss, and never truncates.
+        let gateway_id =
+            normalize_required_text(gateway_id, usize::MAX, "matrix gateway id required")?;
+        Ok(self
+            .matrix_gateway_cursors
+            .lock()
+            .expect("matrix gateway cursors lock")
+            .get(&gateway_id)
+            .cloned())
+    }
+
+    async fn advance_matrix_gateway_cursor(
+        &self,
+        input: MatrixGatewayCursorInput,
+    ) -> Result<MatrixGatewayCursorRecord, CoreError> {
+        // `usize::MAX`: the SQLite path trims and rejects blank but never
+        // truncates, and this fake must produce the same record for the same
+        // input or surface tests assert nothing.
+        let gateway_id =
+            normalize_required_text(&input.gateway_id, usize::MAX, "matrix gateway id required")?;
+        let sync_token = clean_text(input.sync_token.as_deref(), usize::MAX);
+        let last_event_id = clean_text(input.last_event_id.as_deref(), usize::MAX);
+        let mut cursors = self
+            .matrix_gateway_cursors
+            .lock()
+            .expect("matrix gateway cursors lock");
+        let existing = cursors.get(&gateway_id).cloned();
+        let record_version = match (existing.as_ref(), input.expected_version) {
+            (None, None) => 1,
+            (Some(current), Some(expected)) if current.record_version == expected => expected + 1,
+            // Mirrors `matrix_bridge_repo::advance_gateway_cursor`: a `None`
+            // predicate against an existing row is a conflict too, and the
+            // `conflict: ` prefix is what the router classifies as 409.
+            _ => {
+                return Err(CoreError::Store(format!(
+                    "conflict: matrix gateway cursor '{gateway_id}' record version mismatch"
+                )));
+            }
+        };
+        let now = 0;
+        let record = MatrixGatewayCursorRecord {
+            gateway_id: gateway_id.clone(),
+            sync_token,
+            last_event_id,
+            record_version,
+            created_at: existing.as_ref().map_or(now, |current| current.created_at),
+            updated_at: now,
+        };
+        cursors.insert(gateway_id, record.clone());
+        Ok(record)
+    }
+
     async fn post_matrix_inbound_message(
         &self,
         input: MatrixInboundMessageInput,
@@ -908,6 +968,7 @@ impl RunHost for FakeRunHost {
                 route: "ignored".to_string(),
                 event_id,
                 message_id: None,
+                command_id: None,
                 message: None,
             };
             self.matrix_events
@@ -974,6 +1035,7 @@ impl RunHost for FakeRunHost {
             duplicate: false,
             ignored: false,
             route,
+            command_id: Some(format!("mxc_fake_{event_id}")),
             event_id,
             message_id: Some(message.id.clone()),
             message: Some(message),

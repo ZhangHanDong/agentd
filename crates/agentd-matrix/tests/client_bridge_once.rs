@@ -371,11 +371,35 @@ fn bridge_runtime_responses(seq: i64, body: &str) -> Vec<FakeResponse> {
     vec![
         native_caps_response(),
         cursor_response(),
+        gateway_cursor_missing_response(),
         FakeResponse::status(200, json!({"ok": true}).to_string()),
         FakeResponse::status(201, json!({"ok": true}).to_string()),
+        gateway_cursor_advance_response(1),
         outbox_response(vec![(seq, body)]),
         ack_response(),
     ]
+}
+
+/// `run_once` seeds from the daemon-owned inbound cursor before registering
+/// rooms; a gateway that has never written one gets a 404, which is a normal
+/// first-run state rather than a failure.
+fn gateway_cursor_missing_response() -> FakeResponse {
+    FakeResponse::status(
+        404,
+        json!({"error": "matrix gateway cursor not found"}).to_string(),
+    )
+}
+
+/// The advance the bridge writes after a batch of inbound events is accepted.
+fn gateway_cursor_advance_response(record_version: i64) -> FakeResponse {
+    FakeResponse::status(
+        200,
+        json!({
+            "ok": true,
+            "cursor": {"gatewayId": "matrix-bridge", "recordVersion": record_version}
+        })
+        .to_string(),
+    )
 }
 
 fn outbox_response(events: Vec<(i64, &str)>) -> FakeResponse {
@@ -492,15 +516,26 @@ fn matrix_client_bridge_once_runner_syncs_client_posts_backend_sends_outbox_save
         requests[1].path,
         "/api/matrix/outbox/cursor?bridgeId=matrix-bridge"
     );
-    assert_eq!(requests[2].method, "POST");
-    assert_eq!(requests[2].path, "/api/matrix/rooms");
+    assert_eq!(requests[2].method, "GET");
+    assert_eq!(
+        requests[2].path,
+        "/api/matrix/gateway/cursor?gatewayId=matrix-bridge"
+    );
     assert_eq!(requests[3].method, "POST");
-    assert_eq!(requests[3].path, "/api/matrix/inbound");
-    assert_eq!(requests[4].method, "GET");
-    assert_eq!(requests[4].path, "/api/matrix/outbox?from_seq=0");
-    assert_eq!(requests[5].method, "POST");
-    assert_eq!(requests[5].path, "/api/matrix/outbox/ack");
-    let inbound_body: Value = serde_json::from_str(&requests[3].body).expect("inbound body");
+    assert_eq!(requests[3].path, "/api/matrix/rooms");
+    assert_eq!(requests[4].method, "POST");
+    assert_eq!(requests[4].path, "/api/matrix/inbound");
+    // The advance lands after the inbound post, never before it.
+    assert_eq!(requests[5].method, "PUT");
+    assert_eq!(requests[5].path, "/api/matrix/gateway/cursor");
+    let advance_body: Value = serde_json::from_str(&requests[5].body).expect("advance body");
+    assert_eq!(advance_body["gatewayId"], "matrix-bridge");
+    assert_eq!(advance_body["lastEventId"], "$event-1");
+    assert_eq!(requests[6].method, "GET");
+    assert_eq!(requests[6].path, "/api/matrix/outbox?from_seq=0");
+    assert_eq!(requests[7].method, "POST");
+    assert_eq!(requests[7].path, "/api/matrix/outbox/ack");
+    let inbound_body: Value = serde_json::from_str(&requests[4].body).expect("inbound body");
     assert_eq!(inbound_body["body"], "please continue");
     let state = read_json(&state_path);
     assert_eq!(state["nextFromSeq"], 21);
@@ -534,6 +569,7 @@ fn matrix_client_bridge_once_executes_bot_command_replies_and_reports_count() {
             ])
             .to_string(),
         ),
+        gateway_cursor_missing_response(),
         FakeResponse::status(200, json!({"ok": true}).to_string()),
         outbox_response(Vec::new()),
     ]);
@@ -562,15 +598,22 @@ fn matrix_client_bridge_once_executes_bot_command_replies_and_reports_count() {
     assert_eq!(requests[2].path, "/api/agents");
     assert_eq!(requests[3].method, "GET");
     assert_eq!(requests[3].path, "/api/groups");
-    assert_eq!(requests[4].method, "POST");
-    assert_eq!(requests[4].path, "/api/matrix/rooms");
-    assert_eq!(requests[5].method, "GET");
-    assert_eq!(requests[5].path, "/api/matrix/outbox?from_seq=0");
+    assert_eq!(requests[4].method, "GET");
+    assert_eq!(
+        requests[4].path,
+        "/api/matrix/gateway/cursor?gatewayId=matrix-bridge"
+    );
+    assert_eq!(requests[5].method, "POST");
+    assert_eq!(requests[5].path, "/api/matrix/rooms");
+    assert_eq!(requests[6].method, "GET");
+    assert_eq!(requests[6].path, "/api/matrix/outbox?from_seq=0");
     assert!(
         !requests
             .iter()
             .any(|request| request.path == "/api/matrix/inbound")
     );
+    // No inbound event was forwarded, so nothing advanced the cursor.
+    assert!(!requests.iter().any(|request| request.method == "PUT"));
     assert_eq!(client.sent().len(), 1);
     assert_eq!(client.sent()[0].0, "!codex-worker:matrix.test");
     assert!(
@@ -621,6 +664,7 @@ fn matrix_client_bridge_once_executes_management_command_effects_and_reports_cou
             })
             .to_string(),
         ),
+        gateway_cursor_missing_response(),
         FakeResponse::status(200, json!({"ok": true}).to_string()),
         outbox_response(Vec::new()),
     ]);
@@ -666,10 +710,15 @@ fn matrix_client_bridge_once_executes_management_command_effects_and_reports_cou
     assert_eq!(requests[3].path, "/api/groups");
     assert_eq!(requests[4].method, "GET");
     assert_eq!(requests[4].path, "/api/agents/codex-worker");
-    assert_eq!(requests[5].method, "POST");
-    assert_eq!(requests[5].path, "/api/matrix/rooms");
-    assert_eq!(requests[6].method, "GET");
-    assert_eq!(requests[6].path, "/api/matrix/outbox?from_seq=0");
+    assert_eq!(requests[5].method, "GET");
+    assert_eq!(
+        requests[5].path,
+        "/api/matrix/gateway/cursor?gatewayId=matrix-bridge"
+    );
+    assert_eq!(requests[6].method, "POST");
+    assert_eq!(requests[6].path, "/api/matrix/rooms");
+    assert_eq!(requests[7].method, "GET");
+    assert_eq!(requests[7].path, "/api/matrix/outbox?from_seq=0");
     let state = read_json(&state_path);
     assert_eq!(state["nextFromSeq"], 0);
 }
@@ -704,6 +753,7 @@ fn matrix_client_bridge_once_executes_dm_lifecycle_with_fake_client() {
             })
             .to_string(),
         ),
+        gateway_cursor_missing_response(),
         outbox_response(Vec::new()),
     ]);
     let dir = tempfile::tempdir().expect("tempdir");
@@ -744,6 +794,7 @@ fn matrix_client_bridge_once_runner_provisions_puppets_before_matrix_sync() {
     let agentd = FakeHttpServer::new(vec![
         native_caps_response(),
         cursor_response(),
+        gateway_cursor_missing_response(),
         FakeResponse::status(200, json!({"ok": true}).to_string()),
         outbox_response(Vec::new()),
     ]);
@@ -779,8 +830,8 @@ fn matrix_client_bridge_once_runner_provisions_puppets_before_matrix_sync() {
     assert_eq!(homeserver_requests[0].path, "/_matrix/client/v3/login");
     assert_eq!(agentd_requests[0].method, "GET");
     assert_eq!(agentd_requests[0].path, "/api/runtime/capabilities");
-    assert_eq!(agentd_requests[2].method, "POST");
-    assert_eq!(agentd_requests[2].path, "/api/matrix/rooms");
+    assert_eq!(agentd_requests[3].method, "POST");
+    assert_eq!(agentd_requests[3].path, "/api/matrix/rooms");
     let puppet_state = read_json(&puppet_state_path);
     assert_eq!(puppet_state["agentTokens"]["codex-worker"], "codex-token");
 }
@@ -790,6 +841,7 @@ fn matrix_client_bridge_once_runner_preserves_cursor_on_matrix_send_failure() {
     let agentd = FakeHttpServer::new(vec![
         native_caps_response(),
         cursor_response(),
+        gateway_cursor_missing_response(),
         FakeResponse::status(200, json!({"ok": true}).to_string()),
         outbox_response(vec![(21, "first"), (22, "second")]),
     ]);

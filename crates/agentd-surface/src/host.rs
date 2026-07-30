@@ -350,6 +350,21 @@ pub struct MatrixInboundMessageInput {
     pub reply_to: Option<String>,
     #[serde(default, rename = "trustLevel", alias = "trust_level")]
     pub trust_level: Option<String>,
+    /// Optional run request. M4 Plan A accepts and honours this field; M4 Plan
+    /// B is what populates it from a normalized bang command. Absent — every
+    /// call the bridge makes today — the command is recorded `settled` and
+    /// behaviour is unchanged.
+    #[serde(default, rename = "runRequest", alias = "run_request")]
+    pub run_request: Option<MatrixCommandRunRequest>,
+}
+
+/// A run the inbound Matrix command asks agentd to create.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MatrixCommandRunRequest {
+    pub label: String,
+    pub owner: String,
+    pub assignee: String,
+    pub description: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -358,6 +373,35 @@ pub struct MatrixOutboxCursorInput {
     pub bridge_id: String,
     #[serde(rename = "lastSeq", alias = "last_seq")]
     pub last_seq: i64,
+}
+
+/// Durable, agentd-owned Matrix gateway inbound cursor, as seen on the wire.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MatrixGatewayCursorRecord {
+    #[serde(rename = "gatewayId")]
+    pub gateway_id: String,
+    #[serde(rename = "syncToken")]
+    pub sync_token: Option<String>,
+    #[serde(rename = "lastEventId")]
+    pub last_event_id: Option<String>,
+    #[serde(rename = "recordVersion")]
+    pub record_version: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// One gateway cursor advance. `expected_version` is the compare-and-set
+/// predicate: absent creates the cursor, present updates only that version.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MatrixGatewayCursorInput {
+    #[serde(rename = "gatewayId", alias = "gateway_id")]
+    pub gateway_id: String,
+    #[serde(default, rename = "syncToken", alias = "sync_token")]
+    pub sync_token: Option<String>,
+    #[serde(default, rename = "lastEventId", alias = "last_event_id")]
+    pub last_event_id: Option<String>,
+    #[serde(default, rename = "expectedVersion", alias = "expected_version")]
+    pub expected_version: Option<i64>,
 }
 
 /// Result for one Matrix inbound event route.
@@ -371,6 +415,9 @@ pub struct MatrixInboundMessageResult {
     pub event_id: String,
     #[serde(rename = "messageId")]
     pub message_id: Option<String>,
+    /// Canonical agentd command id for this Matrix event.
+    #[serde(rename = "commandId")]
+    pub command_id: Option<String>,
     pub message: Option<InboxMessage>,
 }
 
@@ -1188,6 +1235,24 @@ pub trait RunHost: Send + Sync {
     ) -> Result<i64, CoreError>;
 
     async fn matrix_outbox_cursor(&self, bridge_id: &str) -> Result<i64, CoreError>;
+
+    /// Read the durable inbound cursor for one Matrix gateway.
+    ///
+    /// # Errors
+    /// [`CoreError`] on a store failure.
+    async fn matrix_gateway_cursor(
+        &self,
+        gateway_id: &str,
+    ) -> Result<Option<MatrixGatewayCursorRecord>, CoreError>;
+
+    /// Create or advance one Matrix gateway inbound cursor under CAS.
+    ///
+    /// # Errors
+    /// [`CoreError`] on a store failure or a version mismatch.
+    async fn advance_matrix_gateway_cursor(
+        &self,
+        input: MatrixGatewayCursorInput,
+    ) -> Result<MatrixGatewayCursorRecord, CoreError>;
 
     /// Read the agent-chat-compatible pool scheduler view.
     ///

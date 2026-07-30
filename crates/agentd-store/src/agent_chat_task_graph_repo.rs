@@ -261,10 +261,41 @@ pub async fn list_graphs(
     pool: &SqlitePool,
     status: Option<&str>,
 ) -> Result<Vec<AgentChatTaskGraphRecord>, StoreError> {
-    let rows = sqlx::query(graph_select_sql("ORDER BY rowid").as_str())
-        .fetch_all(pool)
-        .await?;
     let status = status.and_then(|value| clean_text(Some(value.to_string())));
+    // Pre-filter in SQL rather than only after `row_to_graph`: this runs on
+    // every maintenance tick via `advance_active_graphs`, and parsing first
+    // would deserialize the `raw_json` of every graph ever created — including
+    // long-completed ones, which nothing deletes.
+    //
+    // The `OR` below defeats `idx_agent_chat_task_graphs_status`: EXPLAIN QUERY
+    // PLAN reports SCAN, not a SEARCH via that index (plain `status = ?` would
+    // seek it, `ORDER BY rowid` included). So this still walks every leaf page
+    // per tick, growing with total graph count. What it does buy is the part
+    // that mattered: `raw_json` never crosses into Rust and `serde_json` never
+    // runs for a non-matching row, since SQLite reads `status` from the record
+    // header without faulting in the overflow pages. To get the index seek
+    // back, make the data agree instead of widening the predicate — have the
+    // import bind the same normalized status it writes into `raw_json`, backfill
+    // `UPDATE ... SET status = 'active' WHERE status IS NULL` (exactly what
+    // every reader already infers for those rows), then drop the `OR`.
+    //
+    // `OR status IS NULL` keeps the SQL predicate exactly as wide as the Rust
+    // one below. `upsert_graph` always writes the column from the same value it
+    // serializes into `raw_json`, and `upsert_imported_task_graph` binds the
+    // source's `status` field trimmed the same way `normalize_imported_task_graph`
+    // trims it — so a non-NULL column always equals the JSON status. The one
+    // divergence is an imported graph with no usable `status` field at all: the
+    // column is NULL while the JSON gets the `"active"` fallback. Those rows
+    // must still reach the Rust filter or importing would strand active graphs.
+    let sql = match status {
+        Some(_) => graph_select_sql("WHERE status = ? OR status IS NULL ORDER BY rowid"),
+        None => graph_select_sql("ORDER BY rowid"),
+    };
+    let mut query = sqlx::query(sql.as_str());
+    if let Some(status) = status.clone() {
+        query = query.bind(status);
+    }
+    let rows = query.fetch_all(pool).await?;
     // A legacy row that predates normalization must not take the whole listing
     // down with it; `get_graph` still surfaces the parse error for that id.
     let graphs = rows
@@ -301,7 +332,7 @@ pub async fn advance_graph(
         let Some(graph) = get_graph(pool, id).await? else {
             return Ok(None);
         };
-        match advance_graph_record(pool, graph).await {
+        match advance_graph_record(pool, graph, false).await {
             Ok(graph) => return Ok(Some(graph)),
             Err(error) if is_concurrent_write_conflict(&error) => {}
             Err(error) => return Err(error),
@@ -367,7 +398,9 @@ async fn update_node_and_advance_once(
         });
     apply_node_patch(node, patch)?;
     graph.updated_at = now_text();
-    let mut graph = advance_graph_record(pool, graph).await?;
+    // The patch above is this call's whole point, so the advance must write
+    // even when it finds nothing further to do.
+    let mut graph = advance_graph_record(pool, graph, true).await?;
     if let Some(agent) = release_agent {
         // The node patch is committed by this point, so the scheduler drain is
         // a best-effort follow-on rather than part of this call's outcome. Its
@@ -521,16 +554,28 @@ pub async fn handle_result_message(
     }))
 }
 
+/// Drive a graph as far as it will go and persist it.
+///
+/// `caller_changed` reports whether the caller already mutated `graph` and is
+/// relying on this call's write to persist it. It matters because the write is
+/// skipped when nothing changed: the maintenance sweep re-advances every active
+/// graph every tick, and a graph parked on a `dispatched` node awaiting an
+/// external reply would otherwise re-serialize its whole JSON and take the
+/// single writer on each of those ticks for no state change at all. A caller
+/// that patched a node must pass `true`, or that patch is silently dropped.
 #[allow(clippy::too_many_lines)]
 async fn advance_graph_record(
     pool: &SqlitePool,
     mut graph: AgentChatTaskGraphRecord,
+    caller_changed: bool,
 ) -> Result<AgentChatTaskGraphRecord, StoreError> {
     if graph.status != "active" {
-        upsert_graph(pool, &mut graph).await?;
+        if caller_changed {
+            upsert_graph(pool, &mut graph).await?;
+        }
         return Ok(graph);
     }
-    let mut changed = false;
+    let mut changed = caller_changed;
     loop {
         let mut changed_this_pass = false;
         let node_ids = graph.nodes.keys().cloned().collect::<Vec<_>>();
@@ -667,8 +712,8 @@ async fn advance_graph_record(
     }
     if changed {
         graph.updated_at = now_text();
+        upsert_graph(pool, &mut graph).await?;
     }
-    upsert_graph(pool, &mut graph).await?;
     Ok(graph)
 }
 
@@ -934,6 +979,37 @@ async fn dispatch_native_node(
         });
     enqueue_node_execution(pool, graph_id, &node.id, &link).await?;
     Ok(link.execution_task_id)
+}
+
+/// Re-drive every `active` task graph.
+///
+/// `advance_graph` has exactly one caller — graph creation — so a create whose
+/// advance failed on a transient database error strands an `active` graph with
+/// a `pending` root that nothing else re-drives. Advancing is idempotent (a
+/// node already `dispatched` is not re-dispatched), so an unconditional sweep
+/// is the whole repair.
+///
+/// Returns the number of graphs advanced. One graph's failure is isolated and
+/// logged, never propagated: this runs on the maintenance tick, where a single
+/// poisoned graph must not stop the sweep or the loop.
+pub async fn advance_active_graphs(pool: &SqlitePool) -> Result<u64, StoreError> {
+    let graphs = list_graphs(pool, Some("active")).await?;
+    let mut advanced = 0_u64;
+    for graph in graphs {
+        match advance_graph(pool, &graph.id).await {
+            Ok(Some(_)) => advanced += 1,
+            // Deleted between the listing and the advance; nothing to repair.
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    graph_id = graph.id.as_str(),
+                    %error,
+                    "re-advancing active task graph failed this tick"
+                );
+            }
+        }
+    }
+    Ok(advanced)
 }
 
 /// `(graph_id, node_id, execution_task_id, queue_status, last_reason)`

@@ -57,6 +57,8 @@ use agentd_surface::host::{
     GroupRecord as SurfaceGroupRecord, InboxMessage as SurfaceInboxMessage, LiveEvent,
     MatrixBridgeRoomInput as SurfaceMatrixBridgeRoomInput,
     MatrixBridgeRoomRecord as SurfaceMatrixBridgeRoomRecord,
+    MatrixGatewayCursorInput as SurfaceMatrixGatewayCursorInput,
+    MatrixGatewayCursorRecord as SurfaceMatrixGatewayCursorRecord,
     MatrixInboundMessageInput as SurfaceMatrixInboundMessageInput,
     MatrixInboundMessageResult as SurfaceMatrixInboundMessageResult,
     MatrixOutboxCursorInput as SurfaceMatrixOutboxCursorInput,
@@ -1954,13 +1956,76 @@ impl RunHost for ProductionRunHost {
         Ok(room.map(surface_matrix_bridge_room))
     }
 
+    async fn matrix_gateway_cursor(
+        &self,
+        gateway_id: &str,
+    ) -> Result<Option<SurfaceMatrixGatewayCursorRecord>, CoreError> {
+        let cursor = matrix_bridge_repo::get_gateway_cursor(self.store.pool(), gateway_id)
+            .await
+            .map_err(core_from_store_error)?;
+        Ok(cursor.map(surface_matrix_gateway_cursor))
+    }
+
+    async fn advance_matrix_gateway_cursor(
+        &self,
+        input: SurfaceMatrixGatewayCursorInput,
+    ) -> Result<SurfaceMatrixGatewayCursorRecord, CoreError> {
+        let cursor = matrix_bridge_repo::advance_gateway_cursor(
+            self.store.pool(),
+            matrix_bridge_repo::MatrixGatewayCursorInput {
+                gateway_id: input.gateway_id,
+                sync_token: input.sync_token,
+                last_event_id: input.last_event_id,
+                expected_version: input.expected_version,
+            },
+        )
+        .await
+        .map_err(core_from_store_error)?;
+        Ok(surface_matrix_gateway_cursor(cursor))
+    }
+
     async fn post_matrix_inbound_message(
         &self,
         input: SurfaceMatrixInboundMessageInput,
     ) -> Result<SurfaceMatrixInboundMessageResult, CoreError> {
-        let room = matrix_bridge_repo::get_room(self.store.pool(), &input.room_id)
+        let event_id = clean_required(Some(&input.event_id), "matrix event id required")?;
+        let room_id = clean_required(Some(&input.room_id), "matrix room id required")?;
+        if let Some(existing) = matrix_bridge_repo::get_event(self.store.pool(), &event_id).await? {
+            // A replay must answer with the command it already produced, not a
+            // blank. `[AGENTIGNORE]` events have no command row, so `None`
+            // here means "recorded but never a command", not "unknown".
+            //
+            // This short-circuit sits ABOVE the trust and cutover/fence checks
+            // below on purpose: the event is already durably recorded (and, if
+            // applicable, already relayed), so trust being revoked *after* the
+            // fact must not turn an idempotent replay into a rejection. A
+            // gateway that crashes before advancing its cursor would otherwise
+            // re-post this same event forever, get a permanent 403, and stall
+            // every other room queued behind it in the same batch.
+            let command = matrix_bridge_repo::get_command(
+                self.store.pool(),
+                &matrix_bridge_repo::matrix_command_id(&room_id, &event_id),
+            )
+            .await
+            .map_err(core_from_store_error)?;
+            return Ok(SurfaceMatrixInboundMessageResult {
+                ok: true,
+                duplicate: true,
+                ignored: existing.ignored,
+                route: existing.route,
+                event_id: existing.event_id,
+                message_id: existing.message_id,
+                command_id: command.map(|command| command.command_id),
+                message: None,
+            });
+        }
+
+        let room = matrix_bridge_repo::get_room(self.store.pool(), &room_id)
             .await?
             .ok_or_else(|| CoreError::Invariant("matrix room not trusted".into()))?;
+        if !room.trusted {
+            return Err(CoreError::Invariant("matrix room not trusted".to_string()));
+        }
         if let Some(project_id) = room.project_id.as_deref() {
             let state = agentd_store::cutover_repo::get(self.store.pool(), project_id)
                 .await?
@@ -1988,27 +2053,7 @@ impl RunHost for ProductionRunHost {
                 ));
             }
         }
-        let event_id = clean_required(Some(&input.event_id), "matrix event id required")?;
-        if let Some(existing) = matrix_bridge_repo::get_event(self.store.pool(), &event_id).await? {
-            return Ok(SurfaceMatrixInboundMessageResult {
-                ok: true,
-                duplicate: true,
-                ignored: existing.ignored,
-                route: existing.route,
-                event_id: existing.event_id,
-                message_id: existing.message_id,
-                message: None,
-            });
-        }
-
-        let room_id = clean_required(Some(&input.room_id), "matrix room id required")?;
         let sender_mxid = clean_required(Some(&input.sender_mxid), "matrix sender mxid required")?;
-        let Some(room) = matrix_bridge_repo::get_room(self.store.pool(), &room_id).await? else {
-            return Err(CoreError::Invariant("matrix room not trusted".to_string()));
-        };
-        if !room.trusted {
-            return Err(CoreError::Invariant("matrix room not trusted".to_string()));
-        }
 
         if input
             .body
@@ -2035,6 +2080,7 @@ impl RunHost for ProductionRunHost {
                 route: event.route,
                 event_id: event.event_id,
                 message_id: None,
+                command_id: None,
                 message: None,
             });
         }
@@ -2043,39 +2089,56 @@ impl RunHost for ProductionRunHost {
             clean_optional_string(input.from).unwrap_or_else(|| matrix_sender_name(&sender_mxid));
         let trust_level =
             clean_optional_string(input.trust_level).or_else(|| Some("external".to_string()));
-        let (route, message) = if let Some(group) = room.group_name.clone() {
+        let command_id = matrix_bridge_repo::matrix_command_id(&room_id, &event_id);
+        // Deterministic: a replayed event reuses this exact id, so the message
+        // insert's `ON CONFLICT(id) DO NOTHING` makes a torn write self-heal
+        // instead of producing a second inbox message.
+        let message_id = format!("msg_{command_id}");
+        let run_request =
+            input
+                .run_request
+                .as_ref()
+                .map(|request| matrix_bridge_repo::MatrixCommandRunPlan {
+                    label: request.label.clone(),
+                    owner: request.owner.clone(),
+                    assignee: request.assignee.clone(),
+                    description: request.description.clone(),
+                });
+        let open = run_request.is_some();
+
+        let (route, direct, group) = if let Some(group_name) = room.group_name.clone() {
             (
                 "group".to_string(),
-                self.post_group_message(SurfaceGroupMessageInput {
-                    message_id: None,
+                None,
+                Some(message_repo::GroupMessageInput {
+                    message_id: Some(message_id.clone()),
                     ts: None,
                     from,
-                    group,
+                    group: group_name,
                     message_type: Some("human".to_string()),
                     priority: None,
                     summary: input.body.clone(),
-                    full: input.body,
+                    full: input.body.clone(),
                     mentions: clean_string_vec(input.mentions),
-                    reply_to: input.reply_to,
+                    reply_to: input.reply_to.clone(),
                     source: Some("matrix".to_string()),
                     schema: None,
                     attachments: Vec::new(),
-                })
-                .await?,
+                }),
             )
         } else if let Some(agent) = room.agent_name.clone() {
             (
                 "agent".to_string(),
-                self.post_direct_message(SurfaceDirectMessageInput {
-                    message_id: None,
+                Some(message_repo::DirectMessageInput {
+                    message_id: Some(message_id.clone()),
                     ts: None,
                     from,
                     to: agent,
                     message_type: Some("human".to_string()),
                     priority: None,
                     summary: input.body.clone(),
-                    full: input.body,
-                    reply_to: input.reply_to,
+                    full: input.body.clone(),
+                    reply_to: input.reply_to.clone(),
                     source: Some("matrix".to_string()),
                     source_room: Some(room_id.clone()),
                     sender_mxid: Some(sender_mxid.clone()),
@@ -2083,33 +2146,53 @@ impl RunHost for ProductionRunHost {
                     from_id: None,
                     schema: None,
                     attachments: Vec::new(),
-                })
-                .await?,
+                }),
+                None,
             )
         } else {
             return Err(CoreError::Invariant("matrix room not trusted".to_string()));
         };
 
-        let event = matrix_bridge_repo::record_event(
+        let relay_payload = serde_json::json!({
+            "kind": if route == "group" { "group" } else { "direct" },
+            "source": "matrix",
+            "roomId": room_id.clone(),
+        });
+
+        let accepted = matrix_bridge_repo::accept_inbound_event(
             self.store.pool(),
-            matrix_bridge_repo::MatrixBridgeEventInput {
-                event_id,
-                room_id,
-                sender_mxid,
-                message_id: Some(message.id.clone()),
-                route: route.clone(),
-                ignored: false,
+            matrix_bridge_repo::MatrixInboundAcceptance {
+                command: matrix_bridge_repo::MatrixCommandInput {
+                    event_id: event_id.clone(),
+                    room_id: room_id.clone(),
+                    project_id: room.project_id.clone(),
+                    sender_mxid: sender_mxid.clone(),
+                    route: route.clone(),
+                    body: input.body.clone(),
+                    open,
+                    run_request,
+                },
+                direct,
+                group,
+                relay_payload,
             },
         )
-        .await?;
+        .await
+        .map_err(core_from_store_error)?;
+
+        let message = accepted
+            .direct
+            .map(surface_inbox_message)
+            .or_else(|| accepted.group.map(surface_group_inbox_message));
         Ok(SurfaceMatrixInboundMessageResult {
             ok: true,
-            duplicate: false,
+            duplicate: accepted.duplicate,
             ignored: false,
-            route: event.route,
-            event_id: event.event_id,
-            message_id: event.message_id,
-            message: Some(message),
+            route: accepted.command.route.clone(),
+            event_id: accepted.command.event_id.clone(),
+            message_id: accepted.command.message_id.clone(),
+            command_id: Some(accepted.command.command_id),
+            message,
         })
     }
 
@@ -2724,6 +2807,19 @@ fn surface_matrix_bridge_room(
         inviter_mxid: record.inviter_mxid,
         created_at: record.created_at,
         updated_at: record.updated_at,
+    }
+}
+
+fn surface_matrix_gateway_cursor(
+    cursor: matrix_bridge_repo::MatrixGatewayCursorRecord,
+) -> SurfaceMatrixGatewayCursorRecord {
+    SurfaceMatrixGatewayCursorRecord {
+        gateway_id: cursor.gateway_id,
+        sync_token: cursor.sync_token,
+        last_event_id: cursor.last_event_id,
+        record_version: cursor.record_version,
+        created_at: cursor.created_at,
+        updated_at: cursor.updated_at,
     }
 }
 

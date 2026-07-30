@@ -284,6 +284,21 @@ pub async fn insert_direct_message(
     pool: &SqlitePool,
     input: DirectMessageInput,
 ) -> Result<DirectMessageRecord, StoreError> {
+    let mut connection = pool.acquire().await?;
+    insert_direct_message_on(&mut connection, input).await
+}
+
+/// Insert one direct message on the caller's connection, so it can join a
+/// wider `BEGIN IMMEDIATE` (the Matrix inbound handoff needs the message, its
+/// command row, and its outbox event to land together or not at all).
+///
+/// # Errors
+/// [`StoreError::Invariant`] on a blank required field; [`StoreError::Sqlx`]
+/// on a store failure.
+pub async fn insert_direct_message_on(
+    connection: &mut sqlx::SqliteConnection,
+    input: DirectMessageInput,
+) -> Result<DirectMessageRecord, StoreError> {
     let id = clean_opt(input.message_id).unwrap_or_else(generate_message_id);
     let from = required(input.from, "message from required")?;
     let to = required(input.to, "message to required")?;
@@ -331,10 +346,10 @@ pub async fn insert_direct_message(
     .bind(schema_json.as_deref())
     .bind(&attachments_json)
     .bind(created_at)
-    .execute(pool)
+    .execute(&mut *connection)
     .await?;
 
-    get_direct_message(pool, &id)
+    get_direct_message_on(&mut *connection, &id)
         .await?
         .ok_or_else(|| StoreError::Invariant(format!("direct message '{id}' is missing")))
 }
@@ -375,6 +390,20 @@ pub async fn read_direct_inbox(
 
 pub async fn insert_group_message(
     pool: &SqlitePool,
+    input: GroupMessageInput,
+) -> Result<GroupMessageRecord, StoreError> {
+    let mut connection = pool.acquire().await?;
+    insert_group_message_on(&mut connection, input).await
+}
+
+/// Insert one group message on the caller's connection, so it can join a
+/// wider `BEGIN IMMEDIATE`. See [`insert_direct_message_on`].
+///
+/// # Errors
+/// [`StoreError::Invariant`] on a blank required field; [`StoreError::Sqlx`]
+/// on a store failure.
+pub async fn insert_group_message_on(
+    connection: &mut sqlx::SqliteConnection,
     input: GroupMessageInput,
 ) -> Result<GroupMessageRecord, StoreError> {
     let id = clean_opt(input.message_id).unwrap_or_else(generate_message_id);
@@ -418,10 +447,10 @@ pub async fn insert_group_message(
     .bind(&source)
     .bind(&attachments_json)
     .bind(created_at)
-    .execute(pool)
+    .execute(&mut *connection)
     .await?;
 
-    get_group_message(pool, &id)
+    get_group_message_on(&mut *connection, &id)
         .await?
         .ok_or_else(|| StoreError::Invariant(format!("group message '{id}' is missing")))
 }
@@ -529,24 +558,24 @@ pub async fn read_group_messages(
     })
 }
 
-async fn get_direct_message(
-    pool: &SqlitePool,
+async fn get_direct_message_on(
+    connection: &mut sqlx::SqliteConnection,
     id: &str,
 ) -> Result<Option<DirectMessageRecord>, StoreError> {
     let row = sqlx::query(direct_message_select_sql("WHERE id = ?").as_str())
         .bind(id)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *connection)
         .await?;
     row.map(|r| row_to_message(&r)).transpose()
 }
 
-async fn get_group_message(
-    pool: &SqlitePool,
+async fn get_group_message_on(
+    connection: &mut sqlx::SqliteConnection,
     id: &str,
 ) -> Result<Option<GroupMessageRecord>, StoreError> {
     let row = sqlx::query(group_message_select_sql("WHERE id = ?").as_str())
         .bind(id)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *connection)
         .await?;
     row.map(|row| row_to_group_message(&row)).transpose()
 }

@@ -241,11 +241,35 @@ fn ack_response() -> FakeResponse {
     FakeResponse::status(200, json!({"ok": true}).to_string())
 }
 
+/// `run_once` seeds from the daemon-owned inbound cursor before registering
+/// rooms; a gateway that has never written one gets a 404, which is a normal
+/// first-run state rather than a failure.
+fn gateway_cursor_missing_response() -> FakeResponse {
+    FakeResponse::status(
+        404,
+        json!({"error": "matrix gateway cursor not found"}).to_string(),
+    )
+}
+
+/// The advance the bridge writes after a batch of inbound events is accepted.
+fn gateway_cursor_advance_response(record_version: i64) -> FakeResponse {
+    FakeResponse::status(
+        200,
+        json!({
+            "ok": true,
+            "cursor": {"gatewayId": "matrix-bridge", "recordVersion": record_version}
+        })
+        .to_string(),
+    )
+}
+
 fn bridge_runtime_responses(seq: i64, body: &str) -> Vec<FakeResponse> {
     vec![
         native_caps_response(),
+        gateway_cursor_missing_response(),
         FakeResponse::status(200, json!({"ok": true}).to_string()),
         FakeResponse::status(201, json!({"ok": true}).to_string()),
+        gateway_cursor_advance_response(1),
         FakeResponse::status(
             200,
             json!({
@@ -369,8 +393,10 @@ fn file_matrix_transport_rejects_unmapped_target_without_writing() {
 fn matrix_bridge_once_runner_posts_files_polls_outbox_logs_sent_and_saves_cursor() {
     let server = FakeAgentdServer::new(vec![
         native_caps_response(),
+        gateway_cursor_missing_response(),
         FakeResponse::status(200, json!({"ok": true}).to_string()),
         FakeResponse::status(201, json!({"ok": true}).to_string()),
+        gateway_cursor_advance_response(1),
         FakeResponse::status(
             200,
             json!({
@@ -414,21 +440,32 @@ fn matrix_bridge_once_runner_posts_files_polls_outbox_logs_sent_and_saves_cursor
     assert_eq!(report.run.inbound_forwarded, 1);
     assert_eq!(report.run.outbound_sent, 1);
     assert_eq!(report.next_from_seq, 11);
-    assert_eq!(requests.len(), 5);
+    assert_eq!(requests.len(), 7);
     assert_eq!(requests[0].method, "GET");
     assert_eq!(requests[0].path, "/api/runtime/capabilities");
-    assert_eq!(requests[1].method, "POST");
-    assert_eq!(requests[1].path, "/api/matrix/rooms");
+    assert_eq!(requests[1].method, "GET");
+    assert_eq!(
+        requests[1].path,
+        "/api/matrix/gateway/cursor?gatewayId=matrix-bridge"
+    );
     assert_eq!(requests[2].method, "POST");
-    assert_eq!(requests[2].path, "/api/matrix/inbound");
-    assert_eq!(requests[3].method, "GET");
-    assert_eq!(requests[3].path, "/api/matrix/outbox?from_seq=0");
-    assert_eq!(requests[4].method, "POST");
-    assert_eq!(requests[4].path, "/api/matrix/outbox/ack");
-    let room_body: Value = serde_json::from_str(&requests[1].body).expect("room body");
+    assert_eq!(requests[2].path, "/api/matrix/rooms");
+    assert_eq!(requests[3].method, "POST");
+    assert_eq!(requests[3].path, "/api/matrix/inbound");
+    // The advance lands after the inbound post, never before it.
+    assert_eq!(requests[4].method, "PUT");
+    assert_eq!(requests[4].path, "/api/matrix/gateway/cursor");
+    assert_eq!(requests[5].method, "GET");
+    assert_eq!(requests[5].path, "/api/matrix/outbox?from_seq=0");
+    assert_eq!(requests[6].method, "POST");
+    assert_eq!(requests[6].path, "/api/matrix/outbox/ack");
+    let room_body: Value = serde_json::from_str(&requests[2].body).expect("room body");
     assert_eq!(room_body["agent"], "codex-worker");
-    let inbound_body: Value = serde_json::from_str(&requests[2].body).expect("inbound body");
+    let inbound_body: Value = serde_json::from_str(&requests[3].body).expect("inbound body");
     assert_eq!(inbound_body["eventId"], "$event-1");
+    let advance_body: Value = serde_json::from_str(&requests[4].body).expect("advance body");
+    assert_eq!(advance_body["gatewayId"], "matrix-bridge");
+    assert_eq!(advance_body["lastEventId"], "$event-1");
 
     let sent = std::fs::read_to_string(&sent_path).expect("sent log");
     let sent_event: Value = serde_json::from_str(sent.trim()).expect("sent event");

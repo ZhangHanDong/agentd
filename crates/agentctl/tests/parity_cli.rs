@@ -3640,3 +3640,71 @@ fn parity_capability_map_records_m3_plan_b_messaging_progress() {
         );
     }
 }
+
+#[test]
+fn parity_capability_map_records_p264_matrix_gateway_core_progress() {
+    let rows = parity_rows();
+    let matrix = rows
+        .iter()
+        .find(|row| row.capability == "matrix_bridge")
+        .expect("matrix_bridge row");
+    let roadmap = std::fs::read_to_string(roadmap_path()).expect("read roadmap");
+    let store_source =
+        std::fs::read_to_string(repo_root().join("crates/agentd-store/src/matrix_bridge_repo.rs"))
+            .expect("read matrix bridge repo source");
+    let dispatch_source = std::fs::read_to_string(
+        repo_root().join("crates/agentd-store/src/matrix_command_dispatch.rs"),
+    )
+    .expect("read matrix command dispatch source");
+
+    assert_eq!(matrix.status, "partial");
+    for expected in [
+        "p263",
+        "p264",
+        "matrix_gateway_cursors",
+        "matrix_commands",
+        "command_id",
+        "BEGIN IMMEDIATE",
+        "admin commands",
+        "Matrix media",
+        "real homeserver",
+        "service packaging",
+        "cutover",
+        "rollback",
+        "token rotation",
+        "bridge operations",
+        "dashboard/operator visibility",
+    ] {
+        assert!(
+            matrix.decision.contains(expected),
+            "matrix bridge decision should mention {expected}: {}",
+            matrix.decision
+        );
+    }
+
+    for expected in [
+        "p263",
+        "p264",
+        "durable cursor",
+        "canonical `command_id`",
+        "Matrix bridge remains partial",
+    ] {
+        assert!(
+            roadmap.contains(expected),
+            "roadmap should mention {expected}: {roadmap}"
+        );
+    }
+
+    for expected in [
+        "advance_gateway_cursor",
+        "matrix_command_id",
+        "accept_inbound_event",
+        "bind_command_run",
+    ] {
+        assert!(
+            store_source.contains(expected),
+            "matrix bridge repo should mention {expected}"
+        );
+    }
+    assert!(dispatch_source.contains("dispatch_accepted_commands"));
+}

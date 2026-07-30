@@ -714,6 +714,29 @@ p262 still does not implement admin commands (`!spy`, `!agentctl`, or
 `!ctl`), Matrix media, real homeserver evidence, service packaging, cutover,
 rollback, token rotation, bridge operations, or dashboard/operator visibility.
 
+Update 2026-07-29: p263 and p264 add the M4 Plan A Matrix gateway core. p263
+gives the gateway an agentd-owned durable cursor: migration
+`0028_matrix_gateway_cursors` holds a per-gateway Matrix sync token and last
+accepted event id under compare-and-set in the daemon database, the remote
+bridge reads and advances it through `GET`/`PUT /api/matrix/gateway/cursor`
+and never opens the daemon database, and `BridgeRuntime` seeds from it each
+iteration and advances it only after a whole inbound batch is durably
+accepted. p264 makes the command handoff transactional: migration
+`0029_matrix_commands` stores a canonical `command_id` derived from
+`(room_id, event_id)` under a partial unique room/project dedup constraint
+covering open commands, one `BEGIN IMMEDIATE` writes the processed-event row,
+the command row, the inbox message under a deterministic `command_id`-derived
+id, and the Matrix outbox event together, and the daemon maintenance tick
+creates each accepted command's run under a deterministic task-graph id and
+binds it with a compare-and-set — so restart and replay produce zero duplicate
+accepted executions. The same tick now re-advances active task graphs, closing
+the M3 carry-over in which a graph whose creation-time advance failed was never
+re-driven. Matrix bridge remains partial: p264 still does not implement trusted
+inviter or ignored-sender enforcement, appservice loop suppression, command
+normalization, attachment ingest, Robrix project/run/task/artifact views, admin
+commands, Matrix media, real homeserver evidence, service packaging, cutover,
+rollback, token rotation, bridge operations, or dashboard/operator visibility.
+
 Deliverables:
 
 - A Matrix bridge adapter, or a documented decision that Matrix remains external

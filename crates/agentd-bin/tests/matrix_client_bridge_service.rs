@@ -374,6 +374,30 @@ fn cursor_response() -> FakeResponse {
     FakeResponse::status(200, json!({"lastSeq": 0}).to_string())
 }
 
+/// `run_once` seeds from the daemon-owned inbound cursor before it registers
+/// rooms. A gateway that has never written one gets a 404, which is the normal
+/// first-run state rather than a failure.
+fn gateway_cursor_missing_response() -> FakeResponse {
+    FakeResponse::status(
+        404,
+        json!({"error": "matrix gateway cursor not found"}).to_string(),
+    )
+}
+
+/// The CAS advance the bridge writes once every event in a batch is accepted.
+/// Only issued when the batch actually carried an inbound event, so an
+/// iteration that syncs nothing must NOT be given one of these.
+fn gateway_cursor_advance_response(record_version: i64) -> FakeResponse {
+    FakeResponse::status(
+        200,
+        json!({
+            "ok": true,
+            "cursor": {"gatewayId": "matrix-bridge", "recordVersion": record_version}
+        })
+        .to_string(),
+    )
+}
+
 fn ok_response() -> FakeResponse {
     FakeResponse::status(200, json!({"ok": true}).to_string())
 }
@@ -391,13 +415,30 @@ fn bridge_runtime_responses(
     let mut responses = vec![
         native_caps_response(),
         cursor_response(),
+        gateway_cursor_missing_response(),
         ok_response(),
         FakeResponse::status(201, json!({"ok": true}).to_string()),
+        gateway_cursor_advance_response(1),
         FakeResponse::status(200, outbox_response(first_seq, first_summary).to_string()),
         ok_response(),
         native_caps_response(),
         cursor_response(),
+        // The second iteration re-seeds from the cursor the first one wrote.
+        FakeResponse::status(
+            200,
+            json!({
+                "ok": true,
+                "cursor": {
+                    "gatewayId": "matrix-bridge",
+                    "lastEventId": "$event-1",
+                    "recordVersion": 1
+                }
+            })
+            .to_string(),
+        ),
         ok_response(),
+        // No advance here: this iteration syncs no inbound event, and `run_once`
+        // only writes the cursor when a batch actually carried one.
         FakeResponse::status(200, outbox_response(second_seq, second_summary).to_string()),
     ];
     if second_iteration_acks {
@@ -534,28 +575,53 @@ fn agentd_bin_matrix_client_bridge_service_runs_bounded_iterations_with_fake_cli
         requests[1].path,
         "/api/matrix/outbox/cursor?bridgeId=matrix-bridge"
     );
-    assert_eq!(requests[2].method, "POST");
-    assert_eq!(requests[2].path, "/api/matrix/rooms");
-    assert_eq!(requests[3].method, "POST");
-    assert_eq!(requests[3].path, "/api/matrix/inbound");
-    assert!(requests[3].body.contains("$event-1"));
-    assert_eq!(requests[4].method, "GET");
-    assert_eq!(requests[4].path, "/api/matrix/outbox?from_seq=0");
-    assert_eq!(requests[5].method, "POST");
-    assert_eq!(requests[5].path, "/api/matrix/outbox/ack");
-    assert_eq!(requests[6].method, "GET");
-    assert_eq!(requests[6].path, "/api/runtime/capabilities");
-    assert_eq!(requests[7].method, "GET");
+    assert_eq!(requests[2].method, "GET");
     assert_eq!(
-        requests[7].path,
+        requests[2].path,
+        "/api/matrix/gateway/cursor?gatewayId=matrix-bridge"
+    );
+    assert_eq!(requests[3].method, "POST");
+    assert_eq!(requests[3].path, "/api/matrix/rooms");
+    assert_eq!(requests[4].method, "POST");
+    assert_eq!(requests[4].path, "/api/matrix/inbound");
+    assert!(requests[4].body.contains("$event-1"));
+    // The advance lands after the inbound event is accepted, never before.
+    assert_eq!(requests[5].method, "PUT");
+    assert_eq!(requests[5].path, "/api/matrix/gateway/cursor");
+    assert!(requests[5].body.contains("$event-1"));
+    assert_eq!(requests[6].method, "GET");
+    assert_eq!(requests[6].path, "/api/matrix/outbox?from_seq=0");
+    assert_eq!(requests[7].method, "POST");
+    assert_eq!(requests[7].path, "/api/matrix/outbox/ack");
+    assert_eq!(requests[8].method, "GET");
+    assert_eq!(requests[8].path, "/api/runtime/capabilities");
+    assert_eq!(requests[9].method, "GET");
+    assert_eq!(
+        requests[9].path,
         "/api/matrix/outbox/cursor?bridgeId=matrix-bridge"
     );
-    assert_eq!(requests[8].method, "POST");
-    assert_eq!(requests[8].path, "/api/matrix/rooms");
-    assert_eq!(requests[9].method, "GET");
-    assert_eq!(requests[9].path, "/api/matrix/outbox?from_seq=21");
-    assert_eq!(requests[10].method, "POST");
-    assert_eq!(requests[10].path, "/api/matrix/outbox/ack");
+    assert_eq!(requests[10].method, "GET");
+    assert_eq!(
+        requests[10].path,
+        "/api/matrix/gateway/cursor?gatewayId=matrix-bridge"
+    );
+    assert_eq!(requests[11].method, "POST");
+    assert_eq!(requests[11].path, "/api/matrix/rooms");
+    assert_eq!(requests[12].method, "GET");
+    assert_eq!(requests[12].path, "/api/matrix/outbox?from_seq=21");
+    assert_eq!(requests[13].method, "POST");
+    assert_eq!(requests[13].path, "/api/matrix/outbox/ack");
+    // An iteration that syncs nothing must not touch the gateway cursor: a
+    // write here would move the daemon's resume point past undelivered events.
+    assert_eq!(
+        requests
+            .iter()
+            .filter(
+                |request| request.method == "PUT" && request.path == "/api/matrix/gateway/cursor"
+            )
+            .count(),
+        1
+    );
     assert_eq!(read_state(&state_path)["nextFromSeq"], 22);
 }
 
@@ -564,6 +630,9 @@ fn agentd_bin_matrix_client_bridge_service_reports_bot_command_reply_counts() {
     let server = FakeAgentdServer::new(vec![
         native_caps_response(),
         cursor_response(),
+        // A `!status` bot command is answered while the sync is being drained,
+        // which is before `run_once` seeds the gateway cursor — unlike the
+        // plain-inbound path, where the seed is the first call of the run.
         FakeResponse::status(
             200,
             json!([
@@ -587,6 +656,7 @@ fn agentd_bin_matrix_client_bridge_service_reports_bot_command_reply_counts() {
             ])
             .to_string(),
         ),
+        gateway_cursor_missing_response(),
         FakeResponse::status(200, json!({"ok": true}).to_string()),
         FakeResponse::status(200, json!({"events": []}).to_string()),
     ]);
@@ -622,14 +692,25 @@ fn agentd_bin_matrix_client_bridge_service_reports_bot_command_reply_counts() {
     assert_eq!(requests[2].path, "/api/agents");
     assert_eq!(requests[3].method, "GET");
     assert_eq!(requests[3].path, "/api/groups");
-    assert_eq!(requests[4].method, "POST");
-    assert_eq!(requests[4].path, "/api/matrix/rooms");
-    assert_eq!(requests[5].method, "GET");
-    assert_eq!(requests[5].path, "/api/matrix/outbox?from_seq=0");
+    assert_eq!(requests[4].method, "GET");
+    assert_eq!(
+        requests[4].path,
+        "/api/matrix/gateway/cursor?gatewayId=matrix-bridge"
+    );
+    assert_eq!(requests[5].method, "POST");
+    assert_eq!(requests[5].path, "/api/matrix/rooms");
+    assert_eq!(requests[6].method, "GET");
+    assert_eq!(requests[6].path, "/api/matrix/outbox?from_seq=0");
     assert!(
         !requests
             .iter()
             .any(|request| request.path == "/api/matrix/inbound")
+    );
+    // A bot command forwards no inbound event, so the cursor must stay put.
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.method == "PUT" && request.path == "/api/matrix/gateway/cursor")
     );
     assert_eq!(read_state(&state_path)["nextFromSeq"], 0);
 }
